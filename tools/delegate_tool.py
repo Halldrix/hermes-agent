@@ -3128,6 +3128,8 @@ def delegate_task(
     role: Optional[str] = None,
     background: Optional[bool] = None,
     output_schema: Optional[Dict[str, Any]] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -3206,6 +3208,21 @@ def delegate_task(
         creds = _resolve_delegation_credentials(cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
+
+    # Per-call model/provider override (top-level). A per-task override in
+    # tasks[] beats this; this beats delegation.model, which beats inheritance
+    # from the parent. Resolved eagerly so an invalid value fails before any
+    # child is built — never a silent fallback to the parent model.
+    if model:
+        try:
+            creds = _resolve_per_call_model(model, provider, cfg, parent_agent)
+        except ValueError as exc:
+            return tool_error(str(exc))
+    elif provider:
+        return tool_error(
+            "delegate_task: 'provider' requires 'model' on the same call — a "
+            "provider without a model cannot be resolved unambiguously."
+        )
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -3321,6 +3338,7 @@ def delegate_task(
     # toolset resolution never leaks into the parent (shared with the plugin
     # subagent-lifecycle API).
     children = []
+    child_creds: List[dict] = []
     for i, t in enumerate(task_list):
         # Per-task role beats top-level; normalise again so unknown
         # per-task values warn and degrade to leaf uniformly.
@@ -3333,6 +3351,25 @@ def delegate_task(
             from tools.delegation_output_schema import append_output_contract
 
             _child_context = append_output_contract(_child_context, _task_schema)
+        # Per-task model/provider beats the top-level override, which beats
+        # delegation.model. Resolved inside the loop so a batch can mix models
+        # (e.g. mechanical extraction on a small model, adversarial review on a
+        # strong one) within a single call.
+        t_creds = creds
+        t_model = t.get("model")
+        if t_model:
+            try:
+                t_creds = _resolve_per_call_model(
+                    str(t_model), t.get("provider"), cfg, parent_agent
+                )
+            except ValueError as exc:
+                return tool_error(f"Task {i}: {exc}")
+        elif t.get("provider"):
+            return tool_error(
+                f"Task {i}: 'provider' requires 'model' on the same task — a "
+                f"provider without a model cannot be resolved unambiguously."
+            )
+        child_creds.append(t_creds)
         child = _build_child_preserving_parent_tools(
             task_index=i,
             goal=t["goal"],
@@ -3340,18 +3377,18 @@ def delegate_task(
             # Subagents always inherit the parent's toolsets; the model
             # cannot choose or narrow them (no model-facing toolsets arg).
             toolsets=None,
-            model=creds["model"],
+            model=t_creds["model"],
             max_iterations=effective_max_iter,
             task_count=n_tasks,
             parent_agent=parent_agent,
-            override_provider=creds["provider"],
-            override_base_url=creds["base_url"],
-            override_api_key=creds["api_key"],
-            override_api_mode=creds["api_mode"],
-            override_request_overrides=creds.get("request_overrides"),
-            override_max_tokens=creds.get("max_output_tokens"),
-            override_acp_command=creds.get("command"),
-            override_acp_args=creds.get("args"),
+            override_provider=t_creds["provider"],
+            override_base_url=t_creds["base_url"],
+            override_api_key=t_creds["api_key"],
+            override_api_mode=t_creds["api_mode"],
+            override_request_overrides=t_creds.get("request_overrides"),
+            override_max_tokens=t_creds.get("max_output_tokens"),
+            override_acp_command=t_creds.get("command"),
+            override_acp_args=t_creds.get("args"),
             role=effective_role,
         )
         # Attach the validated schema for the completion-side validation
@@ -3728,6 +3765,20 @@ def delegate_task(
             return tuple(parts), in_tool
 
         _goals = [t["goal"] for t in task_list]
+        # Report the resolved model. When a batch mixes per-task models, a
+        # single value would be misleading, so summarise the distinct set — the
+        # completion block is the only place the caller learns what actually ran.
+        _distinct_models = []
+        for _c in child_creds:
+            _m = _c.get("model")
+            if _m and _m not in _distinct_models:
+                _distinct_models.append(_m)
+        if len(_distinct_models) == 1:
+            _batch_model = _distinct_models[0]
+        elif _distinct_models:
+            _batch_model = ", ".join(_distinct_models)
+        else:
+            _batch_model = creds["model"]
         dispatch = dispatch_async_delegation_batch(
             goals=_goals,
             context=context,
@@ -3735,7 +3786,7 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=_batch_model,
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -3887,6 +3938,199 @@ def _resolve_child_credential_pool(
             exc,
         )
     return None
+
+
+def _resolve_per_call_model(
+    raw_model: str,
+    raw_provider: Optional[str],
+    cfg: dict,
+    parent_agent,
+) -> dict:
+    """Resolve a per-call ``model`` (and optional ``provider``) override.
+
+    Accepts two forms for *raw_model*:
+
+    1. **Alias** — ``"sonnet"``, ``"opus"``, ``"gpt5"``, … resolved against the
+       effective provider's catalog via :func:`hermes_cli.model_switch.resolve_alias`.
+       Keeps calls portable: the same alias maps to whatever the operator's
+       provider actually offers.
+    2. **Fully qualified model id / inference URI** — passed through verbatim.
+       Required for Bedrock inference profiles
+       (``arn:aws:bedrock:<region>:<acct>:inference-profile/…``), which are
+       account- and region-specific and cannot be expressed as an alias.
+
+    The override is layered on top of ``delegation.*`` so every other credential
+    field (base_url, api_key, api_mode, request_overrides) keeps resolving
+    through the existing code path — this function only swaps model/provider
+    into a copy of *cfg* and re-runs the normal resolver.
+
+    Enforces the operator allowlist ``delegation.allowed_models`` when set, so
+    model choice stays under operator control even though the *call* selects it.
+
+    Raises ValueError with an actionable message; never silently falls back to
+    the parent model. A silent fallback is worse than an error here: the caller
+    would believe an expensive/strong model ran when it did not.
+    """
+    requested = str(raw_model or "").strip()
+    if not requested:
+        raise ValueError("delegate_task: 'model' was provided but empty.")
+
+    # Provider that the alias catalog should be searched against: explicit
+    # per-call provider > delegation.provider > parent's provider.
+    effective_provider = (
+        str(raw_provider or "").strip()
+        or str(cfg.get("provider") or "").strip()
+        or str(getattr(parent_agent, "provider", "") or "").strip()
+    )
+
+    resolved_model = requested
+    resolved_provider = str(raw_provider or "").strip() or None
+    alias_used: Optional[str] = None
+
+    # A value containing ':' or '/' is treated as an explicit id/URI, not an
+    # alias — this covers Bedrock ARNs, OpenRouter 'vendor/model' ids and
+    # LiteLLM-style prefixes. Bare words go through alias resolution.
+    looks_qualified = (":" in requested) or ("/" in requested)
+
+    if not looks_qualified:
+        try:
+            from hermes_cli.model_switch import MODEL_ALIASES, resolve_alias
+
+            hit = resolve_alias(requested, effective_provider) if effective_provider else None
+            if hit is not None:
+                alias_provider, alias_model, alias_name = hit
+                resolved_model = alias_model
+                alias_used = alias_name
+                # Only adopt the alias' provider when the caller did not pin one.
+                if resolved_provider is None and alias_provider:
+                    resolved_provider = alias_provider
+            elif requested.lower() in MODEL_ALIASES:
+                # Known alias, but the effective provider offers no match.
+                raise ValueError(
+                    f"delegate_task: model alias '{requested}' is known but no matching "
+                    f"model is available on provider '{effective_provider or '(unset)'}'. "
+                    f"Pass a fully qualified model id instead, or set 'provider' on the "
+                    f"same call."
+                )
+            else:
+                known = ", ".join(sorted(MODEL_ALIASES)[:12])
+                raise ValueError(
+                    f"delegate_task: unknown model '{requested}'. Pass a known alias "
+                    f"(e.g. {known}) or a fully qualified model id / inference URI "
+                    f"(containing '/' or ':')."
+                )
+        except ImportError:
+            # Alias machinery unavailable — treat the value as a literal id
+            # rather than failing the delegation outright.
+            logger.debug(
+                "delegate_task: model alias resolution unavailable; using %r verbatim",
+                requested,
+            )
+
+    # Operator allowlist. Empty/unset means "no restriction" so existing
+    # configs keep working unchanged.
+    allowed = cfg.get("allowed_models")
+    if allowed:
+        if isinstance(allowed, str):
+            allowed_list = [allowed]
+        else:
+            try:
+                allowed_list = [str(x) for x in allowed]
+            except TypeError:
+                allowed_list = []
+        norm = {a.strip().lower() for a in allowed_list if str(a).strip()}
+        candidates = {resolved_model.strip().lower(), requested.lower()}
+        if alias_used:
+            candidates.add(alias_used.lower())
+        if norm and not (candidates & norm):
+            raise ValueError(
+                f"delegate_task: model '{requested}' is not permitted. "
+                f"delegation.allowed_models restricts subagents to: "
+                f"{', '.join(sorted(norm))}."
+            )
+
+    # Escalation gate: downgrading is free, upgrading needs explicit permission.
+    #
+    # Rationale: the asymmetry is the whole point. Routing a mechanical subtask
+    # to a cheaper/weaker model can waste a little quality but cannot blow a
+    # budget or leak work to a stronger-but-costlier tier. Routing to a stronger
+    # model can do both, and the caller making that choice is a language model,
+    # not the operator. So: moving DOWN the ladder is always allowed; moving UP
+    # requires the operator to have opted in.
+    #
+    # Hermes cannot infer the ladder itself — there is no reliable cross-provider
+    # cost/tier metadata in-tree, and inferring rank from model names would be
+    # guesswork that breaks on every new release. The operator therefore declares
+    # it explicitly:
+    #
+    #     delegation:
+    #       model_tiers: [haiku, sonnet, opus]   # cheapest → strongest
+    #       allow_escalation: false              # default when tiers are set
+    #
+    # With no ``model_tiers`` configured there is no ladder, so no gate — fully
+    # backward compatible.
+    tiers_raw = cfg.get("model_tiers")
+    if tiers_raw and not is_truthy_value(cfg.get("allow_escalation")):
+        if isinstance(tiers_raw, str):
+            tiers = [tiers_raw]
+        else:
+            try:
+                tiers = [str(x) for x in tiers_raw]
+            except TypeError:
+                tiers = []
+        ladder = [t.strip().lower() for t in tiers if str(t).strip()]
+
+        def _rank(*names: Optional[str]) -> Optional[int]:
+            """Best (highest) ladder index matching any of *names*.
+
+            Matches an exact ladder entry or a ladder entry contained in the
+            model id, so ``opus`` ranks an ARN ending in
+            ``eu.anthropic.claude-opus-5``.
+            """
+            best: Optional[int] = None
+            for name in names:
+                if not name:
+                    continue
+                low = str(name).strip().lower()
+                for idx, tier in enumerate(ladder):
+                    if low == tier or tier in low:
+                        if best is None or idx > best:
+                            best = idx
+            return best
+
+        # Baseline the request is measured against: the configured delegation
+        # model if present, else the parent's model.
+        baseline_rank = _rank(
+            str(cfg.get("model") or "").strip() or None,
+            getattr(parent_agent, "model", None),
+        )
+        target_rank = _rank(resolved_model, requested, alias_used)
+
+        if (
+            baseline_rank is not None
+            and target_rank is not None
+            and target_rank > baseline_rank
+        ):
+            raise ValueError(
+                f"delegate_task: model '{requested}' is an escalation "
+                f"({ladder[baseline_rank]} -> {ladder[target_rank]}) and "
+                f"delegation.allow_escalation is not enabled. Downgrades are "
+                f"always permitted; to allow subagents to select a stronger "
+                f"model, set delegation.allow_escalation: true (optionally "
+                f"narrowing delegation.allowed_models)."
+            )
+
+    # Layer the override onto a copy of the delegation config and reuse the
+    # normal resolver so base_url/api_key/api_mode keep their semantics.
+    merged = dict(cfg)
+    merged["model"] = resolved_model
+    if resolved_provider:
+        merged["provider"] = resolved_provider
+
+    creds = _resolve_delegation_credentials(merged, parent_agent)
+    creds["_requested_model"] = requested
+    creds["_alias_used"] = alias_used
+    return creds
 
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
@@ -4245,6 +4489,29 @@ DELEGATE_TASK_SCHEMA = {
                                 "require only fields you will actually read."
                             ),
                         },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override. Beats the top-level 'model', "
+                                "which beats delegation.model in config.yaml. Accepts "
+                                "either a short alias ('sonnet', 'opus', 'haiku', "
+                                "'gpt5') resolved against the active provider's "
+                                "catalog, or a fully qualified model id / inference "
+                                "URI (anything containing '/' or ':', e.g. an AWS "
+                                "Bedrock inference-profile ARN). Lets one batch mix "
+                                "models: a cheap model for mechanical work, a strong "
+                                "one for reasoning-heavy work. Invalid values fail the "
+                                "call with an error instead of silently falling back."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override. Requires 'model' on the "
+                                "same task. Only needed to route a task to a different "
+                                "provider than delegation.provider."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -4276,6 +4543,32 @@ DELEGATE_TASK_SCHEMA = {
                     "the work finishes; just continue working in the meantime. "
                     "Setting this has no effect; the parameter remains only for "
                     "backward compatibility."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model for the subagent(s) of THIS call. Overrides "
+                    "delegation.model from config.yaml; a per-task 'model' in "
+                    "tasks[] overrides this. Accepts either a short alias "
+                    "('sonnet', 'opus', 'haiku', 'gpt5') resolved against the "
+                    "active provider's catalog, or a fully qualified model id / "
+                    "inference URI (anything containing '/' or ':', e.g. an AWS "
+                    "Bedrock inference-profile ARN). Use a cheap model for "
+                    "mechanical, well-specified work and a strong one for "
+                    "reasoning-heavy work. Omit to inherit the configured or "
+                    "parent model. Invalid values fail the call with an error "
+                    "listing valid aliases — there is no silent fallback. The "
+                    "operator can restrict the permitted set via "
+                    "delegation.allowed_models."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Provider for the subagent(s) of THIS call. Requires 'model' "
+                    "on the same call. Only needed to route to a different "
+                    "provider than delegation.provider; omit otherwise."
                 ),
             },
         },
@@ -4338,7 +4631,9 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
-        output_schema=args.get("output_schema"),
+output_schema=args.get("output_schema"),
+        model=args.get("model"),
+        provider=args.get("provider"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
