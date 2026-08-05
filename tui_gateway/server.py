@@ -3779,7 +3779,10 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         if hasattr(db, "update_session_meta"):
             db.update_session_meta(session_key, json.dumps(model_config), model or None)
         elif model and hasattr(db, "update_session_model"):
-            db.update_session_model(session_key, model)
+            db.update_session_model(
+                session_key, model,
+                provider=str(getattr(agent, "provider", "") or "").strip() or None,
+            )
     except Exception:
         logger.debug("failed to persist live session runtime", exc_info=True)
 

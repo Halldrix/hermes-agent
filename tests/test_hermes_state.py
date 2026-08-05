@@ -316,6 +316,84 @@ class TestSessionLifecycle:
         assert "browser_model_lock" not in model_config
         assert model_config["_branched_from"] == "parent-session"
 
+    def test_update_session_model_with_provider_persists_to_blob(self, db):
+        """When provider is passed, it must land in model_config so the
+        session resumes on the correct endpoint (GitHub #79536)."""
+        db.create_session(
+            session_id="cross-provider",
+            source="cli",
+            model="z-ai/glm-5.2",
+            model_config={
+                "max_iterations": 150,
+                "reasoning_config": {"enabled": True, "effort": "medium"},
+            },
+        )
+
+        # Simulate a /model switch to a model on a DIFFERENT provider
+        db.update_session_model(
+            "cross-provider", "deepseek-v4-flash-free",
+            provider="custom:opencode-zen",
+        )
+
+        session = db.get_session("cross-provider")
+        model_config = json.loads(session["model_config"])
+
+        # Model column is updated
+        assert session["model"] == "deepseek-v4-flash-free"
+        # Provider is persisted in the blob — the core of the fix
+        assert model_config["provider"] == "custom:opencode-zen"
+        assert model_config["model"] == "deepseek-v4-flash-free"
+        # Existing keys are preserved (not clobbered)
+        assert model_config["max_iterations"] == 150
+        assert model_config["reasoning_config"]["enabled"] is True
+
+    def test_update_session_model_without_provider_leaves_blob_unchanged(self, db):
+        """Calling without provider (legacy callers) must behave as before —
+        no model/provider keys added to the blob."""
+        db.create_session(
+            session_id="legacy",
+            source="cli",
+            model="z-ai/glm-5.2",
+            model_config={"max_iterations": 150},
+        )
+
+        db.update_session_model("legacy", "z-ai/glm-5.3")
+
+        session = db.get_session("legacy")
+        model_config = json.loads(session["model_config"])
+        assert session["model"] == "z-ai/glm-5.3"
+        assert "provider" not in model_config
+        assert "model" not in model_config
+        assert model_config["max_iterations"] == 150
+
+    def test_update_session_model_with_provider_strips_browser_lock_and_keeps_lineage(self, db):
+        """The browser_model_lock strip + lineage preservation must still work
+        when provider is passed."""
+        db.create_session(
+            session_id="lock-and-switch",
+            source="hermes_browser",
+            model="x-ai/grok-4.5",
+            model_config={
+                "_branched_from": "parent",
+                "browser_model_lock": {
+                    "provider": "nous", "model": "x-ai/grok-4.5", "confirmed": True,
+                },
+            },
+        )
+
+        db.update_session_model(
+            "lock-and-switch", "deepseek-v4-flash-free",
+            provider="custom:opencode-zen",
+        )
+
+        session = db.get_session("lock-and-switch")
+        model_config = json.loads(session["model_config"])
+        assert session["model"] == "deepseek-v4-flash-free"
+        assert "browser_model_lock" not in model_config
+        assert model_config["_branched_from"] == "parent"
+        assert model_config["provider"] == "custom:opencode-zen"
+        assert model_config["model"] == "deepseek-v4-flash-free"
+
 
 
 
