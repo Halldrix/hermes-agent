@@ -39,6 +39,41 @@ from hermes_cli.dashboard_auth.cookies import (
 )
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
 
+# API paths that may authenticate via a ``?token=`` query param in addition to
+# cookies/bearer. Mirrors ``web_server._QUERY_TOKEN_API_PATHS`` and is resolved
+# lazily at request time to avoid an import cycle (web_server imports from
+# dashboard_auth).
+_QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
+
+
+def _has_valid_query_token(request: Request, path: str, token: str) -> bool:
+    """Check a ``?token=`` query param against known static secrets.
+
+    In gated mode the desktop app authenticates REST via headers
+    (``X-Hermes-Session-Token`` / ``Authorization``), but ``<video>``
+    and ``<audio>`` elements can only fetch via their ``src`` URL — no
+    custom headers. The URL carries ``?token=conn.token`` which is the
+    ``API_SERVER_KEY`` from the gateway's ``.env``. Accept that key
+    here so inline media playback works behind the gate. The
+    ``_SESSION_TOKEN`` (loopback mode) is also accepted so the same
+    code path serves both binds.
+    """
+    if path not in _QUERY_TOKEN_API_PATHS and not path.startswith("/api/files/media/"):
+        return False
+    if not token:
+        return False
+    import hmac
+    import os
+    # Session token (loopback mode — injected into the SPA)
+    from hermes_cli.web_server import _SESSION_TOKEN
+    if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        return True
+    # API server key (gated mode — the desktop app's conn.token)
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if api_key and hmac.compare_digest(token.encode(), api_key.encode()):
+        return True
+    return False
+
 _log = logging.getLogger(__name__)
 
 # Prefixes that bypass the auth gate. Match via ``path == prefix`` or
@@ -320,6 +355,21 @@ def _verify_bearer(request: Request, *, access_token: str):
     return None
 
 
+def _api_server_key_matches(token: str) -> bool:
+    """True if *token* equals the static ``API_SERVER_KEY`` from the env.
+
+    Used in both the Bearer fast-path and the query-token fast-path inside
+    ``gated_auth_middleware`` so the desktop app and public tunnels can
+    authenticate without consulting OAuth providers.  Comparison is
+    constant-time via ``hmac.compare_digest`` to avoid timing side-channels.
+    """
+    import hmac, os
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if not api_key:
+        return False
+    return hmac.compare_digest(token.encode(), api_key.encode())
+
+
 async def gated_auth_middleware(
     request: Request,
     call_next: Callable[[Request], Awaitable[Response]],
@@ -343,8 +393,40 @@ async def gated_auth_middleware(
     if _path_is_public(path):
         return await call_next(request)
 
+    # Query-token path: the desktop app's <video>/<audio> elements fetch
+    # via ``<tag src="…?token=…">`` and cannot set Authorization headers.
+    # In loopback mode, ``auth_middleware`` checks this query param against
+    # ``_SESSION_TOKEN``. In gated mode we must honour it here too, otherwise
+    # inline media playback from the desktop app 401s. The set of
+    # token-authable query paths is intentionally narrow (same frozenset
+    # as ``web_server._QUERY_TOKEN_API_PATHS``).
+    query_token = request.query_params.get("token", "")
+    if query_token and (path in _QUERY_TOKEN_API_PATHS or path.startswith("/api/files/media/")):
+        # Fast path: accept the static API_SERVER_KEY (and _SESSION_TOKEN)
+        # without consulting OAuth providers.  This lets the desktop app and
+        # the public Cloudflare Tunnel authenticate media URLs with the same
+        # long-lived key that's already used for ``?token=`` download links.
+        if _has_valid_query_token(request, path, query_token):
+            return await call_next(request)
+        # OAuth provider path: the query token may be a provider-minted
+        # access token (same one the desktop uses for Bearer auth). Run it
+        # through the identical ``_verify_bearer`` provider stack so that
+        # gated OAuth deployments also work for inline media playback.
+        # Mirrors PR #80605 but broadened to ``/api/files/media/`` paths.
+        try:
+            query_session = _verify_bearer(request, access_token=query_token)
+        except ProviderError as e:
+            return JSONResponse(
+                {"detail": f"Auth provider {str(e)!r} unreachable"},
+                status_code=503,
+            )
+        if query_session is not None:
+            request.state.session = query_session
+            return await call_next(request)
+        return _unauth_response(request, reason="invalid_or_expired_session")
+
     # RFC 8252 native-app bearer path (goal: no session cookies). The desktop
-    # authenticates REST with ``Authorization: Bearer <access_token>`` — the
+    # authenticates REST with ``Authorization: Bearer *** — the
     # SAME provider-minted access token the cookie flow stores in
     # ``hermes_session_at``. Verify it with the identical ``verify_session``
     # provider stack and attach the Session; on success we're done, with no
@@ -355,6 +437,12 @@ async def gated_auth_middleware(
     # below must not run for a bearer caller.
     bearer = _extract_bearer(request)
     if bearer:
+        # Fast path: accept the static API_SERVER_KEY without consulting
+        # OAuth providers.  This lets the desktop app (and the public
+        # Cloudflare Tunnel) authenticate REST routes with the same key
+        # that's already used for ``?token=`` media URLs.
+        if _api_server_key_matches(bearer):
+            return await call_next(request)
         try:
             bearer_session = _verify_bearer(request, access_token=bearer)
         except ProviderError as e:

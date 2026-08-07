@@ -109,10 +109,18 @@ export function mediaExternalUrl(path: string): string {
   if (isRemoteGateway()) {
     const conn = $connection.get()
 
-    if (conn?.baseUrl && conn.token) {
+    if (conn?.baseUrl) {
       const file = encodeURIComponent(filePathFromMediaPath(path))
 
-      return `${conn.baseUrl}/api/files/download?path=${file}&token=${encodeURIComponent(conn.token)}`
+      // Token-auth: append the query token for loopback-compatible auth.
+      // OAuth/basic_auth-cookie: omit the token; Electron's net stack
+      // attaches the session cookies from the authenticated partition
+      // automatically when the <video>/<audio> element fetches the URL.
+      if (conn.token) {
+        return `${conn.baseUrl}/api/files/download?path=${file}&token=${encodeURIComponent(conn.token)}`
+      }
+
+      return `${conn.baseUrl}/api/files/download?path=${file}`
     }
   }
 

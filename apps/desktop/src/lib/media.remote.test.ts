@@ -72,9 +72,11 @@ describe('mediaExternalUrl', () => {
     )
   })
 
-  it('falls back to file:// when remote connection lacks a token', () => {
+  it('builds an unauthenticated download URL when remote connection lacks a token', () => {
     $connection.set({ mode: 'remote', baseUrl: 'https://gw' } as never)
-    expect(mediaExternalUrl('/tmp/a.png')).toBe('file:///tmp/a.png')
+    expect(mediaExternalUrl('/tmp/a.png')).toBe(
+      'https://gw/api/files/download?path=%2Ftmp%2Fa.png'
+    )
   })
 })
 

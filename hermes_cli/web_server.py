@@ -106,7 +106,7 @@ try:
         WebSocket, WebSocketDisconnect,
     )
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, SecretStr, field_validator
     from starlette.concurrency import run_in_threadpool
@@ -122,7 +122,7 @@ except ImportError:
             WebSocket, WebSocketDisconnect,
         )
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel, SecretStr, field_validator
         from starlette.concurrency import run_in_threadpool
@@ -402,6 +402,10 @@ def _has_valid_session_token(request: Request) -> bool:
     already use ``Authorization`` (for example Caddy ``basic_auth``). We still
     accept the legacy Bearer path for backward compatibility with older
     dashboard bundles.
+
+    In gated mode, also accepts the ``API_SERVER_KEY`` as a valid Bearer token
+    so the desktop app and public tunnel clients can authenticate REST routes
+    without a separate session cookie.
     """
     session_header = request.headers.get(_SESSION_HEADER_NAME, "")
     if session_header and hmac.compare_digest(
@@ -412,7 +416,17 @@ def _has_valid_session_token(request: Request) -> bool:
 
     auth = request.headers.get("authorization", "")
     expected = f"Bearer {_SESSION_TOKEN}"
-    return hmac.compare_digest(auth.encode(), expected.encode())
+    if hmac.compare_digest(auth.encode(), expected.encode()):
+        return True
+
+    # Also accept API_SERVER_KEY as Bearer token for gated/tunnel access
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if api_key:
+        expected_api = f"Bearer {api_key}"
+        if hmac.compare_digest(auth.encode(), expected_api.encode()):
+            return True
+
+    return False
 
 
 # Routes that may also authenticate via a ``?token=`` query param, for download
@@ -422,10 +436,19 @@ _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
-    if path not in _QUERY_TOKEN_API_PATHS:
+    if path not in _QUERY_TOKEN_API_PATHS and not path.startswith("/api/files/media/"):
         return False
     token = request.query_params.get("token", "")
-    return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+    if not token:
+        return False
+    if hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        return True
+    # Also accept the API_SERVER_KEY for gated gateways where the desktop
+    # app authenticates via cookies but needs a query token for media URLs.
+    api_key = os.environ.get("API_SERVER_KEY", "")
+    if api_key and hmac.compare_digest(token.encode(), api_key.encode()):
+        return True
+    return False
 
 
 def _require_token(request: Request) -> None:
@@ -2445,7 +2468,51 @@ async def download_managed_file(request: Request, path: str):
         path=str(target),
         media_type=mime_type,
         filename=target.name,
-        content_disposition_type="attachment",
+        content_disposition_type="inline" if mime_type.startswith(("video/", "audio/", "image/")) else "attachment",
+    )
+
+
+@app.get("/api/files/media/{filename:path}")
+async def download_media_file(request: Request, filename: str, path: str):
+    """Serve a media file with the filename in the URL path (preserves
+    the file extension for client-side MIME detection).
+
+    The desktop app's ``mediaKind()`` extracts the extension from the URL
+    path to decide whether to render a ``<video>``, ``<audio>`` or ``<img>``
+    element. The ``/api/files/download?path=...`` endpoint strips the query
+    string before extracting the extension, so ``/api/files/download?path=foo.mp4``
+    appears extensionless and the desktop treats it as a generic file.
+
+    This endpoint accepts the *real* path as a query param (``?path=...``)
+    but the URL ends with the filename (and its extension), so
+    ``mediaKind('http://gw/api/files/media/video.mp4?path=/real/path.mp4')``
+    correctly returns ``'video'``.
+
+    Auth: same as ``/api/files/download`` — accepts cookie, Bearer, and
+    ``?token=`` query auth.
+    """
+    policy, target, _display_path = _resolve_managed_path(path, request)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+    if _is_sensitive_path(target):
+        raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
+
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
+    if size > _MANAGED_FILE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large")
+
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+
+    return FileResponse(
+        path=str(target),
+        media_type=mime_type,
+        filename=target.name,
+        content_disposition_type="inline" if mime_type.startswith(("video/", "audio/", "image/")) else "attachment",
     )
 
 
