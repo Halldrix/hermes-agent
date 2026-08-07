@@ -1427,6 +1427,13 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             except OSError:
                 continue
             manifest[path[prefix_len:]] = [st.st_mtime_ns, st.st_size]
+    # ── VaG: include .usage.json so promotion (COLD→WARM→HOT) invalidates cache ──
+    usage_path = os.path.join(skills_dir_str, ".usage.json")
+    try:
+        st = os.stat(usage_path)
+        manifest[".usage.json"] = [st.st_mtime_ns, st.st_size]
+    except OSError:
+        pass
     return manifest
 
 
@@ -1525,6 +1532,21 @@ def _build_snapshot_entry(
 # =========================================================================
 # Skills index
 # =========================================================================
+
+
+def _is_gate_cold(skill_name: str, frontmatter_name: str) -> bool:
+    """Check if a skill is in the COLD gate tier (invisible to system prompt).
+
+    Returns False (not cold = visible) when skill_usage is unavailable or
+    gating is disabled — erring on the side of showing the skill, matching
+    the existing backward-compat behavior where all skills are HOT by default.
+    """
+    try:
+        from tools.skill_usage import is_gate_cold as _is_cold
+        return _is_cold(skill_name) or _is_cold(frontmatter_name)
+    except Exception:
+        return False
+
 
 def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
     """Read a SKILL.md once and return platform compatibility, frontmatter, and description.
@@ -1678,6 +1700,11 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
+            # ── COLD gate filter (snapshot path) ──────────────────────────
+            skill_name = entry.get("skill_name") or ""
+            frontmatter_name = entry.get("frontmatter_name") or skill_name
+            if _is_gate_cold(skill_name, frontmatter_name):
+                continue
             visible_entries.append(entry)
         category_descriptions = {
             str(k): str(v)
@@ -1699,6 +1726,10 @@ def build_skills_system_prompt(
                 available_tools,
                 available_toolsets,
             ):
+                continue
+            # ── COLD gate filter (filesystem scan path) ──────────────────
+            fm_entry_name = str(frontmatter.get("name", ""))
+            if _is_gate_cold(skill_name, fm_entry_name):
                 continue
             visible_entries.append(entry)
 

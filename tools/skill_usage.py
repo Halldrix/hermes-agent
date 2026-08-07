@@ -55,6 +55,18 @@ STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
+# ── Pre-commit gating tiers (VaG — Verifier-as-Gatekeeper) ─────────────────
+# Inspired by arXiv:2608.05810 — "When Self-Evolution Backfires".
+# Agent-created skills start COLD (invisible to the agent's system prompt).
+# They must pass Gate 1 (schema + semantic + behavioral checks) to reach WARM,
+# then Gate 2 (marginal-gain selection) to reach HOT.
+# Non-agent-created skills (bundled, hub, manually authored) are always HOT —
+# gating only applies to skills distilled by the background-review fork.
+GATE_COLD = "cold"
+GATE_WARM = "warm"
+GATE_HOT = "hot"
+_GATE_TIERS = {GATE_COLD, GATE_WARM, GATE_HOT}
+
 # Load-bearing bundled built-ins the curator must NEVER archive or consolidate,
 # regardless of ``curator.prune_builtins``, pin state, or LLM judgment. These
 # back advertised UX paths (e.g. ``plan`` powers the ``/plan`` slash-command
@@ -644,6 +656,7 @@ def adopt_skill(skill_name: str) -> Tuple[bool, str]:
 def _empty_record() -> Dict[str, Any]:
     return {
         "created_by": None,
+        "provenance": None,
         "use_count": 0,
         "view_count": 0,
         "last_used_at": None,
@@ -656,6 +669,10 @@ def _empty_record() -> Dict[str, Any]:
         "state": STATE_ACTIVE,
         "pinned": False,
         "archived_at": None,
+        # Pre-commit gating tier (VaG). Agent-created skills default to COLD;
+        # foreground/user skills are always HOT (no gating). The field is
+        # absent on old records — get_gate_tier returns HOT for backward compat.
+        "gate_tier": GATE_HOT,
     }
 
 
@@ -942,10 +959,20 @@ def record_created(
     skill_name: str,
     *,
     agent_created: bool,
+    provenance: Optional[str] = None,
     task_id: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> None:
-    """Persist explicit creation provenance and emit a successful create fact."""
+    """Persist explicit creation provenance and emit a successful create fact.
+
+    ``agent_created`` controls the curator-management opt-in policy flag
+    (``created_by = "agent"``).  ``provenance`` is a separate field that records
+    who authored the skill file — set to ``"agent"`` for *every*
+    ``skill_manage(create)`` call regardless of whether it came from the
+    background review fork or a foreground user-directed session, so the
+    learning graph can identify agent-created skills without conflating them
+    with the curator policy.
+    """
     def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
         # A successful create is a new logical skill even if stale sidecar
         # state survived an earlier deletion or manual filesystem change.
@@ -953,7 +980,15 @@ def record_created(
         rec.update(_empty_record())
         if agent_created:
             rec["created_by"] = "agent"
-        return {"created_by": rec["created_by"]}
+            # Agent-created skills start COLD — invisible to the system prompt
+            # until Gate 1 promotes them to WARM. See arXiv:2608.05810 (VaG).
+            rec["gate_tier"] = GATE_COLD
+        else:
+            # Foreground / user-directed skills are always HOT (no gating).
+            rec["gate_tier"] = GATE_HOT
+        if provenance:
+            rec["provenance"] = provenance
+        return {"created_by": rec["created_by"], "provenance": rec["provenance"]}
 
     facts = _mutate(skill_name, _apply)
     if isinstance(facts, dict):
@@ -1048,6 +1083,63 @@ def set_sync(skill_name: str, sync: bool) -> None:
 def is_sync_enabled(skill_name: str) -> bool:
     """Whether a skill is opted into sync (``sync: true`` in its record)."""
     return get_record(skill_name).get("sync") is True
+
+
+# ---------------------------------------------------------------------------
+# Pre-commit gating tiers (VaG — Verifier-as-Gatekeeper)
+# ---------------------------------------------------------------------------
+
+def get_gate_tier(skill_name: str) -> str:
+    """Return the gating tier for a skill.
+
+    Returns one of ``GATE_COLD``, ``GATE_WARM``, ``GATE_HOT``.
+
+    Backward compatibility: old .usage.json records without a ``gate_tier``
+    field are treated as ``GATE_HOT`` — every existing skill (bundled,
+    hub-installed, manually authored, or agent-created before gating was
+    enabled) stays visible in the system prompt. Only skills explicitly
+    created under the background-review fork going forward will be COLD.
+    """
+    rec = get_record(skill_name)
+    tier = rec.get("gate_tier")
+    if tier in _GATE_TIERS:
+        return tier
+    return GATE_HOT
+
+
+def set_gate_tier(skill_name: str, tier: str) -> bool:
+    """Set the gating tier for a skill. Returns True if changed.
+
+    Only applies to curation-eligible (agent-created) skills — bundled,
+    hub-installed, and foreground skills are always HOT and cannot be
+    demoted.
+    """
+    if tier not in _GATE_TIERS:
+        logger.debug("set_gate_tier: invalid tier %r for %s", tier, skill_name)
+        return False
+
+    def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
+        previous = rec.get("gate_tier", GATE_HOT)
+        if previous == tier:
+            return {"changed": False}
+        rec["gate_tier"] = tier
+        return {"changed": True, "previous": previous}
+
+    facts = _mutate(skill_name, _apply, require_curation_eligible=True)
+    if isinstance(facts, dict) and facts.get("changed"):
+        logger.info(
+            "gate_tier: %s -> %s (was %s)",
+            skill_name,
+            tier,
+            facts.get("previous", GATE_HOT),
+        )
+        return True
+    return False
+
+
+def is_gate_cold(skill_name: str) -> bool:
+    """Convenience: True iff the skill is in the COLD tier (hidden from prompt)."""
+    return get_gate_tier(skill_name) == GATE_COLD
 
 
 def forget(skill_name: str) -> None:

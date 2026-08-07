@@ -1870,6 +1870,47 @@ DEFAULT_CONFIG = {
         #                     never crammed into a chat bubble), apply with
         #                     /skills approve <id> or drop with /skills reject <id>.
         "write_approval": False,
+        # ── Pre-commit gating (VaG — Verifier-as-Gatekeeper) ───────────
+        # Inspired by arXiv:2608.05810. Agent-created skills start COLD
+        # (invisible to the system prompt) and must pass Gate 1 before
+        # being promoted to WARM (visible). This prevents contaminated
+        # skills from entering the decision context and propagating their
+        # flawed reasoning to future distilled skills.
+        # See: `hermes curator promote <skill>` and `hermes curator promote --list-cold`.
+        "gating": {
+            # Master toggle. When on, agent-created skills (background review
+            # fork) start in the COLD tier instead of being immediately
+            # visible in the system prompt. Turn off to revert to the
+            # pre-gate behavior where every distilled skill is admitted
+            # unconditionally.
+            "enabled": True,
+            # Gate 1A: Deterministic schema validation (frontmatter structure).
+            # Always runs when gating is enabled. No LLM cost.
+            "schema_gate": True,
+            # Gate 1C: Semantic consistency LLM check. One LLM call per
+            # candidate skill. Checks for fabricated facts, self-contradiction,
+            # unsafe operations, and conflicts with existing skills.
+            # Set to false to skip the LLM check (Gate 1A still runs).
+            "semantic_gate": True,
+            # Gate 1B: Behavioral replay (ExecCritic).
+            # Runs A/B replay on holdout tasks: for each task, spawns two
+            # subagents (control vs treatment with skill injected), then
+            # an LLM judge compares outputs. Pass requires no degradation
+            # and no harmful output. Uses delegate_task → has real cost
+            # (2N subagent runs + N LLM judge calls for N tasks).
+            # OFF by default. Set to true to enable behavioral verification.
+            "replay_gate": False,
+            # Gate 2: Marginal-gain subset selection (WARM → HOT).
+            # Runs k replays comparing the candidate skill + existing HOT
+            # skills vs the HOT skills alone. An LLM judge decides if the
+            # candidate adds marginal value (promote), is redundant with
+            # existing HOT skills (deny, prevents accumulation), or degrades
+            # (deny). Uses delegate_task → has real cost
+            # (2N subagent runs + N LLM judge calls for N tasks, like Gate 1B).
+            # OFF by default. Set to true to enable redundancy protection
+            # before skills become fully-trusted HOT.
+            "marginal_gain_gate": False,
+        },
     },
 
     # Curator — background skill maintenance.

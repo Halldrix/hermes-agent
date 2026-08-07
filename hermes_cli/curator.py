@@ -833,6 +833,174 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
     )
     p_rollback.set_defaults(func=_cmd_rollback)
 
+    # ── Pre-commit gating (VaG) ────────────────────────────────────────
+    p_promote = subs.add_parser(
+        "promote",
+        help="Promote a skill through the gating tiers (COLD → WARM → HOT)",
+    )
+    p_promote.add_argument(
+        "skill", nargs="?", default=None, help="Skill name to promote (optional when --list-cold)",
+    )
+    p_promote.add_argument(
+        "--to", dest="target_tier", default=None,
+        choices=("warm", "hot"),
+        help="Target tier: 'warm' (run Gate 1) or 'hot' (skip Gate 2, Fase 3). "
+             "Default: auto (COLD→WARM if cold, WARM→HOT if warm).",
+    )
+    p_promote.add_argument(
+        "--skip-semantic", action="store_true",
+        help="Skip Gate 1C (semantic consistency LLM check). "
+             "Use when you have manually reviewed the skill.",
+    )
+    p_promote.add_argument(
+        "--skip-replay", action="store_true",
+        help="Skip Gate 1B (behavioral A-B replay on holdout tasks). "
+             "Implicitly ON when replay_gate is disabled in config "
+             "(the default), so this flag only matters when "
+             "skills.gating.replay_gate is explicitly enabled.",
+    )
+    p_promote.add_argument(
+        "--skip-marginal-gain", action="store_true",
+        help="Skip Gate 2 (marginal-gain subset selection for WARM→HOT). "
+             "Implicitly ON when marginal_gain_gate is disabled in config "
+             "(the default), so this flag only matters when "
+             "skills.gating.marginal_gain_gate is explicitly enabled.",
+    )
+    p_promote.add_argument(
+        "--k-replays", type=int, default=3,
+        help="Number of holdout tasks to replay in Gate 1B/2 (default: 3). "
+             "Higher k gives more statistical confidence at proportionally "
+             "higher subagent cost.",
+    )
+    p_promote.add_argument(
+        "--list-cold", action="store_true",
+        help="List all COLD skills and exit (no promotion performed)",
+    )
+    p_promote.set_defaults(func=_cmd_promote)
+
+
+def _cmd_promote(args) -> int:
+    """Promote a skill through the VaG gating tiers."""
+    from tools.skill_usage import get_gate_tier, GATE_COLD, GATE_WARM, GATE_HOT
+
+    # --list-cold: list all COLD skills and exit
+    if getattr(args, "list_cold", False):
+        from tools.skill_usage import get_record, is_curation_eligible
+        from hermes_constants import get_skills_dir
+        from agent.skill_utils import iter_skill_index_files, parse_frontmatter
+
+        skills_dir = get_skills_dir()
+        cold_skills = []
+        for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
+            try:
+                raw = skill_file.read_text(encoding="utf-8")
+                fm, _ = parse_frontmatter(raw)
+                name = str(fm.get("name", skill_file.parent.name))
+                if get_gate_tier(name) == GATE_COLD:
+                    desc = str(fm.get("description", ""))[:80]
+                    cold_skills.append((name, desc))
+            except Exception:
+                continue
+
+        if not cold_skills:
+            print("No COLD skills found.")
+            return 0
+
+        print(f"COLD skills ({len(cold_skills)}) — invisible to the agent until promoted:")
+        for name, desc in cold_skills:
+            print(f"  {name:30s}  {desc}")
+        print("\nPromote with: hermes curator promote <skill>")
+        return 0
+
+    skill_name = args.skill
+
+    current_tier = get_gate_tier(skill_name)
+    target = args.target_tier
+
+    # Auto-determine target tier
+    if target is None:
+        if current_tier == GATE_COLD:
+            target = "warm"
+        elif current_tier == GATE_WARM:
+            target = "hot"
+        else:
+            print(f"Skill '{skill_name}' is already HOT (tier: {current_tier}). Nothing to promote.")
+            return 0
+
+    if target == "warm" and current_tier == GATE_COLD:
+        from agent.skill_gate import promote_cold_to_warm
+
+        # Build auxiliary client for Gate 1B/1C LLM calls
+        # Uses the same auxiliary-model resolution as the curator
+        aux_client = None
+        if not args.skip_semantic or not args.skip_replay:
+            try:
+                from agent.auxiliary_client import get_text_auxiliary_client
+                aux_client = get_text_auxiliary_client(task="curator")
+                if aux_client[0] is None:
+                    print("Warning: no auxiliary client resolved — Gate 1C will be skipped.")
+                    print("Set auxiliary.curator.{provider,model} in config to enable LLM-based gates.")
+                    aux_client = None
+            except Exception as e:
+                print(f"Warning: could not create auxiliary client: {e}")
+                print("Proceeding — schema gate (1A) still runs deterministically.")
+
+        ok, msg = promote_cold_to_warm(
+            skill_name,
+            auxiliary_client=aux_client,
+            skip_semantic=args.skip_semantic,
+            skip_replay=args.skip_replay,
+            max_tasks=args.k_replays,
+        )
+        if ok:
+            print(f"✓ {msg}")
+            # Clear the prompt cache so the promoted skill shows up next session
+            try:
+                from agent.prompt_builder import clear_skills_system_prompt_cache
+                clear_skills_system_prompt_cache(clear_snapshot=True)
+            except Exception:
+                pass
+            return 0
+        else:
+            print(f"✗ {msg}")
+            return 1
+
+    elif target == "hot" and current_tier == GATE_WARM:
+        from agent.skill_gate import promote_warm_to_hot
+
+        # Build auxiliary client for Gate 2 LLM judge
+        aux_client = None
+        if not args.skip_marginal_gain:
+            try:
+                from agent.auxiliary_client import get_text_auxiliary_client
+                aux_client = get_text_auxiliary_client(task="curator")
+                if aux_client[0] is None:
+                    print("Warning: no auxiliary client resolved — Gate 2 will use auto-pass.")
+                    aux_client = None
+            except Exception as e:
+                print(f"Warning: could not create auxiliary client: {e}")
+                print("Proceeding — Gate 2 will be skipped if marginal_gain_gate is off.")
+
+        ok, msg = promote_warm_to_hot(
+            skill_name,
+            auxiliary_client=aux_client,
+            skip_marginal_gain=args.skip_marginal_gain,
+            k_replays=args.k_replays,
+        )
+        if ok:
+            print(f"✓ {msg}")
+            return 0
+        else:
+            print(f"✗ {msg}")
+            return 1
+
+    else:
+        print(f"Cannot promote '{skill_name}' from {current_tier} to {target}.")
+        print(f"  Current tier: {current_tier}")
+        print(f"  Requested target: {target}")
+        print(f"  Valid transitions: COLD→WARM, WARM→HOT")
+        return 1
+
 
 def cli_main(argv=None) -> int:
     """Standalone entry (also usable by hermes_cli.main fallthrough)."""
