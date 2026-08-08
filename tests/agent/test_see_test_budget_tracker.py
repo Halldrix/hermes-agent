@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Smoke test integrado: Budget Tracker + Cache + Sandbox.
+Integrated smoke test: Budget Tracker + Cache + Sandbox.
 
-Valida que BudgetTracker:
-1. Track costos por rol con pricing real.
-2. Prediga costo antes del spawn.
-3. Lance BudgetExceededError al pasar el tope.
-4. Genere summary con cost_breakdown.
-5. Se integre con el flujo cache+sandbox.
+Validates that BudgetTracker:
+1. Track costs per role with real pricing.
+2. Predict cost before spawn.
+3. Raise BudgetExceededError when exceeding the ceiling.
+4. Generate summary with cost_breakdown.
+5. Integrate with the cache+sandbox flow.
 """
 import sys, os, logging
 
@@ -33,7 +33,7 @@ def test_budget_tracking():
     tracker = BudgetTracker.from_config(cfg)
     print(f"\n[1] BudgetTracker created: max=${tracker.max_cost_usd}")
 
-    # ── track test call (Claude Opus caro)
+    # ── track test call (Claude Opus expensive)
     cost_test = tracker.track("test", "claude-opus-4-7", input_tokens=2100, output_tokens=750)
     assert 0.08 < cost_test < 0.10, f"test cost should be ~$0.09, got ${cost_test:.4f}"
     print(f"[2] Tracked test call: ${cost_test:.4f} (Claude Opus 2100in/750out)")
@@ -43,7 +43,7 @@ def test_budget_tracking():
     assert cost_exec < 0.001, f"execute should be ~$0.0004, got ${cost_exec:.4f}"
     print(f"[3] Tracked execute: ${cost_exec:.4f} (Llama 70B 6000in/2000out)")
 
-    # ── track hypothesis (heredado, sin override)
+    # ── track hypothesis (inherited, no override)
     cost_hyp = tracker.track("hypothesis", "glm-4.6", 3000, 500)
     assert 0.002 < cost_hyp < 0.005
     print(f"[4] Tracked hypothesis: ${cost_hyp:.4f} (GLM-4.6 3000in/500out)")
@@ -104,7 +104,7 @@ def test_pricing_table_coverage():
     missing = required - providers
     assert not missing, f"missing required providers: {missing}"
 
-    # Claude Opus debe ser el más caro
+    # Claude Opus must be the most expensive
     opus_in, opus_out = DEFAULT_PRICING["anthropic:claude-opus-4-7"]
     llama_in, llama_out = DEFAULT_PRICING["openrouter:meta-llama/llama-3.3-70b-instruct"]
     assert opus_in > llama_in * 10, f"Opus should be >10x Llama input: {opus_in} vs {llama_in}"

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-SEE Prototype — Test end-to-end del orquestador con bucle PUCT.
+SEE Prototype — End-to-end test of the orchestrator with the PUCT loop.
 
-Valida el flujo completo:
+Validates the full pipeline:
 1. evolve_skill() integra los 4 componentes (sandbox, routing→mock, cache, budget).
-2. El bucle PUCT genera hipótesis → tests → parches → ejecución → evidencia.
-3. La matriz de evidencia se llena correctamente.
-4. El mejor nodo se selecciona por evidence_score.
-5. Budget tracking aborta cuando se excede el tope.
-6. Cache de tests reduce llamadas al modelo caro.
+2. The PUCT loop generates hypotheses → tests → patches → execution → evidence.
+3. The evidence matrix is populated correctly.
+4. The best node is selected by evidence_score.
+5. Budget tracking aborts when the ceiling is exceeded.
+6. Test cache reduces calls to the expensive model.
 
-Los delegates se mockean para no requerir LLM real. El sandbox y el cache
-son reales (no mockeados) — validamos que el orquestador los integra bien.
+Delegates are mocked to avoid requiring a real LLM. The sandbox and cache
+are real (not mocked) — we validate that the orchestrator integrates them well.
 """
 import sys
 import os
@@ -85,7 +85,7 @@ def check(output: str, files: dict) -> dict:
     return {"pass": False, "reason": "ambiguous output", "category": "semantic"}
 '''
 
-# Test para una segunda hipótesis H2
+# Test for a second hypothesis H2
 MOCK_TEST_CODE_H2 = '''import re
 
 def check(output: str, files: dict) -> dict:
@@ -96,7 +96,7 @@ def check(output: str, files: dict) -> dict:
     return {"pass": False, "reason": "no title in output", "category": "semantic"}
 '''
 
-# Patch que repara el skill añadiendo verificación de gh
+# Patch that repairs the skill by adding gh verification
 GOOD_PATCH = {
     "rank": 1,
     "old_string": "1. Run `gh pr create --title \"...\" --body \"...\"` to create a PR.",
@@ -109,12 +109,12 @@ GOOD_PATCH = {
 # ── Mock delegates ────────────────────────────────────────────────────
 
 def mock_hypothesis(**kwargs):
-    """Mock: siempre retorna 2 hipótesis."""
+    """Mock: always returns 2 hypotheses."""
     return [
         {
             "id": "H1",
-            "description": "El skill no valida si gh CLI está instalado antes de usarlo",
-            "observable_behavior": "output contiene 'command not found' en vez de un mensaje claro de pre-validación",
+            "description": "The skill does not validate if gh CLI is installed before using it",
+            "observable_behavior": "output contains 'command not found' instead of a clear pre-validation message",
             "action": "add",
             "rationale": "El skill asume gh existe sin verificar",
         },
@@ -129,7 +129,7 @@ def mock_hypothesis(**kwargs):
 
 
 def mock_test(**kwargs):
-    """Mock: retorna el test code según la hipótesis."""
+    """Mock: returns test code based on the hypothesis."""
     desc = kwargs.get("hypothesis_description", "")
     if "gh CLI" in desc or "gh" in desc:
         return MOCK_TEST_CODE
@@ -161,7 +161,7 @@ def mock_execute(**kwargs):
 def test_evolve_skill_basic():
     """El orquestador corre y retorna resultado estructurado."""
     print("=" * 60)
-    print("TEST 1: evolve_skill básico")
+    print("TEST 1: evolve_skill basic")
     print("=" * 60)
     result = evolve_skill(
         skill_name="github-pr-create",
@@ -193,9 +193,9 @@ def test_evolve_skill_basic():
 
 
 def test_puct_tree_structure():
-    """El árbol PUCT tiene raíz + hijos con parches aplicados."""
+    """PUCT tree has root + children with patches applied."""
     print("\n" + "=" * 60)
-    print("TEST 2: Estructura del árbol PUCT")
+    print("TEST 2: PUCT tree structure")
     print("=" * 60)
     search = PUCTSearch(
         skill_name="github-pr-create",
@@ -215,7 +215,7 @@ def test_puct_tree_structure():
     search._t0 = 0
     result = search.run()
 
-    # La raíz debe existir
+    # The root must exist
     assert search.root.node_id == "root"
     assert search.root.parent is None
 
@@ -226,7 +226,7 @@ def test_puct_tree_structure():
     assert child.depth == 1
     assert len(child.patches_used) >= 1, "child should have patches"
 
-    # El skill parcheado debe ser diferente del original
+    # The patched skill must differ from the original
     assert child.skill_content != search.root.skill_content
     assert "verify" in child.skill_content or "which gh" in child.skill_content
 
@@ -270,7 +270,7 @@ def test_evidence_matrix_populated():
         if node.depth >= 1:  # los hijos fueron simulados
             assert len(node.evidence) >= 1, f"node {node.node_id} should have evidence"
 
-    # Al menos un test debe haber pasado en el nodo parcheado
+    # At least one test must have passed in the patched node
     best_id = search.matrix.best_node_id(search.all_nodes)
     assert best_id is not None, "should find a best node"
     best_node = next(n for n in search.all_nodes if n.node_id == best_id)
@@ -282,7 +282,7 @@ def test_evidence_matrix_populated():
 
 
 def test_best_patch_repaired_skill():
-    """El mejor parche repara el skill (añade verificación de gh)."""
+    """Best patch repairs the skill (adds gh verification)."""
     print("\n" + "=" * 60)
     print("TEST 4: Best patch repara el skill")
     print("=" * 60)
@@ -305,7 +305,7 @@ def test_best_patch_repaired_skill():
     bp = result["best_patch"]
     assert bp["depth"] >= 1, "best patch should be a child"
     assert len(bp["patches"]) >= 1
-    # El parche debe contener verificación de gh
+    # The patch must contain gh verification
     patched_preview = bp["patched_skill_preview"]
     assert "verify" in patched_preview or "which gh" in patched_preview, \
         f"patched skill should include gh verification: {patched_preview[:200]}"
@@ -318,7 +318,7 @@ def test_best_patch_repaired_skill():
 
 
 def test_budget_exceeded_aborts():
-    """Budget exceeded aborta la evolución y retorna resultado parcial."""
+    """Budget exceeded aborts evolution and returns partial result."""
     print("\n" + "=" * 60)
     print("TEST 5: Budget exceeded aborts gracefully")
     print("=" * 60)
@@ -339,7 +339,7 @@ def test_budget_exceeded_aborts():
             "evolution": {
                 "budget": 5,
                 "max_children": 2,
-                "max_cost_usd": 0.001,  # muy bajo para forzar abort
+                "max_cost_usd": 0.001,  # very low to force abort
             }
         },
         category="github",
@@ -371,7 +371,7 @@ def test_cache_reduces_test_generation():
         test_calls["count"] += 1
         return mock_test(**kwargs)
 
-    # Primera evolución — genera tests (cache miss)
+    # First evolution — generates tests (cache miss)
     result1 = evolve_skill(
         skill_name="github-pr-create",
         skill_content=SKILL_CONTENT,
@@ -391,7 +391,7 @@ def test_cache_reduces_test_generation():
     assert calls_after_first >= 1, f"first run should generate tests: {calls_after_first}"
     print(f"  Test generation calls after run 1: {calls_after_first}")
 
-    # Segunda evolución — mismo skill, mismo hipótesis → cache hit
+    # Second evolution — same skill, same hypothesis → cache hit
     result2 = evolve_skill(
         skill_name="github-pr-create",
         skill_content=SKILL_CONTENT,  # mismo skill → mismo hash
@@ -410,15 +410,15 @@ def test_cache_reduces_test_generation():
     calls_after_second = test_calls["count"]
     new_calls = calls_after_second - calls_after_first
     print(f"  Test generation calls after run 2: {calls_after_second} (+{new_calls})")
-    # La segunda vez debería usar cache → menos calls nuevas
-    # (puede seguir habiendo algunas calls por hipótesis nuevas, pero menos)
+    # Second time should use cache → fewer new calls
+    # (there may still be some calls for new hypotheses, but fewer)
     assert new_calls <= calls_after_first, \
         f"second run should have fewer or equal calls: {new_calls} vs {calls_after_first}"
     print("✓ test_cache_reduces_test_generation passed")
 
 
 def test_hypothesis_status_updated():
-    """Las hipótesis se marcan confirmed o refuted según la evidencia."""
+    """Hypotheses are marked confirmed or refuted based on evidence."""
     print("\n" + "=" * 60)
     print("TEST 7: Hypothesis status updated by evidence")
     print("=" * 60)
@@ -442,7 +442,7 @@ def test_hypothesis_status_updated():
 
     statuses = {h.id: h.status for h in search.hypotheses}
     print(f"  Hypothesis statuses: {statuses}")
-    # Al menos una hipótesis debe tener status definido (no pending)
+    # At least one hypothesis must have a defined status (not pending)
     non_pending = [s for s in statuses.values() if s != "pending"]
     assert len(non_pending) >= 1, f"at least one hypothesis should be confirmed/refuted: {statuses}"
     print("✓ test_hypothesis_status_updated passed")

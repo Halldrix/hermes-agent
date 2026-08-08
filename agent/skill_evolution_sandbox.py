@@ -6,12 +6,12 @@ reflection agent. Los tests son funciones Python `def check(output, files)
 -> dict` que se ejecutan contra outputs cacheados del agente.
 
 El sandbox:
-1. Compila el código (syntax check) — ImportError/SyntaxError capturados.
+1. Compile the code (syntax check) — ImportError/SyntaxError caught.
 2. Ejecuta en namespace restringido con solo json/re/os.path/yaml.
 3. Detecta tests triviales (always-true) que contaminan la matriz.
-4. Prohíbe imports peligrosos: subprocess, socket, urllib, requests, open(),
+4. Forbid dangerous imports: subprocess, socket, urllib, requests, open(),
    __import__, eval(), exec(), compile(), globals(), locals(), getattr con
-   string dinámico.
+   dynamic string.
 
 Uso principal:
     result = run_test_sandboxed(code, output, files)
@@ -22,9 +22,9 @@ Uso principal:
 
 El sandbox NO usa subprocess para mantenerse ligero. Ejecuta en el mismo
 proceso con globals restringidos — los imports prohibidos se detectan por
-inspección del código fuente antes de exec(). No es seguro contra
+source code inspection before exec(). It is not secure against
 adversarios dedicados, pero los tests los genera un LLM configurado por
-el usuario, no código hostil.
+the user, not hostile code.
 """
 from __future__ import annotations
 
@@ -36,23 +36,23 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Imports permitidos en el sandbox ──────────────────────────────────
+# ── Imports allowed in the sandbox ──────────────────────────────────
 _ALLOWED_MODULES = {"json", "re", "os", "os.path", "yaml", "io"}
 
-# ── Tokens prohibidos (inspección del código fuente) ─────────────────
+# ── Forbidden tokens (source code inspection) ─────────────────
 _FORBIDDEN_TOKENS = [
     "subprocess", "socket", "urllib", "requests", "http.client",
     "ftplib", "smtplib", "telnetlib", "webbrowser",
     "__import__", "eval(", "exec(", "compile(",
     "globals(", "locals(", "vars(", "dir(",
-    "getattr((",  # getattr con string dinámico — se permite getattr(obj, "x")
+    "getattr((",  # getattr with dynamic string — getattr(obj, "x") is allowed
     "ctypes", "cffi", "pickle", "marshal",
-    "open(",  # sin acceso al filesystem — los archivos vienen vía `files`
+    "open(",  # no filesystem access — files come via `files`
     "input(", "breakpoint(", "exit(", "quit(",
     "__builtins__", "__import__",
 ]
 
-# Estimación conservadora: un test no necesita más de 4KB de código.
+# Conservative estimate: a test needs no more than 4KB of code.
 MAX_TEST_CODE_CHARS = 4000
 
 
@@ -75,7 +75,7 @@ class ValidationResult:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 1. Validación estática (antes de exec)
+# 1. Static validation (before exec)
 # ──────────────────────────────────────────────────────────────────────
 
 def _code_hash(code: str) -> str:
@@ -84,12 +84,12 @@ def _code_hash(code: str) -> str:
 
 
 def _forbidden_token_found(code: str) -> Optional[str]:
-    """Inspecciona el código fuente para detectar tokens prohibidos.
-    Retorna el primer token prohibido encontrado, o None si el código está limpio.
+    """Inspect source code to detect forbidden tokens.
+    Returns the first forbidden token found, or None if the code is clean.
     """
-    # Normalizar: remover comentarios y strings para falsos positivos
-    # checamos el código crudo — los modelos caros no deben generar payloads
-    # maliciosos, pero esto es cinturón de seguridad.
+    # Normalize: remove comments and strings to avoid false positives
+    # we check raw code — expensive models shouldn't generate malicious payloads,
+    # but this is a safety belt.
     for token in _FORBIDDEN_TOKENS:
         if token in code:
             return token
@@ -97,15 +97,15 @@ def _forbidden_token_found(code: str) -> Optional[str]:
 
 
 def _has_required_signature(code: str) -> bool:
-    """Verifica que el código define `def check(output, files) -> dict` o similar."""
+    """Verify that the code defines `def check(output, files) -> dict` or similar."""
     # Aceptar: def check(output, files) -> dict:  |  def check(output: str, files: dict) -> dict:
     pattern = r"def\s+check\s*\(\s*output[^)]*files[^)]*\)\s*(?:->\s*\S+)?\s*:"
     return bool(re.search(pattern, code))
 
 
 def _returns_dict_hint(code: str) -> bool:
-    """Detecta si el código retorna un dict con 'pass' bool.
-    Heurística: busca `return {"pass": ...}` o `return {\"pass\": ...` en cualquier forma.
+    """Detect whether the code returns a dict with a bool 'pass'.
+    Heuristic: looks for `return {"pass": ...}` or `return {\"pass\": ...` in any form.
     """
     pattern = r'return\s*\{[^}]*["\']pass["\']'
     return bool(re.search(pattern, code, re.DOTALL))
@@ -140,7 +140,7 @@ def validate_test(code: str) -> ValidationResult:
             False, "no `def check(output, files) -> dict` found"
         )
 
-    # 4. Debe retornar dict con 'pass' (heurística)
+    # 4. Must return dict with 'pass' (heuristic)
     if not _returns_dict_hint(code):
         return ValidationResult(
             False, "check() must return dict with 'pass' key"
@@ -150,7 +150,7 @@ def validate_test(code: str) -> ValidationResult:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. Validación reforzada: detectar tests triviales (always-true)
+# 2. Reinforced validation: detect trivial (always-true) tests
 # ──────────────────────────────────────────────────────────────────────
 
 def _exec_test_sandboxed(code: str, stdout: str, files: dict) -> dict:
@@ -160,8 +160,8 @@ def _exec_test_sandboxed(code: str, stdout: str, files: dict) -> dict:
     import os as _os
     import os.path as _ospath
 
-    # __import__ controlado: solo permite módulos del whitelist.
-    # El código del test puede hacer `import json` o `import re`, pero no
+    # Controlled __import__: only whitelist modules allowed.
+    # Test code may `import json` or `import re`, but not
     # `import subprocess` o `import socket`.
     _ALLOWED = {"json": _json, "re": _re, "os": _os, "os.path": _ospath,
                 "yaml": None}
@@ -223,16 +223,16 @@ def _exec_test_sandboxed(code: str, stdout: str, files: dict) -> dict:
 
 
 def validate_test_strict(code: str) -> tuple[bool, str]:
-    """Validación reforzada: valida el test Y detecta patrones triviales.
+    """Reinforced validation: validates the test AND detects trivial patterns.
     Esto es lo que atrapa tests que pasan el syntax check pero son
-    semánticamente inútiles (always-true, demasiado permisivos).
+    semantically useless (always-true, too permissive).
     """
-    # 1. Validación básica
+    # 1. Basic validation
     v = validate_test(code)
     if not v.valid:
         return False, v.reason
 
-    # 2. Dry-run en tres escenarios contrastantes
+    # 2. Dry-run on three contrasting scenarios
     scenarios = [
         ("empty", "", {}),
         ("garbage", "GARBAGE_TEST_INPUT_12345_xqz", {}),
@@ -246,17 +246,17 @@ def validate_test_strict(code: str) -> tuple[bool, str]:
         except Exception as e:
             return False, f"dry-run failed on {name}: {e}"
 
-    # 3. Si los tres escenarios pasan, el test es trivially permissive
+    # 3. If all three scenarios pass, the test is trivially permissive
     if all(p for _, p in results):
         return False, "test passes on empty, garbage, and plausible input — trivially permissive"
 
-    # 4. No marcamos "trivially strict" con solo 3 escenarios genéricos.
-    # Un test que busca un patrón específico ("gh: command not found") va a
-    # fallar en los 3 escenarios arbitrarios sin ser trivial. Si el test
-    # ejecuta sin excepción y retorna dict válido, es válido.
-    # Los 3 escenarios solo se usan para detectar always-true (regla 3).
+    # 4. We don't mark "trivially strict" with only 3 generic scenarios.
+    # A test seeking a specific pattern ("gh: command not found") will
+    # fail on all 3 arbitrary scenarios without being trivial. If the test
+    # executes without exception and returns a valid dict, it's valid.
+    # The 3 scenarios are only used to detect always-true (rule 3).
 
-    # 5. Si empty y garbage pasan pero plausible falla, sospechoso
+    # 5. If empty and garbage pass but plausible fails, suspicious
     if results[0][1] and results[1][1] and not results[2][1]:
         logger.warning("validate_test_strict: test passes on junk but fails on plausible — review needed")
 
@@ -264,7 +264,7 @@ def validate_test_strict(code: str) -> tuple[bool, str]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 3. Ejecución con timeout y manejo de errores
+# 3. Execution with timeout and error handling
 # ──────────────────────────────────────────────────────────────────────
 
 import time
@@ -290,7 +290,7 @@ def run_test_sandboxed(
     """
     t0 = time.time()
     
-    # Re-validar antes de ejecutar (defensa en profundidad)
+    # Re-validate before execution (defense in depth)
     ok, reason = validate_test_strict(code)
     if not ok:
         return TestResult(
