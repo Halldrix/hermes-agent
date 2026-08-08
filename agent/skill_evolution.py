@@ -249,11 +249,11 @@ class PUCTSearch:
             existing_hypotheses, parent_agent, focus, round_idx, total_rounds,
         )
 
-    def _default_test(self, hypothesis_desc, observable_behavior,
+    def _default_test(self, hypothesis_description, observable_behavior,
                        output_stdout, file_list, parent_agent):
         from agent.skill_evolution_routing import delegate_test
         return delegate_test(
-            hypothesis_desc, observable_behavior,
+            hypothesis_description, observable_behavior,
             output_stdout, file_list, parent_agent,
         )
 
