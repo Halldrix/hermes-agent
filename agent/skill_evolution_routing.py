@@ -215,12 +215,12 @@ def _delegate_role(
         log_prefix=f"[see-{role}] ",
     )
 
-    messages = [{"role": "user", "content": user_msg}]
-
     response_text = ""
     try:
-        # AIAgent.run() returns the assistant's final text
-        response_text = child.run(messages)
+        # AIAgent.chat() returns the assistant's final text as a str.
+        # The ephemeral_system_prompt was passed to the constructor, so chat()
+        # uses it automatically — no need to pass a messages list.
+        response_text = child.chat(user_msg)
         if isinstance(response_text, dict):
             # Some installations return a dict with metadata
             response_text = str(response_text.get("content") or
@@ -310,6 +310,13 @@ Output ONLY the function definition in a code block.
 PROMPT_PATCH_GEN = """You are a skill revision engine. Propose up to {K}
 candidate patches to the SKILL.md. Each patch is a targeted find-and-replace.
 Rank them ordinally (1=best). Output JSON with 'patches' key.
+
+Each patch MUST have these exact keys:
+  - "rank": integer (1=best)
+  - "old_string": exact substring from the current SKILL.md to find
+  - "new_string": replacement string
+  - "rationale": one-line explanation
+  - "expected_improvement": what this fixes
 
 If evidence is insufficient, return {{"patches": [], "reason": "..."}}
 """
