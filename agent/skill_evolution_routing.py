@@ -1,16 +1,16 @@
 """
-SEE Prototype — Model Routing por Rol
+SEE Prototype — Per-Role Model Routing
 
-_delegate_role: spawnea un AIAgent con provider:model configurable por rol
-del reflection agent, sin pasar por delegate_task (que solo acepta override
-global via delegation.* en config.yaml).
+_delegate_role: spawns an AIAgent with provider:model configurable per role
+of the reflection agent, without going through delegate_task (which only accepts override
+global via delegation.* in config.yaml).
 
 Roles:
   - hypothesis: generates falsifiable hypotheses (recoverable, inherited)
   - test:       synthesizes executable tests (critical link, EXPENSIVE)
-  - patch:      propone parches con ranking ordinal (recuperable, heredado)
-  - execute:    ejecuta el task con skill inyectado (solo output, BARATO)
-  - decide:     elige nodo a desplegar (hay fallback determinista, heredado)
+  - patch:      proposes patches with ordinal ranking (recoverable, inherited)
+  - execute:    executes the task with injected skill (output only, CHEAP)
+  - decide:     chooses node to deploy (has deterministic fallback, inherited)
 
 Configuration (config.yaml):
   evolution:
@@ -22,7 +22,7 @@ Configuration (config.yaml):
         provider: openrouter
         model: meta-llama/llama-3.3-70b-instruct
 
-Si un rol no tiene override, cae a delegation.* global, luego al parent_agent.
+If a role has no override, it falls back to global delegation.*, then to parent_agent.
 """
 from __future__ import annotations
 
@@ -59,14 +59,14 @@ _DEFAULT_TOKEN_BUDGET = {
 # ──────────────────────────────────────────────────────────────────────
 
 def _resolve_role_credentials(role: str, parent_agent) -> dict:
-    """Resuelve provider:model para un rol del reflection agent.
+    """Resolve provider:model for a role of the reflection agent.
 
-    Orden de precedencia:
-    1. evolution.models.<role>.provider/model (de config.yaml)
+    Order of precedence:
+    1. evolution.models.<role>.provider/model (from config.yaml)
     2. delegation.provider/model (global)
-    3. herencia del parent_agent
+    3. inheritance from parent_agent
 
-    Retorna dict:
+    Returns dict:
         {model, provider, base_url, api_key, api_mode}
     """
     from hermes_cli.config import load_config, cfg_get
@@ -82,7 +82,7 @@ def _resolve_role_credentials(role: str, parent_agent) -> dict:
     role_provider = str(role_provider).strip() if role_provider else None
     role_model = str(role_model).strip() if role_model else None
 
-    # 2. Fallback a delegation.* global
+    # 2. Fallback to global delegation.*
     if not role_provider and not role_model:
         delegation_cfg = cfg.get("delegation", {}) if isinstance(cfg, dict) else {}
         return _resolve_delegation_fallback(delegation_cfg, parent_agent)
@@ -153,7 +153,7 @@ def _resolve_delegation_fallback(delegation_cfg: dict, parent_agent) -> dict:
                 "api_mode": runtime.get("api_mode", "chat_completions"),
             }
         except Exception:
-            pass  # caer al return final
+            pass  # fall to the final return
 
     return {
         "model": configured_model or getattr(parent_agent, "model", None),
@@ -176,23 +176,23 @@ def _delegate_role(
     expected_json_key: Optional[str] = None,
     max_iterations: int = 3,
 ) -> Any:
-    """Spawnea un AIAgent con provider:model configurado para el rol.
+    """Spawns an AIAgent with provider:model configured for the role.
 
-    No pasa por delegate_task para evitar el override global. Construye un
+    Does not go through delegate_task to avoid the global override. Builds a
     Direct AIAgent with ephemeral_system_prompt and empty toolsets — the
-    reflection agent solo razona, no usa tools.
+    reflection agent reasons only, does not use tools.
 
     Args:
-        role: uno de "hypothesis", "test", "patch", "execute", "decide".
-        system_prompt: instrucciones del sistema (uno de PROMPT_HYPOTHESIS_GEN, etc.).
-        user_msg: contenido del mensaje del usuario con skill + output + evidence.
-        parent_agent: el AIAgent padre (para herencia de credentials si no hay override).
-        expected_json_key: si se setea, parsea la respuesta como JSON y extrae esa key.
+        role: one of "hypothesis", "test", "patch", "execute", "decide".
+        system_prompt: system instructions (one of PROMPT_HYPOTHESIS_GEN, etc.).
+        user_msg: content of the user message with skill + output + evidence.
+        parent_agent: the parent AIAgent (for credential inheritance if no override).
+        expected_json_key: if set, parses the response as JSON and extracts that key.
         max_iterations: max iterations of the child's tool loop (default 3).
 
     Returns:
-        - Si expected_json_key es None: el texto de respuesta del child.
-        - Si expected_json_key se setea: el valor de esa key (list/dict), o [] si falla.
+        - If expected_json_key is None: the child's response text.
+        - If expected_json_key is set: the value of that key (list/dict), or [] on failure.
     """
     creds = _resolve_role_credentials(role, parent_agent)
     AIAgent = _get_aiagent()
@@ -247,7 +247,7 @@ def _delegate_role(
 
 
 def _extract_json_key(text: str, key: str) -> Any:
-    """Extrae el valor de una key de un JSON embebido en texto."""
+    """Extract the value of a key from a JSON embedded in text."""
     # Strategy 1: find the first {...} and parse
     j_start = text.find("{")
     j_end = text.rfind("}") + 1
@@ -333,7 +333,7 @@ def delegate_hypothesis(
     round_idx: int = 1,
     total_rounds: int = 3,
 ) -> list[dict]:
-    """Lanza el reflection agent en modo hypothesis."""
+    """Launch the reflection agent in hypothesis mode."""
     user_msg = f"""## Current SKILL.md:
 ```markdown
 {skill_content[:10000]}
@@ -372,7 +372,7 @@ def delegate_test(
     file_list: list[str],
     parent_agent,
 ) -> Optional[str]:
-    """Lanza el reflection agent en modo test (modelo caro).
+    """Launch the reflection agent in test mode (expensive model).
     Returns the Python test code, or None on failure.
     """
     user_msg = f"""Hypothesis: {hypothesis_description}
@@ -403,7 +403,7 @@ def delegate_patch(
     max_children: int,
     parent_agent,
 ) -> list[dict]:
-    """Lanza el reflection agent en modo patch."""
+    """Launch the reflection agent in patch mode."""
     user_msg = f"""## Current SKILL.md:
 ```markdown
 {skill_content[:12000]}
@@ -429,8 +429,8 @@ def delegate_execute(
     task_context: str,
     parent_agent,
 ) -> str:
-    """Lanza el reflection agent en modo execute (modelo barato).
-    Ejecuta el task con el skill inyectado. Retorna el output (stdout).
+    """Launch the reflection agent in execute mode (cheap model).
+    Executes the task with the injected skill. Returns the output (stdout).
     """
     user_msg = (
         "You have access to the following skill. Follow its guidance when "
@@ -447,7 +447,7 @@ def delegate_execute(
 
 def _extract_code_block(text: str) -> Optional[str]:
     """Extract the first Python code block from the LLM response."""
-    # ```python ... ``` o ``` ... ```
+    # ```python ... ``` or ``` ... ```
     pattern = r"```(?:python)?\s*\n(.*?)\n```"
     m = re.search(pattern, text, re.DOTALL)
     if m:

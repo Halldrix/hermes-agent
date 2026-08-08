@@ -1,4 +1,4 @@
-"""Budget tracking activo para el Skill Evolution Engine (SEE).
+"""Active budget tracking for the Skill Evolution Engine (SEE).
 
 Minimal usage:
 
@@ -55,7 +55,7 @@ _FALLBACK_TOKENS = (3000, 800)
 
 
 class BudgetExceededError(RuntimeError):
-    """El costo proyectado supera evolution.max_cost_usd."""
+    """Projected cost exceeds evolution.max_cost_usd."""
 
     def __init__(self, role: str, model: str, spent: float, projected: float, limit: float):
         self.role, self.model = role, model
@@ -97,7 +97,7 @@ class BudgetTracker:
 
     # ---------------------------- pricing ----------------------------- #
     def _pricing(self, role: str, model: str) -> tuple[float, float]:
-        """(usd_per_1m_input, usd_per_1m_output) para role/model."""
+        """(usd_per_1m_input, usd_per_1m_output) for role/model."""
         rc = self.model_config.get(role, {}) or {}
         cin, cout = rc.get("cost_per_1m_input"), rc.get("cost_per_1m_output")
         if cin is not None and cout is not None:
@@ -129,7 +129,7 @@ class BudgetTracker:
         return sum(s.cost_usd for s in self.cost_accumulator.values())
 
     def track(self, role: str, model: str, input_tokens: int, output_tokens: int) -> float:
-        """Registra el uso real de una llamada. Devuelve el costo de esa llamada."""
+        """Record actual usage of a call. Returns the cost of that call."""
         input_tokens, output_tokens = int(input_tokens or 0), int(output_tokens or 0)
         cin, cout = self._pricing(role, model)
         cost = self._cost(input_tokens, output_tokens, cin, cout)
@@ -175,7 +175,7 @@ class BudgetTracker:
         return self._cost(int(inp), int(out), cin, cout)
 
     def check_budget(self, role: str = "?", model: str = "?") -> None:
-        """Raise BudgetExceededError si spent + predict(role) supera el tope."""
+        """Raise BudgetExceededError if spent + predict(role) exceeds the limit."""
         if not self.max_cost_usd:
             return
         spent = self.total_usd
@@ -200,34 +200,34 @@ class BudgetTracker:
 
 
 # --------------------------------------------------------------------------- #
-# INTEGRACIÓN
+# INTEGRATION
 # --------------------------------------------------------------------------- #
-# 1) En _delegate_role(self, role, prompt, ...):
+# 1) In _delegate_role(self, role, prompt, ...):
 #
 #       model = self._model_for_role(role)          # from evolution.models[role]
 #       self.budget.check_budget(role, model)       # <-- BEFORE spawn (raise)
 #       child = AIAgent(model=model, ...)
 #       text = child.run(prompt)
-#       u = getattr(child, "last_usage", None)      # o callback on_usage
+#       u = getattr(child, "last_usage", None)      # or callback on_usage
 #       self.budget.track(role, model,
 #                         getattr(u, "input_tokens", 0) if u else 0,
 #                         getattr(u, "output_tokens", 0) if u else 0)
 #       return text
 #
-# 2) En evolve_skill(...):
+# 2) In evolve_skill(...):
 #
 #       self.budget = BudgetTracker.from_config(cfg.get("evolution", {}))
 #       budget_exceeded = False
 #       try:
-#           ... bucle PUCT ...
+#           ... PUCT loop ...
 #       except BudgetExceededError as e:
 #           log.warning("[evolve] aborting: %s", e)
 #           budget_exceeded = True
-#       best = self._best_node()                    # mejor nodo hasta ahora
+#       best = self._best_node()                    # best node so far
 #       return {**self._result(best),
 #               "budget_exceeded": budget_exceeded,
 #               **self.budget.summary()}            # cost_total_usd + cost_breakdown
 #
-# Nota: si AIAgent no expone last_usage, registrar un callback
+# Note: if AIAgent does not expose last_usage, register a callback
 # `child.on_usage = lambda u: self.budget.track(role, model, u.input_tokens, u.output_tokens)`
 # and omit manual tracking to avoid double counting.
