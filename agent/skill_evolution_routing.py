@@ -175,6 +175,7 @@ def _delegate_role(
     parent_agent,
     expected_json_key: Optional[str] = None,
     max_iterations: int = 3,
+    budget_tracker=None,
 ) -> Any:
     """Spawns an AIAgent with provider:model configured for the role.
 
@@ -189,6 +190,8 @@ def _delegate_role(
         parent_agent: the parent AIAgent (for credential inheritance if no override).
         expected_json_key: if set, parses the response as JSON and extracts that key.
         max_iterations: max iterations of the child's tool loop (default 3).
+        budget_tracker: optional BudgetTracker — if provided, actual token usage
+            from the child agent is recorded against the budget after the call.
 
     Returns:
         - If expected_json_key is None: the child's response text.
@@ -226,6 +229,19 @@ def _delegate_role(
             response_text = str(response_text.get("content") or
                                 response_text.get("response") or "")
         response_text = str(response_text or "").strip()
+
+        # Record actual token usage in the budget tracker.
+        if budget_tracker is not None:
+            usage = getattr(child, "last_usage", None)
+            if usage is not None:
+                budget_tracker.track(
+                    role=role,
+                    model=creds.get("model") or getattr(parent_agent, "model", ""),
+                    input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+                    output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+                    provider=creds.get("provider"),
+                    base_url=creds.get("base_url"),
+                )
     except Exception as e:
         logger.warning("_delegate_role[%s] failed: %s", role, e)
         return [] if expected_json_key else ""
@@ -332,6 +348,7 @@ def delegate_hypothesis(
     focus: Optional[str] = None,
     round_idx: int = 1,
     total_rounds: int = 3,
+    budget_tracker=None,
 ) -> list[dict]:
     """Launch the reflection agent in hypothesis mode."""
     user_msg = f"""## Current SKILL.md:
@@ -362,6 +379,7 @@ def delegate_hypothesis(
         user_msg=user_msg,
         parent_agent=parent_agent,
         expected_json_key="hypotheses",
+        budget_tracker=budget_tracker,
     )
 
 
@@ -371,6 +389,7 @@ def delegate_test(
     output_stdout: str,
     file_list: list[str],
     parent_agent,
+    budget_tracker=None,
 ) -> Optional[str]:
     """Launch the reflection agent in test mode (expensive model).
     Returns the Python test code, or None on failure.
@@ -390,6 +409,7 @@ Files produced: {file_list or ['(none)']}
         ),
         user_msg=user_msg,
         parent_agent=parent_agent,
+        budget_tracker=budget_tracker,
     )
     if not response:
         return None
@@ -402,6 +422,7 @@ def delegate_patch(
     task_context: str,
     max_children: int,
     parent_agent,
+    budget_tracker=None,
 ) -> list[dict]:
     """Launch the reflection agent in patch mode."""
     user_msg = f"""## Current SKILL.md:
@@ -421,6 +442,7 @@ def delegate_patch(
         user_msg=user_msg,
         parent_agent=parent_agent,
         expected_json_key="patches",
+        budget_tracker=budget_tracker,
     )
 
 
@@ -428,6 +450,7 @@ def delegate_execute(
     skill_content: str,
     task_context: str,
     parent_agent,
+    budget_tracker=None,
 ) -> str:
     """Launch the reflection agent in execute mode (cheap model).
     Executes the task with the injected skill. Returns the output (stdout).
@@ -442,6 +465,7 @@ def delegate_execute(
         system_prompt="Follow the skill's instructions to complete the task. Return only the final output.",
         user_msg=user_msg,
         parent_agent=parent_agent,
+        budget_tracker=budget_tracker,
     )
 
 
