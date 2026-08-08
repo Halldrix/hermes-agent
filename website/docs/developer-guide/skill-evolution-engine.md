@@ -100,11 +100,11 @@ Test code is expensive (created by the most capable model). `TestCache` stores v
 
 ## Budget Tracking
 
-`BudgetTracker` (from `evolution.models.<role>`) predicts and enforces cost:
+`BudgetTracker` predicts and enforces cost:
 
-1. `check_budget(role, model)` → raises `BudgetExceededError` if `spent + predict(role) > max_cost_usd`
-2. `track(role, model, in_tokens, out_tokens)` records actual usage
-3. Pricing from `DEFAULT_PRICING` dict (2026 USD/1M-token estimates), defaulting to `$0.00` on unknown models (free-tier)
+1. `check_budget(role, model, provider, base_url)` → raises `BudgetExceededError` if `spent + predict(role) > max_cost_usd`
+2. `track(role, model, in_tokens, out_tokens, provider, base_url)` records actual usage via `child.last_usage`
+3. Price resolution delegated to `agent.usage_pricing.get_pricing_entry()` — the same central pricing service Hermes uses for session cost tracking (provider catalogues, OpenRouter /models, official-docs snapshots). Unknown models resolve to $0.00 so evolution never aborts on an unindexed model.
 
 ## Configuration
 
@@ -169,7 +169,7 @@ Returned dict:
 
 ## Validated End-to-End
 
-Validated on 2026-08-08 with two real LLM runs (free-tier model, $0.00 cost):
+Validated on 2026-08-08 with two real LLM runs ($0 cost):
 
 | Phase | Skill | Hypotheses | Best patch result |
 |---|---|---|---|
@@ -177,3 +177,9 @@ Validated on 2026-08-08 with two real LLM runs (free-tier model, $0.00 cost):
 | Real | `infinityfree-deploy` | 5 | Added `command -v lftp` check + multi-OS install fallback |
 
 Both runs produced a working patch that a human reviewer would have written by hand. See `tests/agent/see_e2e_*.py` for the harness.
+
+## References
+
+- **arXiv:2608.05810** — *"When Self-Evolution Backfires: Pre-Commit Gating against Skill Contamination in LLM Agents"*. Motivates the need for structured self-evolution with gating. SEE extends that work with the evolution engine itself: the PUCT-driven hypothesis → test → patch → evidence loop.
+- **PUCT / AlphaGo** (Silver et al., *Mastering the game of Go without human knowledge*, Nature 2017) — the search algorithm powering SEE's candidate-patch tree traversal.
+- **`agent/usage_pricing.py`** — Hermes Agent's central pricing service; `BudgetTracker` delegates all price resolution here.

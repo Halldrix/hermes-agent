@@ -16,32 +16,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger("hermes.evolution.budget")
 
 # --------------------------------------------------------------------------- #
-# Pricing defaults (USD per 1M tokens, 2026 estimates)
-# Key: "provider:model" lowercase. Value: (input, output).
+# Pricing is resolved via the central agent.usage_pricing module, which
+# looks up provider catalogues, OpenRouter /models, and official-docs
+# snapshots — the same source Hermes uses for session cost tracking.
+# Subscription-included routes (Nous-managed, etc.) resolve to $0.00
+# automatically.  Unknown models also fall back to $0.00 so evolution
+# never aborts on a model the pricing service hasn't indexed yet.
 # --------------------------------------------------------------------------- #
-DEFAULT_PRICING: dict[str, tuple[float, float]] = {
-    "anthropic:claude-opus-4-7": (15.0, 75.0),
-    "anthropic:claude-sonnet-4-5": (3.0, 15.0),
-    "anthropic:claude-haiku-4-5": (0.80, 4.0),
-    "openai:gpt-5": (1.25, 10.0),
-    "openai:gpt-5-mini": (0.25, 2.0),
-    "openrouter:meta-llama/llama-3.3-70b-instruct": (0.05, 0.05),
-    "openrouter:qwen/qwen3-235b-a22b": (0.13, 0.60),
-    "openrouter:deepseek/deepseek-v3": (0.25, 0.85),
-    "google:gemini-2.5-pro": (1.25, 10.0),
-    "google:gemini-2.5-flash": (0.30, 2.50),
-    "groq:llama-3.3-70b-versatile": (0.59, 0.79),
-    "groq:moonshotai/kimi-k2-instruct": (1.0, 3.0),
-    "zai:glm-4.6": (0.60, 2.20),
-    "zai:glm-4.5-air": (0.20, 1.10),
-    "nous:hermes-4-405b": (1.0, 3.0),
-    "nous:hermes-4-70b": (0.30, 0.80),
-}
 
 # Conservative per-role defaults for the first prediction (in, out).
 ROLE_TOKEN_DEFAULTS: dict[str, tuple[int, int]] = {
@@ -96,27 +82,55 @@ class BudgetTracker:
         )
 
     # ---------------------------- pricing ----------------------------- #
-    def _pricing(self, role: str, model: str) -> tuple[float, float]:
-        """(usd_per_1m_input, usd_per_1m_output) for role/model."""
+    def _pricing(
+        self,
+        role: str,
+        model: str,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> tuple[float, float]:
+        """Resolve (usd_per_1m_input, usd_per_1m_output) for role/model.
+
+        Delegates to agent.usage_pricing.get_pricing_entry(), which consults
+        provider catalogues, OpenRouter /models, and official-docs snapshots
+        — the same source Hermes uses for session cost tracking.
+
+        Per-role ``cost_per_1m_input`` / ``cost_per_1m_output`` overrides in
+        ``evolution.models.<role>`` take priority, then the pricing service.
+        Unknown models fall back to $0.00 so evolution never aborts on a
+        model the pricing service hasn't indexed yet.
+        """
         rc = self.model_config.get(role, {}) or {}
         cin, cout = rc.get("cost_per_1m_input"), rc.get("cost_per_1m_output")
         if cin is not None and cout is not None:
             return float(cin), float(cout)
 
-        provider = (rc.get("provider") or "").lower()
-        model_l = (model or rc.get("model") or "").lower()
-        for key in (f"{provider}:{model_l}", model_l):
-            if key in DEFAULT_PRICING:
-                return DEFAULT_PRICING[key]
-        # match by suffix (model without provider prefix)
-        for key, val in DEFAULT_PRICING.items():
-            if model_l and key.endswith(":" + model_l):
-                return val
+        provider = provider or rc.get("provider")
+        base_url = base_url or rc.get("base_url")
+        model_name = model or rc.get("model") or ""
 
-        tag = f"{provider}:{model_l}"
+        try:
+            from agent.usage_pricing import get_pricing_entry
+
+            entry = get_pricing_entry(
+                model_name,
+                provider=provider,
+                base_url=base_url,
+            )
+            if entry:
+                return (
+                    float(entry.input_cost_per_million or 0),
+                    float(entry.output_cost_per_million or 0),
+                )
+        except Exception:
+            pass  # pricing service unavailable — fall through to $0.00
+
+        tag = f"{provider or '?'}:{model_name}"
         if tag not in self._warned_missing:
             self._warned_missing.add(tag)
-            log.warning("[evolve] no pricing for %s — assuming $0.00 (free)", tag)
+            log.warning(
+                "[evolve] no pricing for %s via usage_pricing — assuming $0.00", tag
+            )
         return 0.0, 0.0
 
     @staticmethod
@@ -128,10 +142,18 @@ class BudgetTracker:
     def total_usd(self) -> float:
         return sum(s.cost_usd for s in self.cost_accumulator.values())
 
-    def track(self, role: str, model: str, input_tokens: int, output_tokens: int) -> float:
+    def track(
+        self,
+        role: str,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> float:
         """Record actual usage of a call. Returns the cost of that call."""
         input_tokens, output_tokens = int(input_tokens or 0), int(output_tokens or 0)
-        cin, cout = self._pricing(role, model)
+        cin, cout = self._pricing(role, model, provider=provider, base_url=base_url)
         cost = self._cost(input_tokens, output_tokens, cin, cout)
 
         st = self.cost_accumulator.setdefault(role, _RoleStats())
@@ -163,7 +185,13 @@ class BudgetTracker:
             )
         return cost
 
-    def predict(self, role: str, model: str) -> float:
+    def predict(
+        self,
+        role: str,
+        model: str,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> float:
         """Estimated cost of the next role call (session averages)."""
         st = self.cost_accumulator.get(role)
         if st and st.calls:
@@ -171,15 +199,21 @@ class BudgetTracker:
             out = st.output_tokens / st.calls
         else:
             inp, out = ROLE_TOKEN_DEFAULTS.get(role, _FALLBACK_TOKENS)
-        cin, cout = self._pricing(role, model)
+        cin, cout = self._pricing(role, model, provider=provider, base_url=base_url)
         return self._cost(int(inp), int(out), cin, cout)
 
-    def check_budget(self, role: str = "?", model: str = "?") -> None:
+    def check_budget(
+        self,
+        role: str = "?",
+        model: str = "?",
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
         """Raise BudgetExceededError if spent + predict(role) exceeds the limit."""
         if not self.max_cost_usd:
             return
         spent = self.total_usd
-        projected = spent + self.predict(role, model)
+        projected = spent + self.predict(role, model, provider=provider, base_url=base_url)
         if projected > self.max_cost_usd:
             raise BudgetExceededError(role, model, spent, projected, float(self.max_cost_usd))
 

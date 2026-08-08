@@ -247,6 +247,7 @@ class PUCTSearch:
         return delegate_hypothesis(
             skill_content, task_context, failure_signal, output_stdout,
             existing_hypotheses, parent_agent, focus, round_idx, total_rounds,
+            budget_tracker=self.budget_tracker,
         )
 
     def _default_test(self, hypothesis_description, observable_behavior,
@@ -255,6 +256,7 @@ class PUCTSearch:
         return delegate_test(
             hypothesis_description, observable_behavior,
             output_stdout, file_list, parent_agent,
+            budget_tracker=self.budget_tracker,
         )
 
     def _default_patch(self, skill_content, evidence_summary,
@@ -263,11 +265,15 @@ class PUCTSearch:
         return delegate_patch(
             skill_content, evidence_summary, task_context,
             max_children, parent_agent,
+            budget_tracker=self.budget_tracker,
         )
 
     def _default_execute(self, skill_content, task_context, parent_agent):
         from agent.skill_evolution_routing import delegate_execute
-        return delegate_execute(skill_content, task_context, parent_agent)
+        return delegate_execute(
+            skill_content, task_context, parent_agent,
+            budget_tracker=self.budget_tracker,
+        )
 
     # ── Fase 1: Hypothesis generation ─────────────────────────────────
     def _generate_hypotheses(self, round_idx: int) -> list[Hypothesis]:
