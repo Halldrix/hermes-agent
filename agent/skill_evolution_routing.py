@@ -6,13 +6,13 @@ del reflection agent, sin pasar por delegate_task (que solo acepta override
 global via delegation.* en config.yaml).
 
 Roles:
-  - hypothesis: genera hipótesis falsables (recuperable, heredado)
-  - test:       sintetiza tests ejecutables (eslabón crítico, CARO)
+  - hypothesis: generates falsifiable hypotheses (recoverable, inherited)
+  - test:       synthesizes executable tests (critical link, EXPENSIVE)
   - patch:      propone parches con ranking ordinal (recuperable, heredado)
   - execute:    ejecuta el task con skill inyectado (solo output, BARATO)
   - decide:     elige nodo a desplegar (hay fallback determinista, heredado)
 
-Configuración (config.yaml):
+Configuration (config.yaml):
   evolution:
     models:
       test:
@@ -34,7 +34,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# AIAgent se importa bajo demanda para no romper tests que no tengan el paquete
+# AIAgent imported lazily to not break tests without the package
 _AIAgent = None
 def _get_aiagent():
     global _AIAgent
@@ -44,7 +44,7 @@ def _get_aiagent():
     return _AIAgent
 
 
-# ── Defaults de tokens por rol (para estimación predictiva de costo) ──
+# ── Token defaults per role (for predictive cost estimation) ──
 _DEFAULT_TOKEN_BUDGET = {
     "hypothesis": {"input": 3000, "output": 500},
     "test":       {"input": 2000, "output": 800},
@@ -55,7 +55,7 @@ _DEFAULT_TOKEN_BUDGET = {
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 1. Resolución de credenciales por rol
+# 1. Credential resolution per role
 # ──────────────────────────────────────────────────────────────────────
 
 def _resolve_role_credentials(role: str, parent_agent) -> dict:
@@ -76,7 +76,7 @@ def _resolve_role_credentials(role: str, parent_agent) -> dict:
     except Exception:
         cfg = {}
 
-    # 1. Override específico del rol
+    # 1. Role-specific override
     role_provider = cfg_get(cfg, "evolution", "models", role, "provider")
     role_model = cfg_get(cfg, "evolution", "models", role, "model")
     role_provider = str(role_provider).strip() if role_provider else None
@@ -87,7 +87,7 @@ def _resolve_role_credentials(role: str, parent_agent) -> dict:
         delegation_cfg = cfg.get("delegation", {}) if isinstance(cfg, dict) else {}
         return _resolve_delegation_fallback(delegation_cfg, parent_agent)
 
-    # 3. Resolver el runtime provider si se específicó provider
+    # 3. Resolve runtime provider if provider was specified
     if role_provider:
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -113,23 +113,23 @@ def _resolve_role_credentials(role: str, parent_agent) -> dict:
                 parent_agent,
             )
 
-    # 4. Solo model seteado, sin provider → usar provider del parent
+    # 4. Only model set, no provider → use parent's provider
     return {
         "model": role_model,
         "provider": getattr(parent_agent, "provider", None),
         "base_url": getattr(parent_agent, "base_url", None),
-        "api_key": None,  # hereda del parent
+        "api_key": None,  # inherits from parent
         "api_mode": getattr(parent_agent, "api_mode", None),
     }
 
 
 def _resolve_delegation_fallback(delegation_cfg: dict, parent_agent) -> dict:
-    """Fallback al comportamiento estándar de delegate_task."""
+    """Fallback to standard delegate_task behavior."""
     configured_model = str(delegation_cfg.get("model") or "").strip() or None
     configured_provider = str(delegation_cfg.get("provider") or "").strip() or None
 
     if not configured_provider and not configured_model:
-        # Heredar todo del parent
+        # Inherit everything from parent
         return {
             "model": getattr(parent_agent, "model", None),
             "provider": getattr(parent_agent, "provider", None),
@@ -165,7 +165,7 @@ def _resolve_delegation_fallback(delegation_cfg: dict, parent_agent) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 2. _delegate_role — el spawn del reflection agent
+# 2. _delegate_role — the reflection agent spawn
 # ──────────────────────────────────────────────────────────────────────
 
 def _delegate_role(
@@ -179,7 +179,7 @@ def _delegate_role(
     """Spawnea un AIAgent con provider:model configurado para el rol.
 
     No pasa por delegate_task para evitar el override global. Construye un
-    AIAgent directo con ephemeral_system_prompt y toolsets vacíos — el
+    Direct AIAgent with ephemeral_system_prompt and empty toolsets — the
     reflection agent solo razona, no usa tools.
 
     Args:
@@ -188,7 +188,7 @@ def _delegate_role(
         user_msg: contenido del mensaje del usuario con skill + output + evidence.
         parent_agent: el AIAgent padre (para herencia de credentials si no hay override).
         expected_json_key: si se setea, parsea la respuesta como JSON y extrae esa key.
-        max_iterations: máx iteraciones del tool loop del child (default 3).
+        max_iterations: max iterations of the child's tool loop (default 3).
 
     Returns:
         - Si expected_json_key es None: el texto de respuesta del child.
@@ -204,14 +204,14 @@ def _delegate_role(
         api_key=creds.get("api_key"),
         api_mode=creds.get("api_mode"),
         max_iterations=max_iterations,
-        enabled_toolsets=[],               # sin tools → solo razona
+        enabled_toolsets=[],               # no tools → only reasoning
         disabled_toolsets=None,
         ephemeral_system_prompt=system_prompt,
-        skip_memory=True,                    # no contaminar con memoria del parent
+        skip_memory=True,                    # don't pollute with parent memory
         skip_background_review=True,         # no disparar curator fork
         skip_context_files=True,             # no cargar AGENTS.md/CLAUDE.md
         load_soul_identity=False,
-        quiet_mode=True,                     # silenciar logs del child
+        quiet_mode=True,                     # silence child logs
         log_prefix=f"[see-{role}] ",
     )
 
@@ -219,10 +219,10 @@ def _delegate_role(
 
     response_text = ""
     try:
-        # AIAgent.run() retorna el texto final del assistant
+        # AIAgent.run() returns the assistant's final text
         response_text = child.run(messages)
         if isinstance(response_text, dict):
-            # Algunas instalaciones retornan un dict con metadata
+            # Some installations return a dict with metadata
             response_text = str(response_text.get("content") or
                                 response_text.get("response") or "")
         response_text = str(response_text or "").strip()
@@ -230,7 +230,7 @@ def _delegate_role(
         logger.warning("_delegate_role[%s] failed: %s", role, e)
         return [] if expected_json_key else ""
     finally:
-        # Liberar recursos del child agent
+        # Release child agent resources
         close = getattr(child, "close", None)
         if callable(close):
             try:
@@ -248,7 +248,7 @@ def _delegate_role(
 
 def _extract_json_key(text: str, key: str) -> Any:
     """Extrae el valor de una key de un JSON embebido en texto."""
-    # Estrategia 1: buscar el primer {...} y parsear
+    # Strategy 1: find the first {...} and parse
     j_start = text.find("{")
     j_end = text.rfind("}") + 1
     if j_start != -1 and j_end > j_start:
@@ -256,7 +256,7 @@ def _extract_json_key(text: str, key: str) -> Any:
             return json.loads(text[j_start:j_end]).get(key, [])
         except json.JSONDecodeError:
             pass
-    # Estrategia 2: buscar un array [...] si la key es plural
+    # Strategy 2: find an array [...] if the key is plural
     if key.endswith("s") or key in ("patches", "hypotheses"):
         a_start = text.find("[")
         a_end = text.rfind("]") + 1
@@ -271,11 +271,11 @@ def _extract_json_key(text: str, key: str) -> Any:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 3. Wrappers por rol (establece system_prompt y expected_json_key)
+# 3. Role wrappers (sets system_prompt and expected_json_key)
 # ──────────────────────────────────────────────────────────────────────
 
-# Prompts operacionales — se mantienen en skill_evolution.py en el diseño completo.
-# Aquí hay esqueletos para que el prototipo sea ejecutable.
+# Operational prompts — kept in skill_evolution.py in the full design.
+# Skeletons here so the prototype is executable.
 
 PROMPT_HYPOTHESIS_GEN = """You are a diagnostic engine for AI agent skills.
 Propose 3-5 NEW falsifiable hypotheses about what specific defect in the skill
@@ -366,7 +366,7 @@ def delegate_test(
     parent_agent,
 ) -> Optional[str]:
     """Lanza el reflection agent en modo test (modelo caro).
-    Retorna el código Python del test, o None si falla.
+    Returns the Python test code, or None on failure.
     """
     user_msg = f"""Hypothesis: {hypothesis_description}
 Observable behavior that confirms/refutes: {observable_behavior}
@@ -439,13 +439,13 @@ def delegate_execute(
 
 
 def _extract_code_block(text: str) -> Optional[str]:
-    """Extrae el primer bloque de código Python de la respuesta del LLM."""
+    """Extract the first Python code block from the LLM response."""
     # ```python ... ``` o ``` ... ```
     pattern = r"```(?:python)?\s*\n(.*?)\n```"
     m = re.search(pattern, text, re.DOTALL)
     if m:
         return m.group(1).strip()
-    # Sin code block — intentar toda la respuesta si parece Python
+    # No code block — try the whole response if it looks like Python
     if "def check(" in text:
         return text.strip()
     return None

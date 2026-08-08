@@ -1,10 +1,10 @@
 """Budget tracking activo para el Skill Evolution Engine (SEE).
 
-Uso mínimo:
+Minimal usage:
 
     tracker = BudgetTracker.from_config(cfg.get("evolution", {}))
     ...
-    tracker.check_budget(role, model)          # antes del spawn -> puede raise
+    tracker.check_budget(role, model)          # before spawn -> may raise
     text = child.run(prompt)
     u = getattr(child, "last_usage", None)
     tracker.track(role, model, getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0))
@@ -21,8 +21,8 @@ from typing import Any
 log = logging.getLogger("hermes.evolution.budget")
 
 # --------------------------------------------------------------------------- #
-# Pricing defaults (USD por 1M tokens, estimaciones 2026)
-# Clave: "provider:model" en minúsculas. Valor: (input, output).
+# Pricing defaults (USD per 1M tokens, 2026 estimates)
+# Key: "provider:model" lowercase. Value: (input, output).
 # --------------------------------------------------------------------------- #
 DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "anthropic:claude-opus-4-7": (15.0, 75.0),
@@ -43,7 +43,7 @@ DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "nous:hermes-4-70b": (0.30, 0.80),
 }
 
-# Defaults conservadores por rol para la primera predicción (in, out).
+# Conservative per-role defaults for the first prediction (in, out).
 ROLE_TOKEN_DEFAULTS: dict[str, tuple[int, int]] = {
     "hypothesis": (3000, 500),
     "test": (2000, 800),
@@ -108,7 +108,7 @@ class BudgetTracker:
         for key in (f"{provider}:{model_l}", model_l):
             if key in DEFAULT_PRICING:
                 return DEFAULT_PRICING[key]
-        # match por sufijo (model sin prefijo de provider)
+        # match by suffix (model without provider prefix)
         for key, val in DEFAULT_PRICING.items():
             if model_l and key.endswith(":" + model_l):
                 return val
@@ -164,7 +164,7 @@ class BudgetTracker:
         return cost
 
     def predict(self, role: str, model: str) -> float:
-        """Costo estimado de la próxima llamada del rol (promedios de sesión)."""
+        """Estimated cost of the next role call (session averages)."""
         st = self.cost_accumulator.get(role)
         if st and st.calls:
             inp = st.input_tokens / st.calls
@@ -204,8 +204,8 @@ class BudgetTracker:
 # --------------------------------------------------------------------------- #
 # 1) En _delegate_role(self, role, prompt, ...):
 #
-#       model = self._model_for_role(role)          # de evolution.models[role]
-#       self.budget.check_budget(role, model)       # <-- ANTES del spawn (raise)
+#       model = self._model_for_role(role)          # from evolution.models[role]
+#       self.budget.check_budget(role, model)       # <-- BEFORE spawn (raise)
 #       child = AIAgent(model=model, ...)
 #       text = child.run(prompt)
 #       u = getattr(child, "last_usage", None)      # o callback on_usage
@@ -230,4 +230,4 @@ class BudgetTracker:
 #
 # Nota: si AIAgent no expone last_usage, registrar un callback
 # `child.on_usage = lambda u: self.budget.track(role, model, u.input_tokens, u.output_tokens)`
-# y omitir el track manual para no contar doble.
+# and omit manual tracking to avoid double counting.
