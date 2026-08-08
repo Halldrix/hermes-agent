@@ -2,20 +2,20 @@
 SEE — Skill Evolution Engine: Orquestador con bucle PUCT y matriz de evidencia.
 
  Integra los 4 componentes del prototipo:
-  - skill_evolution_sandbox.py    (ejecución segura de tests)
+  - skill_evolution_sandbox.py    (safe test execution)
   - skill_evolution_routing.py     (_delegate_role con model routing por rol)
   - skill_evolution_test_cache.py  (cache de tests entre evoluciones)
   - skill_evolution_budget.py      (budget tracking con max_cost_usd)
 
 Algoritmo: PUCT (Predictor + Upper Confidence bounds applied to Trees)
-  1. Selection:    recorre el árbol desde raíz eligiendo el hijo con max UCB1
+  1. Selection:    traverse the tree from root choosing the child with max UCB1
   2. Expansion:    genera K candidatos con delegate_patch (coefficient α ~ PUCT)
-  3. Simulation:   ejecuta el skill parcheado y evalúa tests → llena M[v, test_id]
-  4. Backprop:     propaga el valor (evidence score) desde la hoja hasta la raíz
+  3. Simulation:   execute the patched skill and evaluate tests → fills M[v, test_id]
+  4. Backprop:     propagate the value (evidence score) from the leaf up to the root
 
 Matriz de evidencia M[v, test_id] ∈ {0, 1, None}:
-  - 1    = el test pasó (el skill parcheado satisface la hipótesis)
-  - 0    = el test falló (el skill parcheado no satisface la hipótesis)
+  - 1    = test passed (the patched skill satisfies the hypothesis)
+  - 0    = test failed (the patched skill does not satisfy the hypothesis)
   - None = test no ejecutado para este nodo
 
 El mejor nodo (max evidence score) se elige al final como el parche ganador.
@@ -40,21 +40,21 @@ logger = logging.getLogger("hermes.evolution")
 
 # ── Constantes ────────────────────────────────────────────────────────
 DEFAULT_BUDGET = 5            # max iteraciones PUCT
-DEFAULT_K = 3                  # candidatos por expansión
+DEFAULT_K = 3                  # candidates per expansion
 UCB_C = 1.4142                 # sqrt(2) — exploration constant
 TTL_DAYS = 30
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 1. Estructuras de datos
+# 1. Data structures
 # ══════════════════════════════════════════════════════════════════════
 
 @dataclass
 class Hypothesis:
-    """Hipótesis falsable sobre un defecto del skill."""
+    """Falsifiable hypothesis about a skill defect."""
     id: str                      # "H1", "H2", ...
     description: str             # "El skill no valida exit code"
-    observable_behavior: str     # "exit_code debe ser 0"
+    observable_behavior: str     # "exit_code must be 0"
     action: str = "add"          # "add" | "refine" | "refute"
     rationale: str = ""
     status: str = "pending"      # "pending" | "confirmed" | "refuted"
@@ -81,9 +81,9 @@ class EvidenceEntry:
 
 @dataclass
 class PUCTNode:
-    """Nodo del árbol de búsqueda PUCT.
+    """PUCT search tree node.
 
-    Cada nodo representa una versión del skill (la raíz = skill original,
+    Each node represents a skill version (root = original skill,
     los hijos = skill parcheado con cada PatchCandidate).
     """
     node_id: str
@@ -98,7 +98,7 @@ class PUCTNode:
 
     # PUCT stats
     visits: int = 0
-    total_value: float = 0.0     # suma de evidence scores
+    total_value: float = 0.0     # sum of evidence scores
 
     # metadata
     depth: int = 0
@@ -133,14 +133,14 @@ def _hash_skill(content: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 2. Matriz de evidencia
+# 2. Evidence matrix
 # ══════════════════════════════════════════════════════════════════════
 
 class EvidenceMatrix:
     """Matriz M[node_id, test_id] → EvidenceEntry.
 
-    Permite consultar: ¿qué tests pasó cada versión del skill?
-    Hipótesis confirmada si todos sus tests pasan en al menos un nodo.
+    Allows querying: which tests did each skill version pass?
+    A hypothesis is confirmed if all its tests pass in at least one node.
     """
 
     def __init__(self):
@@ -166,10 +166,10 @@ class EvidenceMatrix:
         return scored[0][0]
 
     def confirmed_hypotheses(self, node: PUCTNode, hypotheses: list[Hypothesis]) -> list[str]:
-        """Retorna IDs de hipótesis confirmadas en este nodo (todos sus tests pasan)."""
+        """Returns IDs of confirmed hypotheses in this node (all their tests pass)."""
         confirmed = []
         for h in hypotheses:
-            # Tests vinculados a esta hipótesis en este nodo
+            # Tests linked to this hypothesis in this node
             h_tests = [
                 r for tid, r in node.evidence.items()
                 if tid.startswith(h.id + "_")
@@ -191,7 +191,7 @@ class EvidenceMatrix:
 # ══════════════════════════════════════════════════════════════════════
 
 class PUCTSearch:
-    """Búsqueda PUCT sobre el árbol de parches del skill."""
+    """PUCT search over the skill's patch tree."""
 
     def __init__(
         self,
@@ -205,7 +205,7 @@ class PUCTSearch:
         max_children: int = DEFAULT_K,
         budget_tracker: Optional[BudgetTracker] = None,
         test_cache: Optional[TestCache] = None,
-        # Injectables para testing (mock delegates)
+        # Injectables for testing (mock delegates)
         delegate_hypothesis_fn=None,
         delegate_test_fn=None,
         delegate_patch_fn=None,
@@ -223,7 +223,7 @@ class PUCTSearch:
         self.budget_tracker = budget_tracker
         self.test_cache = test_cache
 
-        # Delegates (inyectables para test)
+        # Delegates (injectable for testing)
         self._delegate_hypothesis = delegate_hypothesis_fn or self._default_hypothesis
         self._delegate_test = delegate_test_fn or self._default_test
         self._delegate_patch = delegate_patch_fn or self._default_patch
@@ -239,7 +239,7 @@ class PUCTSearch:
         self.matrix = EvidenceMatrix()
         self.hypotheses: list[Hypothesis] = []
 
-    # ── Delegates por defecto (usan skill_evolution_routing) ──────────
+    # ── Default delegates (use skill_evolution_routing) ──────────
     def _default_hypothesis(self, skill_content, task_context, failure_signal,
                              output_stdout, existing_hypotheses, parent_agent,
                              focus=None, round_idx=1, total_rounds=3):
@@ -271,7 +271,7 @@ class PUCTSearch:
 
     # ── Fase 1: Hypothesis generation ─────────────────────────────────
     def _generate_hypotheses(self, round_idx: int) -> list[Hypothesis]:
-        """Genera 3-5 hipótesis falsables sobre el defecto del skill."""
+        """Generate 3-5 falsifiable hypotheses about the skill defect."""
         existing = [
             {"id": h.id, "description": h.description, "status": h.status}
             for h in self.hypotheses
@@ -301,9 +301,9 @@ class PUCTSearch:
             ))
         return result
 
-    # ── Fase 2: Test generation (con cache) ───────────────────────────
+    # ── Phase 2: Test generation (with cache) ───────────────────────────
     def _generate_test_for_hypothesis(self, h: Hypothesis) -> Optional[str]:
-        """Genera (o recupera del cache) un test ejecutable para la hipótesis."""
+        """Generate (or recover from cache) an executable test for the hypothesis."""
 
         # 1. Cache lookup
         if self.test_cache:
@@ -331,13 +331,13 @@ class PUCTSearch:
         if not code:
             return None
 
-        # 3. Validar antes de aceptar
+        # 3. Validate before accepting
         ok, reason = validate_test_strict(code)
         if not ok:
             logger.warning("[evolve] test rejected for %s: %s", h.id, reason)
             return None
 
-        # 4. Guardar en cache
+        # 4. Store in cache
         if self.test_cache:
             try:
                 test_case = TestCase(
@@ -357,7 +357,7 @@ class PUCTSearch:
 
     # ── Fase 3: Selection (UCB1 traversal) ────────────────────────────
     def _select(self) -> PUCTNode:
-        """Recorre el árbol desde raíz eligiendo max UCB1 hasta llegar a una hoja."""
+        """Traverse the tree from root choosing max UCB1 until reaching a leaf."""
         node = self.root
         while node.children:
             node = max(node.children, key=lambda c: c.ucb1())
@@ -419,21 +419,21 @@ class PUCTSearch:
     # ── Fase 5: Simulation (ejecutar skill + tests) ────────────────────
     def _simulate(self, node: PUCTNode) -> float:
         """Ejecuta el skill parcheado, corre tests, retorna evidence score."""
-        # 1. Ejecutar el skill parcheado contra el task
+        # 1. Execute the patched skill against the task
         output = self._delegate_execute(
             skill_content=node.skill_content,
             task_context=self.task_context,
             parent_agent=self.parent_agent,
         )
 
-        # 2. Correr cada test contra el output
+        # 2. Run each test against the output
         for h in self.hypotheses:
             test_code = h._test_code if hasattr(h, "_test_code") else None
             if test_code is None:
                 test_code = self._generate_test_for_hypothesis(h)
                 if test_code is None:
                     continue
-                h._test_code = test_code  # cache en-memoria por hipótesis
+                h._test_code = test_code  # in-memory cache per hypothesis
 
             test_id = f"{h.id}_test"
             result = run_test_sandboxed(test_code, output or "", {}, timeout_s=5.0)
@@ -445,7 +445,7 @@ class PUCTSearch:
             )
             self.matrix.record(node, test_id, tr)
 
-            # Actualizar status de hipótesis
+            # Update hypothesis status
             if tr.passed:
                 h.status = "confirmed"
             elif h.status != "confirmed":
@@ -453,15 +453,15 @@ class PUCTSearch:
 
         # 3. Track budget
         if self.budget_tracker:
-            # Tokens reales vendrian del child agent; aquí usamos 0 como placeholder
-            # El tracking real ocurre en _delegate_role
+            # Real tokens would come from the child agent; here we use 0 as placeholder
+            # Real tracking happens in _delegate_role
             pass
 
         return node.evidence_score
 
     # ── Fase 6: Backpropagation ───────────────────────────────────────
     def _backprop(self, node: PUCTNode, value: float) -> None:
-        """Propaga el value desde la hoja hasta la raíz."""
+        """Propagate the value from the leaf up to the root."""
         while node is not None:
             node.visits += 1
             node.total_value += value
@@ -469,11 +469,11 @@ class PUCTSearch:
 
     # ── Bucle principal PUCT ───────────────────────────────────────────
     def run(self) -> dict[str, Any]:
-        """Ejecuta el bucle PUCT completo. Retorna resultado de la evolución."""
+        """Run the full PUCT loop. Returns the evolution result."""
         t0 = time.time()
         budget_exceeded = False
 
-        # 1. Generar hipótesis iniciales
+        # 1. Generate initial hypotheses
         try:
             self.hypotheses = self._generate_hypotheses(round_idx=1)
             logger.info("[evolve] generated %d hypotheses", len(self.hypotheses))
@@ -499,12 +499,12 @@ class PUCTSearch:
             children = self._expand(node)
 
             if not children:
-                # No se pudieron generar hijos — simular el nodo actual
+                # Could not generate children — simulate the current node
                 value = self._simulate(node)
                 self._backprop(node, value)
                 continue
 
-            # Simular el mejor hijo (rank 1) o todos si hay budget
+            # Simulate the best child (rank 1) or all if budget allows
             for child in children:
                 try:
                     value = self._simulate(child)
@@ -517,7 +517,7 @@ class PUCTSearch:
             if budget_exceeded:
                 break
 
-            # Refinar hipótesis: si todas confirmadas, generar nuevas con focus
+            # Refine hypotheses: if all confirmed, generate new ones with focus
             confirmed = self.matrix.confirmed_hypotheses(node, self.hypotheses)
             if len(confirmed) == len(self.hypotheses) and iteration < self.budget_iterations - 1:
                 new_hyps = self._generate_hypotheses(round_idx=iteration + 2)
@@ -535,7 +535,7 @@ class PUCTSearch:
         budget_exceeded: bool = False,
         error: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Construye el resultado final de la evolución."""
+        """Build the final evolution result."""
         result = {
             "skill_name": self.skill_name,
             "iterations": self.root.visits,
@@ -572,7 +572,7 @@ class PUCTSearch:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 4. Entry point público
+# 4. Public entry point
 # ══════════════════════════════════════════════════════════════════════
 
 def evolve_skill(
@@ -587,17 +587,17 @@ def evolve_skill(
     # Para testing
     mock_delegates: Optional[dict] = None,
 ) -> dict[str, Any]:
-    """Orquesta una evolución completa del skill.
+    """Orchestrate a full skill evolution.
 
     Args:
         skill_name: nombre del skill a evolucionar.
         skill_content: contenido actual del SKILL.md.
-        task_context: contexto del task que falló.
-        output_stdout: output producido por el agente (que falló).
+        task_context: context of the task that failed.
+        output_stdout: output produced by the agent (that failed).
         parent_agent: AIAgent padre (para delegates).
-        failure_signal: descripción de la señal de fallo.
+        failure_signal: description of the failure signal.
         config: config de evolution (max_cost_usd, models, etc.).
-        category: categoría del skill (para el cache).
+        category: skill category (for cache).
         mock_delegates: dict con delegates inyectables para testing.
 
     Returns:

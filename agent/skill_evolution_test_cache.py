@@ -36,7 +36,7 @@ class TestCase:
     hypothesis_id: str                 # p.ej. "H1"
     hypothesis_description: str
     observable_behavior: str
-    code: str                          # cuerpo del .py cacheado
+    code: str                          # cached .py body
     category: str = "hard"             # "hard" | "semantic"
     validated: bool = False
     skill_version_hash: str = ""
@@ -163,7 +163,7 @@ class TestCache:
                     self._save_manifest(manifest)
                     self._hits += 1
                     return test
-        except OSError as exc:  # lock / I/O: degrade a miss
+        except OSError as exc:  # lock / I/O: degrade to miss
             raise TestCacheError(str(exc)) from exc
         self._misses += 1
         return None
@@ -197,7 +197,7 @@ class TestCache:
                     f.write(test.code)
                 os.replace(tmp, code_path)
         except OSError:
-            pass  # best-effort: la evolucion continua sin cache
+            pass  # best-effort: evolution continues without cache
 
     def invalidate_stale_tests(self, current_skill_hash: str) -> list[str]:
         """Marca stale (no borra) los tests de versiones anteriores del skill."""

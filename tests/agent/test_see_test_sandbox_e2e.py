@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-SEE Prototype — Test end-to-end del eslabón crítico.
+SEE Prototype — End-to-end test of the critical link.
 
 Valida que:
-1. El sandbox ejecuta tests válidos y rechaza inválidos.
+1. The sandbox runs valid tests and rejects invalid ones.
 2. _validate_test_strict detecta tests triviales (always-true).
 3. El sandbox detecta imports prohibidos.
-4. El sandbox ejecuta tests reales que un modelo caro generaría.
+4. The sandbox runs real tests that an expensive model would generate.
 5. El bloqueo de tests siempre-true funciona con scenarios contrastantes.
 
 No requiere LLM ni AIAgent — solo el sandbox puro.
@@ -14,7 +14,7 @@ No requiere LLM ni AIAgent — solo el sandbox puro.
 import sys
 import os
 
-# Importar el sandbox del prototipo
+# Import the sandbox from the prototype
 from agent.skill_evolution_sandbox import (
     validate_test,
     validate_test_strict,
@@ -22,39 +22,39 @@ from agent.skill_evolution_sandbox import (
     TestResult,
 )
 
-# ── Test 1: Test válido que un modelo caro generaría ─────────────────
+# ── Test 1: Valid test that an expensive model would generate ─────────────────
 
-# Simula un test real para la hipótesis:
-# "El skill no verifica que el comando gh está instalado antes de usarlo"
+# Simulates a real test for the hypothesis:
+# "The skill does not verify that the gh command is installed before using it"
 TEST_VALID_GH_CHECK = '''import json
 import re
 
 def check(output: str, files: dict) -> dict:
     """
     Verifica que el output incluya una referencia a 'gh' como comando ejecutado.
-    Si el skill falló porque gh no está instalado, el output debería
+    If the skill failed because gh is not installed, the output should
     contener 'command not found' o 'gh: not found'.
     """
     if not output:
         return {"pass": False, "reason": "output is empty", "category": "hard"}
     
-    # Si el output menciona gh no encontrado, el test pasa (confirma la hipótesis)
+    # If the output mentions gh not found, the test passes (confirms the hypothesis)
     if re.search(r"gh.*not found|command not found.*gh", output, re.IGNORECASE):
         return {"pass": True, "reason": "output confirms gh missing", "category": "hard"}
     
-    # Si el output tiene un PR number, el skill funcionó — hipótesis refuted
+    # If the output has a PR number, the skill worked — hypothesis refuted
     if re.search(r"PR #\\d+|pull request.*created", output, re.IGNORECASE):
         return {"pass": False, "reason": "output shows PR created — gh works", "category": "semantic"}
     
     return {"pass": False, "reason": "ambiguous output", "category": "semantic"}
 '''
 
-# Simula un test trivial (always-true) que un modelo barato podría generar
+# Simulates a trivial (always-true) test that a cheap model might generate
 TEST_TRIVIAL_ALWAYS_TRUE = '''def check(output: str, files: dict) -> dict:
     return {"pass": True, "reason": "always passes", "category": "semantic"}
 '''
 
-# Simula un test con import prohibido
+# Simulates a test with a forbidden import
 TEST_FORBIDDEN_IMPORT = '''import subprocess
 
 def check(output: str, files: dict) -> dict:
@@ -62,12 +62,12 @@ def check(output: str, files: dict) -> dict:
     return {"pass": result.returncode == 0, "reason": "checked gh", "category": "hard"}
 '''
 
-# Test bien hecho que pasa en plausible pero falla en garbage
+# Well-made test that passes on plausible but fails on garbage
 TEST_GOOD_SEMANTIC = '''import re
 
 def check(output: str, files: dict) -> dict:
     """
-    Verifica que el output contenga un PR number válido.
+    Verify that the output contains a valid PR number.
     """
     if re.search(r"PR #\\d+", output):
         return {"pass": True, "reason": "PR number found", "category": "semantic"}
@@ -84,7 +84,7 @@ def test_rejects_trivial_always_true():
 
 
 def test_rejects_forbidden_import():
-    """El validador básico debe rechazar subprocess."""
+    """Basic validator must reject subprocess."""
     v = validate_test(TEST_FORBIDDEN_IMPORT)
     assert not v.valid, f"should reject subprocess: {v.reason}"
     assert "forbidden" in v.reason.lower() or "subprocess" in v.reason
@@ -120,14 +120,14 @@ def test_sandbox_executes_valid_test_fail_case():
 
 
 def test_good_semantic_passes_validation():
-    """El test semántico bien hecho pasa validación reforzada."""
+    """Well-made semantic test passes reinforced validation."""
     ok, reason = validate_test_strict(TEST_GOOD_SEMANTIC)
     assert ok, f"should accept good semantic test: {reason}"
     print("✓ test_good_semantic_passes_validation passed")
 
 
 def test_good_semantic_runs_correctly_on_plausible():
-    """El buen test semántico pasa cuando el output tiene PR#."""
+    """Good semantic test passes when output has PR#."""
     result = run_test_sandboxed(
         TEST_GOOD_SEMANTIC,
         "PR #42 created at https://github.com/org/repo/pull/42",
@@ -139,7 +139,7 @@ def test_good_semantic_runs_correctly_on_plausible():
 
 
 def test_good_semantic_fails_on_garbage():
-    """El buen test semántico falla cuando el output es garbage."""
+    """Good semantic test fails when output is garbage."""
     result = run_test_sandboxed(
         TEST_GOOD_SEMANTIC,
         "GARBAGE_TEST_INPUT_12345",
@@ -151,7 +151,7 @@ def test_good_semantic_fails_on_garbage():
 
 
 def test_sandbox_handles_test_exception():
-    """Un test que lanza excepción retorna TestResult con error."""
+    """A test that raises an exception returns a TestResult with error."""
     TEST_WITH_BUG = '''def check(output: str, files: dict) -> dict:
     # Divide by zero bug
     x = 1 / 0
@@ -171,8 +171,8 @@ def check(output: str, files: dict) -> dict:
     time.sleep(10)  # cuelga
     return {"pass": True, "reason": "unreached", "category": "hard"}
 '''
-    # time.sleep no está en builtins permitidos, así que este test
-    # realmente fallará con NameError, no con timeout. Ajustamos:
+    # time.sleep is not in the allowed builtins, so this test
+    # will actually fail with NameError, not timeout. We adjust:
     TEST_HANG_ALT = '''def check(output: str, files: dict) -> dict:
     sum = 0
     for i in range(100000000):
@@ -180,13 +180,13 @@ def check(output: str, files: dict) -> dict:
     return {"pass": sum > 0, "reason": "slow", "category": "hard"}
 '''
     result = run_test_sandboxed(TEST_HANG_ALT, "any", {}, timeout_s=0.5)
-    # Puede que termine rápido (Python optimiza) o que timeout
+    # Might finish fast (Python optimizes) or timeout
     assert result.passed is False or result.runtime_s < 1.0
     print(f"✓ test_sandbox_handles_test_timeout passed ({result.runtime_s:.3f}s, error={result.error})")
 
 
 def test_rejects_empty_code():
-    """Validador rechaza código vacío."""
+    """Validator rejects empty code."""
     v = validate_test("")
     assert not v.valid
     print("✓ test_rejects_empty_code passed")
@@ -214,7 +214,7 @@ def test_rejects_no_dict_return():
 
 
 def test_files_passed_to_test():
-    """El sandbox pasa files dict al test. El test debe ser diseñado
+    """The sandbox passes files dict to the test. The test must be designed
     para no fallar trivialmente en los 3 escenarios contrastantes."""
     TEST_USES_FILES = '''def check(output: str, files: dict) -> dict:
     # Si no hay files, no opinamos — pasamos neutral
