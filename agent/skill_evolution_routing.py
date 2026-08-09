@@ -311,16 +311,61 @@ Output JSON:
 }
 """
 
-PROMPT_TEST_GEN = """You are a test synthesis engine. Write a Python function
-`def check(output: str, files: dict) -> dict` that checks the cached output
-for the predicted behavior described in the hypothesis.
+PROMPT_TEST_GEN = """You are a test synthesis engine for the Skill Evolution Engine (PUCT patch search).
 
-The function must:
-- Return: {{"pass": bool, "reason": str, "category": "hard" | "semantic"}}
-- Use only json, re, os.path, yaml imports (no subprocess/socket/open).
-- Be deterministic and run in under 1 second.
+CONTEXT YOU ARE GIVEN
+- Hypothesis (describes a DEFECT in the current skill): {hypothesis_description}
+- Observable behavior that confirms the defect: {observable_behavior}
+- Cached stdout from the FAILING baseline run: {stdout_preview}
+- Files available to the test: {file_list}
 
-Output ONLY the function definition in a code block.
+YOUR JOB
+Write a Python function `def check(output: str, files: dict) -> dict` that acts as a
+REGRESSION TEST FOR THE FIX, not a detector of the defect.
+
+INVERSION RULE (most important)
+The hypothesis describes what is WRONG. Your test must assert the OPPOSITE — the corrected
+behavior. Concretely:
+  pass == True  <=> the defect described by the hypothesis is RESOLVED
+  pass == False <=> the defect is still present, or no evidence of resolution exists
+Never write a test that returns pass=True because the defect signal was found. If the cached
+baseline output is fed to your test, your test MUST return pass=False — that is the correctness
+invariant for your own test. State this in `reason`.
+
+WHAT COUNTS AS EVIDENCE OF RESOLUTION (check in this priority order)
+1. STATIC / ARTIFACT EVIDENCE (preferred, most reliable):
+   `files` is a dict mapping filename -> file content as a string. It normally contains the
+   CANDIDATE-PATCHED skill under a key like "SKILL.md" (match keys case-insensitively and by
+   endswith("SKILL.md"), since paths may be prefixed). Read that content and assert that the
+   corrective construct the hypothesis implies is now present: e.g. a pre-flight availability
+   guard (`command -v <tool>`), an explicit error/abort branch, a documented fallback path, a
+   validation step ordered BEFORE the risky invocation. Prefer regex over exact substring, and
+   where ordering matters, compare match indices so the guard precedes the usage.
+2. DYNAMIC ABSENCE EVIDENCE: the defect's signature is absent from `output` (e.g. no
+   "command not found", no unhandled traceback, no silent empty result).
+3. RESOLUTION-SIGNAL EVIDENCE: `output` positively shows the corrected path executing — a clean
+   abort with an actionable message, the fallback being taken, the validation being reported.
+
+Combine them with OR-of-strong-evidence, not brittle AND-of-everything: if (1) holds, pass even
+when `output` is empty or stale, because a static patch can be verified without re-execution.
+Use AND only to reject contradictory states (e.g. guard present in SKILL.md but the defect
+signature still emitted at runtime -> pass=False).
+
+OUTPUT CONTRACT
+- Return {{"pass": bool, "reason": str, "category": "hard" | "semantic"}}
+- "hard" = deterministic structural/textual assertion (guard present, signature absent).
+- "semantic" = judgement about phrasing/intent quality.
+- `reason` must name which evidence tier (1/2/3) decided the verdict and quote the matched (or
+  missing) fragment, truncated to ~120 chars.
+- Be robust: never raise. Missing keys, None, empty strings, non-str values must be handled and
+  produce pass=False with an explanatory reason, never an exception.
+- Use only json, re, os.path, yaml imports (no subprocess, socket, open, eval, network,
+  filesystem access).
+- Deterministic, no randomness, no clock/env dependence, runs in under 1 second.
+- Be tolerant to formatting: normalize whitespace, ignore case for keyword matching, allow
+  markdown fences/backticks/indentation around the guard.
+
+Output ONLY the function definition in a single Python code block.
 """
 
 PROMPT_PATCH_GEN = """You are a skill revision engine. Propose up to {K}

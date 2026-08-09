@@ -424,7 +424,18 @@ class PUCTSearch:
 
     # ── Phase 5: Simulation (execute skill + tests) ────────────────────
     def _simulate(self, node: PUCTNode) -> float:
-        """Execute the patched skill, run tests, return evidence score."""
+        """Execute the patched skill, run tests, return evidence score.
+
+        Tests can assert the fix via two channels:
+          - `output` (str): the freshly VALUED execution output of the PATCHED skill
+            (what the patched skill produced when run). The cached BASELINE output
+            also remains available as self.output_stdout for reference.
+          - `files` (dict): the PATCHED skill content itself, keyed by "SKILL.md".
+            This lets generated tests verify structural correctness statically
+            (e.g. `command -v gh` guard present), which is essential because the
+            PATCHED execution output is the only per-node artifact that changes;
+            the BASELINE cached stdout is frozen and cannot show the fix working.
+        """
         # 1. Execute the patched skill against the task
         output = self._delegate_execute(
             skill_content=node.skill_content,
@@ -432,7 +443,16 @@ class PUCTSearch:
             parent_agent=self.parent_agent,
         )
 
-        # 2. Run each test against the output
+        # 2. The PASS-THROUGH files dict: the CANDIDATE-PATCHED SKILL content,
+        #    keyed by "SKILL.md" so tests can resolve it via files["SKILL.md"].
+        #    The PRE-patch (baseline) skill is also provided under "SKILL_BASELINE.md"
+        #    so tests can require that the guard/fix was ADDED (not already present).
+        sim_files = {
+            "SKILL.md": node.skill_content,
+            "SKILL_BASELINE.md": self.skill_content,
+        }
+
+        # 3. Run each test against (output, files)
         for h in self.hypotheses:
             test_code = h._test_code if hasattr(h, "_test_code") else None
             if test_code is None:
@@ -442,7 +462,9 @@ class PUCTSearch:
                 h._test_code = test_code  # in-memory cache per hypothesis
 
             test_id = f"{h.id}_test"
-            result = run_test_sandboxed(test_code, output or "", {}, timeout_s=5.0)
+            result = run_test_sandboxed(
+                test_code, output or "", sim_files, timeout_s=5.0
+            )
             tr = EvidenceEntry(
                 test_id=test_id,
                 passed=result.passed,
@@ -457,7 +479,7 @@ class PUCTSearch:
             elif h.status != "confirmed":
                 h.status = "refuted"
 
-        # 3. Track budget
+        # 4. Track budget
         if self.budget_tracker:
             # Real tokens would come from the child agent; here we use 0 as placeholder
             # Real tracking happens in _delegate_role

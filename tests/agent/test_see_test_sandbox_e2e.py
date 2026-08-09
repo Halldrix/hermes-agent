@@ -26,27 +26,54 @@ from agent.skill_evolution_sandbox import (
 
 # Simulates a real test for the hypothesis:
 # "The skill does not verify that the gh command is installed before using it"
+# Test semantics (aligned with the corrected PROMPT_TEST_GEN):
+#   pass=True  <=> the DEFECT is RESOLVED (guard present in files['SKILL.md'],
+#                  OR output shows clean abort, OR output shows PR created — gh works)
+#   pass=False <=> the DEFECT is still present (output shows "command not found" with no guard)
 TEST_VALID_GH_CHECK = '''import json
 import re
 
 def check(output: str, files: dict) -> dict:
     """
-    Verifica que el output incluya una referencia a 'gh' como comando ejecutado.
-    If the skill failed because gh is not installed, the output should
-    contener 'command not found' o 'gh: not found'.
+    Regression test for the FIX: assert that gh availability is pre-validated.
+    pass=True when the defect (blind gh invocation) is RESOLVED.
     """
-    if not output:
-        return {"pass": False, "reason": "output is empty", "category": "hard"}
-    
-    # If the output mentions gh not found, the test passes (confirms the hypothesis)
-    if re.search(r"gh.*not found|command not found.*gh", output, re.IGNORECASE):
-        return {"pass": True, "reason": "output confirms gh missing", "category": "hard"}
-    
-    # If the output has a PR number, the skill worked — hypothesis refuted
-    if re.search(r"PR #\\d+|pull request.*created", output, re.IGNORECASE):
-        return {"pass": False, "reason": "output shows PR created — gh works", "category": "semantic"}
-    
-    return {"pass": False, "reason": "ambiguous output", "category": "semantic"}
+    # Tier 1 (preferred): static artifact evidence — guard present in patched SKILL.md
+    skill_content = None
+    if files:
+        for name, content in files.items():
+            if not isinstance(name, str) or not isinstance(content, str):
+                continue
+            if name.upper().endswith("SKILL.MD"):
+                skill_content = content
+                break
+    if skill_content is not None:
+        guard_re = r"command\\s+-v\\s+gh|which\\s+gh|type\\s+-p\\s+gh|hash\\s+gh"
+        has_guard = re.search(guard_re, skill_content, re.IGNORECASE) is not None
+        gh_call_idx = skill_content.find("gh pr create")
+        guard_idx = min(
+            (m.start() for m in re.finditer(guard_re, skill_content, re.IGNORECASE)),
+            default=-1,
+        )
+        ordered_before = guard_idx != -1 and gh_call_idx != -1 and guard_idx < gh_call_idx
+        if has_guard and ordered_before:
+            return {"pass": True, "reason": "tier1: pre-flight gh guard precedes gh invocation in SKILL.md", "category": "hard"}
+        if has_guard:
+            return {"pass": True, "reason": "tier1: pre-flight gh guard present in SKILL.md", "category": "hard"}
+
+    # Tier 2: dynamic absence — defect signature absent from the freshly executed output
+    if output and re.search(r"gh.*not found|command not found.*gh", output, re.IGNORECASE):
+        return {"pass": False, "reason": "tier2: defect signature still in output (gh not found)", "category": "hard"}
+
+    # Tier 3: resolution signal — clean abort or successful PR creation
+    if output:
+        if re.search(r"pre-flight|pre-validate|not installed.*abort|aborting.*install", output, re.IGNORECASE):
+            return {"pass": True, "reason": "tier3: skill pre-validated gh and aborted cleanly", "category": "hard"}
+        if re.search(r"PR #\\d+|pull request.*created", output, re.IGNORECASE):
+            return {"pass": True, "reason": "tier3: PR created — gh works", "category": "semantic"}
+
+    # No evidence of resolution
+    return {"pass": False, "reason": "no evidence of fix (no guard in SKILL.md, no resolution signal in output)", "category": "semantic"}
 '''
 
 # Simulates a trivial (always-true) test that a cheap model might generate
@@ -99,24 +126,56 @@ def test_accepts_valid_test():
 
 
 def test_sandbox_executes_valid_test_pass_case():
-    """El sandbox ejecuta el test y detecta el caso pass (gh not found)."""
-    output_github_pr_fail = (
-        "Running gh pr create...\n"
-        "gh: command not found\n"
-        "Error: gh CLI is required but not installed."
+    """Sandbox executes the test and detects the PASS case (FIX present).
+
+    FIX-detection semantics: when the patched skill adds a pre-flight guard,
+    we pass the patched SKILL.md in `files`, and the test must return pass=True
+    because the defect (blind gh invocation) is RESOLVED.
+    """
+    patched_skill = (
+        "name: github-pr-create\n"
+        "# Create PR\n"
+        "1. Run `command -v gh` first; abort if not found.\n"
+        "2. Run `gh pr create --title \"...\" --body \"...\"`.\n"
     )
-    result = run_test_sandboxed(TEST_VALID_GH_CHECK, output_github_pr_fail, {}, timeout_s=5.0)
-    assert result.passed is True, f"should pass (gh missing): {result.reason}"
+    output_no_error = "Pre-flight check: gh CLI not installed. Aborting."
+    files = {"SKILL.md": patched_skill}
+    result = run_test_sandboxed(
+        TEST_VALID_GH_CHECK, output_no_error, files, timeout_s=5.0
+    )
+    assert result.passed is True, f"should pass (guard present in SKILL.md): {result.reason}"
     assert result.category == "hard"
     print(f"✓ test_sandbox_executes_valid_test_pass_case passed ({result.runtime_s:.3f}s)")
 
 
 def test_sandbox_executes_valid_test_fail_case():
-    """El sandbox ejecuta el test y detecta el caso fail (PR created)."""
-    output_success = "PR #42 created successfully\nhttps://github.com/org/repo/pull/42"
-    result = run_test_sandboxed(TEST_VALID_GH_CHECK, output_success, {}, timeout_s=5.0)
-    assert result.passed is False, f"should fail (PR created): {result.reason}"
+    """Sandbox executes the test and detects the FAIL case (defect still present).
+
+    FIX-detection semantics: when the unpatched skill still invokes gh blindly,
+    the output shows "command not found" with no guard in SKILL.md → pass=False.
+    """
+    output_gh_missing = (
+        "Running gh pr create...\n"
+        "gh: command not found\n"
+        "Error: gh CLI is required but not installed."
+    )
+    # No files dict → no static evidence; output shows the defect → pass=False.
+    result = run_test_sandboxed(
+        TEST_VALID_GH_CHECK, output_gh_missing, {}, timeout_s=5.0
+    )
+    assert result.passed is False, f"should fail (defect present, no guard): {result.reason}"
+    assert result.category == "hard"
     print(f"✓ test_sandbox_executes_valid_test_fail_case passed ({result.runtime_s:.3f}s)")
+
+
+def test_sandbox_valid_test_passes_on_pr_created():
+    """A successful PR-creation execution also resolves the defect → pass=True."""
+    output_success = "PR #42 created successfully\nhttps://github.com/org/repo/pull/42"
+    result = run_test_sandboxed(
+        TEST_VALID_GH_CHECK, output_success, {}, timeout_s=5.0
+    )
+    assert result.passed is True, f"should pass (PR created = gh works): {result.reason}"
+    print(f"✓ test_sandbox_valid_test_passes_on_pr_created passed ({result.runtime_s:.3f}s)")
 
 
 def test_good_semantic_passes_validation():
@@ -234,3 +293,20 @@ def test_files_passed_to_test():
     print(f"✓ test_files_passed_to_test passed ({result.runtime_s:.3f}s)")
 
 
+if __name__ == "__main__":
+    test_rejects_trivial_always_true()
+    test_rejects_forbidden_import()
+    test_accepts_valid_test()
+    test_sandbox_executes_valid_test_pass_case()
+    test_sandbox_executes_valid_test_fail_case()
+    test_sandbox_valid_test_passes_on_pr_created()
+    test_good_semantic_passes_validation()
+    test_good_semantic_runs_correctly_on_plausible()
+    test_good_semantic_fails_on_garbage()
+    test_sandbox_handles_test_exception()
+    test_sandbox_handles_test_timeout()
+    test_rejects_empty_code()
+    test_rejects_no_signature()
+    test_rejects_no_dict_return()
+    test_files_passed_to_test()
+    print("\n✅ All sandbox E2E tests passed")

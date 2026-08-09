@@ -1,0 +1,4 @@
+# Real-LLM smoke-test harnesses are intentionally committed now:
+# they validate the critical link (test synthesis) end-to-end with real LLMs.
+# see_e2e_real_harness.py and see_e2e_phase2_harness.py are part of the SEE test
+# suite and should NOT be ignored.
