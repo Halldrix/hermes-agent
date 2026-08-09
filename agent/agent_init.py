@@ -438,22 +438,45 @@ def _custom_provider_extra_body_for_agent(
 
 
 def _merge_custom_provider_extra_body(agent, custom_providers: List[Dict[str, Any]]) -> None:
+    """Merge the current provider's ``extra_body`` into ``agent.request_overrides``.
+
+    Re-entrant: keys injected by a *previous* call (tracked in
+    ``agent._custom_provider_extra_body_keys``) are dropped first, so a provider
+    failover (e.g. nvidia -> modal) cannot leak the primary provider's
+    ``extra_body`` (``thinking.type=adaptive``) into the fallback request, which
+    SGLang rejects with HTTP 400.  User/session-level overrides are preserved
+    because only previously auto-injected keys are purged.
+    """
     extra_body = _custom_provider_extra_body_for_agent(
         provider=agent.provider,
         model=agent.model,
         base_url=agent.base_url,
         custom_providers=custom_providers,
     )
-    if not extra_body:
+
+    previous_keys = list(getattr(agent, "_custom_provider_extra_body_keys", ()) or ())
+    if not extra_body and not previous_keys:
         return
 
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
-    merged_extra_body = dict(extra_body)
     existing_extra_body = overrides.get("extra_body")
-    if isinstance(existing_extra_body, dict):
-        merged_extra_body.update(existing_extra_body)
-    overrides["extra_body"] = merged_extra_body
+    carried: Dict[str, Any] = (
+        dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
+    )
+    # Drop only what a previous provider-scoped merge injected.
+    for key in previous_keys:
+        carried.pop(key, None)
+
+    merged_extra_body = dict(extra_body or {})
+    merged_extra_body.update(carried)
+
+    if merged_extra_body:
+        overrides["extra_body"] = merged_extra_body
+    else:
+        overrides.pop("extra_body", None)
+
     agent.request_overrides = overrides
+    agent._custom_provider_extra_body_keys = list((extra_body or {}).keys())
 
 
 def init_agent(

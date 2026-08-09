@@ -2111,9 +2111,30 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
+
+        # Re-resolve per-provider ``extra_body`` for the NEW provider/model/
+        # base_url.  Without this the primary provider's extra_body (e.g.
+        # nvidia's ``thinking.type=adaptive``) stays in
+        # ``agent.request_overrides`` and is injected verbatim into the
+        # fallback request by the chat_completions transport, which SGLang
+        # (modal/kimi) rejects with HTTP 400.  The merge helper is re-entrant:
+        # it purges the keys it injected previously and re-applies the new
+        # provider's set (or none).
+        try:
+            from agent.agent_init import _merge_custom_provider_extra_body
+
+            _merge_custom_provider_extra_body(
+                agent, getattr(agent, "_custom_providers", None) or []
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "Fallback to %s/%s: could not refresh custom-provider extra_body: %s",
+                fb_provider, fb_model, exc,
+            )
 
         # Rebind the credential pool to the fallback provider when the provider
         # changes.  Keeping the primary pool attached would make downstream
