@@ -276,3 +276,104 @@ def test_allowlist_and_escalation_gate_compose():
         _resolve_per_call_model(
             "anthropic/claude-opus-4", None, cfg, _FakeParent()
         )
+
+
+# --- Operator tier indirection (delegation.tiers) ---------------------------
+
+
+def test_tier_resolves_shorthand_string():
+    """A tier declared as a bare string maps to that model."""
+    from tools.delegate_tool import _resolve_tier_override
+
+    cfg = {"tiers": {"low": "haiku", "high": {"model": "opus"}}}
+    model, provider = _resolve_tier_override("low", cfg, _FakeParent())
+    assert model == "haiku"
+    assert provider is None
+
+
+def test_tier_resolves_dict_entry_with_provider():
+    """A dict entry carries an explicit provider."""
+    from tools.delegate_tool import _resolve_tier_override
+
+    cfg = {"tiers": {"high": {"model": "opus", "provider": "bedrock"}}}
+    model, provider = _resolve_tier_override("high", cfg, _FakeParent())
+    assert model == "opus"
+    assert provider == "bedrock"
+
+
+def test_tier_is_case_insensitive():
+    from tools.delegate_tool import _resolve_tier_override
+
+    cfg = {"tiers": {"High": {"model": "opus"}}}
+    model, _ = _resolve_tier_override("HIGH", cfg, _FakeParent())
+    assert model == "opus"
+
+
+def test_unknown_tier_raises_and_lists_configured():
+    from tools.delegate_tool import _resolve_tier_override
+
+    cfg = {"tiers": {"high": {"model": "opus"}, "low": "haiku"}}
+    with pytest.raises(ValueError) as exc:
+        _resolve_tier_override("medium", cfg, _FakeParent())
+    msg = str(exc.value)
+    assert "unknown tier" in msg.lower()
+    assert "high" in msg
+    assert "low" in msg
+
+
+def test_tier_without_tiers_config_raises():
+    from tools.delegate_tool import _resolve_tier_override
+
+    for cfg in ({}, {"tiers": None}, {"tiers": ["high"]}):
+        with pytest.raises(ValueError, match="not configured"):
+            _resolve_tier_override("high", cfg, _FakeParent())
+
+
+def test_tier_empty_raises():
+    from tools.delegate_tool import _resolve_tier_override
+
+    with pytest.raises(ValueError, match="empty"):
+        _resolve_tier_override(
+            "   ", {"tiers": {"high": "opus"}}, _FakeParent()
+        )
+
+
+def test_tier_invalid_entry_type_raises():
+    from tools.delegate_tool import _resolve_tier_override
+
+    with pytest.raises(ValueError, match="invalid config entry"):
+        _resolve_tier_override("high", {"tiers": {"high": 42}}, _FakeParent())
+
+
+def test_tier_entry_without_model_raises():
+    from tools.delegate_tool import _resolve_tier_override
+
+    with pytest.raises(ValueError, match="no resolvable model"):
+        _resolve_tier_override(
+            "high", {"tiers": {"high": {"provider": "bedrock"}}}, _FakeParent()
+        )
+
+
+def test_tier_resolution_chains_into_per_call_model():
+    """A tier resolving to a qualified id flows through the same resolver."""
+    from tools.delegate_tool import _resolve_tier_override, _resolve_per_call_model
+
+    cfg = {"tiers": {"high": {"model": "anthropic/claude-opus-4"}}}
+    model, provider = _resolve_tier_override("high", cfg, _FakeParent())
+    creds = _resolve_per_call_model(model, provider, cfg, _FakeParent())
+    assert creds["model"] == "anthropic/claude-opus-4"
+
+
+def test_tier_resolution_obeys_escalation_gate():
+    """A tier pointing at a stronger model than the baseline is gated the same
+    way as an explicit per-call model — the tier is just an alias layer."""
+    from tools.delegate_tool import _resolve_tier_override, _resolve_per_call_model
+
+    cfg = dict(
+        {"tiers": {"high": {"model": "anthropic/claude-opus-4"}}},
+        model_tiers=["haiku", "sonnet", "opus"],
+        model="anthropic/claude-sonnet-4",
+    )
+    model, provider = _resolve_tier_override("high", cfg, _FakeParent())
+    with pytest.raises(ValueError, match="escalation"):
+        _resolve_per_call_model(model, provider, cfg, _FakeParent())

@@ -3130,6 +3130,7 @@ def delegate_task(
     output_schema: Optional[Dict[str, Any]] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    tier: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -3209,11 +3210,31 @@ def delegate_task(
     except ValueError as exc:
         return tool_error(str(exc))
 
-    # Per-call model/provider override (top-level). A per-task override in
-    # tasks[] beats this; this beats delegation.model, which beats inheritance
-    # from the parent. Resolved eagerly so an invalid value fails before any
-    # child is built — never a silent fallback to the parent model.
-    if model:
+    # Per-call model/provider/tier override (top-level). A per-task override
+    # in tasks[] beats this; this beats delegation.model, which beats
+    # inheritance from the parent. Resolved eagerly so an invalid value fails
+    # before any child is built — never a silent fallback to the parent model.
+    # 'tier' is the operator indirection: the caller names a level ('high',
+    # 'medium', 'low', ...) and delegation.tiers maps it to a concrete
+    # model:provider pair. It is mutually exclusive with 'model' — providing
+    # both would be ambiguous (the tier says one thing, the model another).
+    if tier:
+        if model or provider:
+            return tool_error(
+                "delegate_task: 'tier' is mutually exclusive with 'model'/"
+                "'provider' on the same call — resolve the tier's concrete "
+                "model in delegation.tiers instead."
+            )
+        try:
+            tier_model, tier_provider = _resolve_tier_override(
+                tier, cfg, parent_agent
+            )
+            creds = _resolve_per_call_model(
+                tier_model, tier_provider, cfg, parent_agent
+            )
+        except ValueError as exc:
+            return tool_error(str(exc))
+    elif model:
         try:
             creds = _resolve_per_call_model(model, provider, cfg, parent_agent)
         except ValueError as exc:
@@ -3351,20 +3372,35 @@ def delegate_task(
             from tools.delegation_output_schema import append_output_contract
 
             _child_context = append_output_contract(_child_context, _task_schema)
-        # Per-task model/provider beats the top-level override, which beats
-        # delegation.model. Resolved inside the loop so a batch can mix models
-        # (e.g. mechanical extraction on a small model, adversarial review on a
-        # strong one) within a single call.
+        # Per-task model/provider/tier beats the top-level override, which
+        # beats delegation.model. Resolved inside the loop so a batch can mix
+        # models (e.g. mechanical extraction on a small model, adversarial
+        # review on a strong one) within a single call.
         t_creds = creds
         t_model = t.get("model")
-        if t_model:
+        t_provider = t.get("provider")
+        t_tier = t.get("tier")
+        if t_tier:
+            if t_model or t_provider:
+                return tool_error(
+                    f"Task {i}: 'tier' is mutually exclusive with 'model'/"
+                    f"'provider' on the same task — resolve the tier's "
+                    f"concrete model in delegation.tiers instead."
+                )
             try:
-                t_creds = _resolve_per_call_model(
-                    str(t_model), t.get("provider"), cfg, parent_agent
+                t_model, t_provider = _resolve_tier_override(
+                    str(t_tier), cfg, parent_agent
                 )
             except ValueError as exc:
                 return tool_error(f"Task {i}: {exc}")
-        elif t.get("provider"):
+        if t_model:
+            try:
+                t_creds = _resolve_per_call_model(
+                    str(t_model), t_provider, cfg, parent_agent
+                )
+            except ValueError as exc:
+                return tool_error(f"Task {i}: {exc}")
+        elif t_provider:
             return tool_error(
                 f"Task {i}: 'provider' requires 'model' on the same task — a "
                 f"provider without a model cannot be resolved unambiguously."
@@ -3940,6 +3976,81 @@ def _resolve_child_credential_pool(
     return None
 
 
+def _resolve_tier_override(
+    raw_tier: str,
+    cfg: dict,
+    parent_agent,
+) -> tuple[str, Optional[str]]:
+    """Resolve a named delegation tier to a concrete model:provider pair.
+
+    ``delegation.tiers`` is the operator's indirection layer: a mapping of
+    level names (e.g. ``high``/``medium``/``low``) to the concrete
+    model:provider pair that level means *on this deployment*. The caller
+    never names a vendor model id — it names a level whose meaning the
+    operator controls, so swapping the model behind a tier (e.g. when a new
+    model ships) does not require touching the call sites.
+
+    Config shape::
+
+        delegation:
+          tiers:
+            high:   {model: "opus", provider: "bedrock"}
+            medium: {model: "sonnet"}           # provider falls back to delegation.provider
+            low:    "haiku"                     # shorthand: just the model
+
+    Raises ValueError with the list of known tiers when the requested name is
+    absent — fail-fast, never falls back to the parent model.
+    """
+    requested = str(raw_tier or "").strip().lower()
+    if not requested:
+        raise ValueError("delegate_task: 'tier' was provided but empty.")
+
+    tiers_raw = cfg.get("tiers")
+    if not tiers_raw or not isinstance(tiers_raw, dict):
+        raise ValueError(
+            "delegate_task: 'tier' was provided but delegation.tiers is not "
+            "configured. Define named tiers in config.yaml, e.g.: "
+            "delegation: {tiers: {high: {model: opus}, low: {model: haiku}}}"
+            " — or pass an explicit 'model' instead."
+        )
+
+    entry = tiers_raw.get(requested)
+    if entry is None:
+        # Case-insensitive key lookup: "High" config matches "high" call.
+        matched_key = next(
+            (k for k in tiers_raw.keys() if str(k).strip().lower() == requested),
+            None,
+        )
+        if matched_key is not None:
+            entry = tiers_raw[matched_key]
+    if entry is None:
+        known = ", ".join(sorted(str(k) for k in tiers_raw.keys()))
+        raise ValueError(
+            f"delegate_task: unknown tier '{raw_tier}'. Configured tiers: "
+            f"{known or '(none)'}."
+        )
+
+    if isinstance(entry, str):
+        tier_model = str(entry).strip()
+        tier_provider = None
+    elif isinstance(entry, dict):
+        tier_model = str(entry.get("model") or "").strip() or None
+        tier_provider = str(entry.get("provider") or "").strip() or None
+    else:
+        raise ValueError(
+            f"delegate_task: tier '{raw_tier}' has an invalid config entry "
+            f"({type(entry).__name__}). Use a model string or a dict with "
+            f"'model' (and optional 'provider')."
+        )
+
+    if not tier_model:
+        raise ValueError(
+            f"delegate_task: tier '{raw_tier}' has no resolvable model in "
+            f"delegation.tiers."
+        )
+    return tier_model, tier_provider
+
+
 def _resolve_per_call_model(
     raw_model: str,
     raw_provider: Optional[str],
@@ -4512,6 +4623,17 @@ DELEGATE_TASK_SCHEMA = {
                                 "provider than delegation.provider."
                             ),
                         },
+                        "tier": {
+                            "type": "string",
+                            "description": (
+                                "Per-task operator-defined tier name ('high', "
+                                "'medium', 'low', ...) resolved via "
+                                "delegation.tiers in config.yaml. Beats the "
+                                "top-level 'tier'. Mutually exclusive with "
+                                "per-task 'model'/'provider'. Unknown tiers "
+                                "fail the call listing the configured ones."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -4569,6 +4691,19 @@ DELEGATE_TASK_SCHEMA = {
                     "Provider for the subagent(s) of THIS call. Requires 'model' "
                     "on the same call. Only needed to route to a different "
                     "provider than delegation.provider; omit otherwise."
+                ),
+            },
+            "tier": {
+                "type": "string",
+                "description": (
+                    "Operator-defined level name for the subagent(s) of THIS "
+                    "call ('high', 'medium', 'low', ...), resolved via "
+                    "delegation.tiers in config.yaml — the operator decides "
+                    "which concrete model:provider pair each tier maps to, so "
+                    "call sites stay portable when models change. Mutually "
+                    "exclusive with 'model'/'provider' on the same call. "
+                    "Unknown tiers fail the call listing the configured ones — "
+                    "there is no silent fallback."
                 ),
             },
         },
@@ -4631,9 +4766,10 @@ registry.register(
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")),
-output_schema=args.get("output_schema"),
+        output_schema=args.get("output_schema"),
         model=args.get("model"),
         provider=args.get("provider"),
+        tier=args.get("tier"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
