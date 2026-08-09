@@ -105,6 +105,7 @@ import {
   reviewCreatePr,
   reviewDiff,
   reviewList,
+  reviewPrList,
   reviewPush,
   reviewRevert,
   reviewRevParse,
@@ -121,6 +122,7 @@ import {
   removeWorktree,
   switchBranch
 } from './git-worktree-ops'
+import { readAndConsumeHandoffResult } from './handoff-result'
 import {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
@@ -135,6 +137,7 @@ import {
   TEXT_PREVIEW_SOURCE_MAX_BYTES
 } from './hardening'
 import { cursorPointInWindow } from './hud-cursor'
+import { buildHudWindowUrl } from './hud-url'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
@@ -206,7 +209,8 @@ import {
   resolveStagedUpdaterBinary,
   resolveUpdateScriptHandoff,
   spawnUpdaterProcess,
-  stagedUpdaterSupportsPrewrittenMarker
+  stagedUpdaterSupportsPrewrittenMarker,
+  wrapHandoffForDetachedConsole
 } from './updater-process'
 import { formatBlockerMessage, formatProbeFailedMessage, scanVenvBlockers } from './venv-blocker-scan'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
@@ -1802,6 +1806,28 @@ async function waitForUpdateToFinish() {
     timeoutMs: UPDATE_WAIT_TIMEOUT_MS
   })
 
+  // The detached hand-off script (scripts/desktop-update.ps1) runs hidden;
+  // its result file is the ONLY way the user learns a detached update
+  // failed. Consume it exactly once, here, right where boot passes the
+  // update gate — success gets a log line, failure gets a real dialog
+  // (previously a failed detached update was indistinguishable from
+  // "nothing happened").
+  try {
+    const result = readAndConsumeHandoffResult(HERMES_HOME)
+
+    if (result && result.ok) {
+      rememberLog(`[updates] detached update finished OK (branch ${result.branch})`)
+    } else if (result) {
+      rememberLog(`[updates] detached update FAILED (exit ${result.exitCode}): ${result.message}`)
+      dialog.showErrorBox(
+        'Hermes update did not finish',
+        `${result.message}\n\nDetails: ${path.join(HERMES_HOME, 'logs', 'desktop-update-handoff.log')}`
+      )
+    }
+  } catch (err) {
+    rememberLog(`[updates] could not read hand-off result: ${err.message}`)
+  }
+
   if (outcome === 'clear') {
     return false
   }
@@ -2997,8 +3023,14 @@ async function applyUpdates(opts = {}) {
     let child
 
     if (scriptHandoff) {
-      const scriptArgs = [
-        ...scriptHandoff.args,
+      // A bare detached+hidden powershell spawn silently dies before -File
+      // processing (console-subsystem init failure — see
+      // wrapHandoffForDetachedConsole). Route through `cmd start` so the
+      // script gets its own minimized console and survives our exit. The
+      // wrapper cmd.exe exits immediately, so child.pid is NOT the script's
+      // pid — the script claims the update marker itself with its own $PID
+      // as its first action, and a relaunched Desktop parks on that.
+      const wrapped = wrapHandoffForDetachedConsole(scriptHandoff, [
         '-InstallRoot',
         updateRoot,
         '-Branch',
@@ -3007,9 +3039,9 @@ async function applyUpdates(opts = {}) {
         String(process.pid),
         '-RelaunchExe',
         process.execPath
-      ]
+      ])
 
-      child = spawnUpdaterProcess(scriptHandoff.command, scriptArgs, {
+      child = spawnUpdaterProcess(wrapped.command, wrapped.args, {
         cwd: HERMES_HOME,
         env: {
           ...process.env,
@@ -3020,11 +3052,13 @@ async function applyUpdates(opts = {}) {
         stdio: 'ignore'
       })
 
-      // The script's own pid owns the marker. Unlike the stale-binary path
-      // there is NO adoption hazard: hermes_cli/update_lock.py accepts a live
-      // marker held by a process ANCESTOR (the script is the `hermes update`
-      // child's parent), so the pre-write is always safe here — no
-      // stagedUpdaterSupportsPrewrittenMarker() mtime heuristics needed.
+      // Bridge marker: child.pid is the short-lived cmd.exe WRAPPER, not the
+      // script (see wrapHandoffForDetachedConsole). Write it anyway to cover
+      // the first moments of the hand-off — the script's step 0 overwrites it
+      // with its own live $PID, and if the script never starts the wrapper's
+      // dead pid makes the marker read as stale and self-delete (no wedge).
+      // The `hermes update` child adopts the SCRIPT's claim via
+      // update_lock.py's process-ancestry rule; no mtime heuristics needed.
       if (Number.isInteger(child.pid)) {
         writeUpdateMarker(HERMES_HOME, child.pid)
       }
@@ -9122,6 +9156,12 @@ let hudRestoreMainWindow = false
 // the id and hands it over in the close broadcast.
 let hudSessionId = null
 
+// The profile the live HUD renderer booted against (rides hudUrl's query
+// string). A renderer adopts its backend once at boot, so a retarget onto a
+// session from a DIFFERENT profile cannot be a same-window `goto` — the HUD
+// must be respawned against the new profile's backend (see openHudWindow).
+let hudProfile = null
+
 // A wide, short bar parked near the bottom of the active display — the shape
 // of a game chat frame, and where one belongs. Defaults only: once the user
 // moves or resizes the HUD, hud-state.json wins (same pattern as the main
@@ -9256,15 +9296,17 @@ function hudBounds() {
   }
 }
 
-function hudUrl(sessionId) {
-  const query = '?win=hud'
-  const route = sessionId ? `#/${encodeURIComponent(sessionId)}` : '#/'
-
-  if (DEV_SERVER) {
-    return `${DEV_SERVER.endsWith('/') ? DEV_SERVER.slice(0, -1) : DEV_SERVER}/${query}${route}`
-  }
-
-  return `${pathToFileURL(resolveRendererIndex()).toString()}${query}${route}`
+function hudUrl(sessionId, profile) {
+  // The profile rides the query string next to `win=hud` (BEFORE the '#', so
+  // HashRouter never sees it). The HUD renderer's gateway boot reads it and
+  // adopts that backend instead of the primary — without it, a HUD opened on a
+  // non-primary profile's conversation resolves the session id against the
+  // wrong backend and falls back to the default profile's last session.
+  return buildHudWindowUrl(sessionId, {
+    devServer: DEV_SERVER,
+    profile,
+    rendererIndexPath: DEV_SERVER ? undefined : resolveRendererIndex()
+  })
 }
 
 // Tell every window whether the HUD is up, so a toggle in any of them reads
@@ -9281,7 +9323,7 @@ function broadcastHudState(open) {
   }
 }
 
-function spawnHudWindow(sessionId) {
+function spawnHudWindow(sessionId, profile) {
   const win = new BrowserWindow({
     ...hudBounds(),
     minWidth: 380,
@@ -9364,7 +9406,7 @@ function spawnHudWindow(sessionId) {
     broadcastHudState(false)
   })
 
-  loadWindowUrl(win, hudUrl(sessionId), 'HUD')
+  loadWindowUrl(win, hudUrl(sessionId, profile), 'HUD')
 
   return win
 }
@@ -9382,8 +9424,28 @@ function restoreMainWindowFromHud() {
   }
 }
 
-function openHudWindow(sessionId) {
+function openHudWindow(sessionId, profile) {
+  const profileKey = typeof profile === 'string' && profile.trim() ? profile.trim() : null
+
   if (hudWindow && !hudWindow.isDestroyed()) {
+    // Pointed at another PROFILE: the live renderer is bound to the old
+    // profile's backend, and a renderer adopts its backend exactly once at
+    // boot — an in-place goto would resolve the id against the wrong backend
+    // (the #82285 fallback). Respawn against the right one.
+    if (profileKey && hudProfile !== profileKey) {
+      const win = hudWindow
+      hudWindow = null
+      win.removeAllListeners('closed')
+      win.destroy()
+
+      hudSessionId = sessionId || null
+      hudProfile = profileKey
+      hudWindow = spawnHudWindow(sessionId, profileKey)
+      broadcastHudState(true)
+
+      return hudWindow
+    }
+
     // Already up, but pointed somewhere else — switch it rather than just
     // raising it. Asking for HUD mode from another tab means "put THIS
     // conversation in the HUD", and a plain focus leaves the wrong one there.
@@ -9402,7 +9464,8 @@ function openHudWindow(sessionId) {
 
   hudRestoreMainWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible())
   hudSessionId = sessionId || null
-  hudWindow = spawnHudWindow(sessionId)
+  hudProfile = profileKey
+  hudWindow = spawnHudWindow(sessionId, profileKey)
   broadcastHudState(true)
 
   return hudWindow
@@ -10098,7 +10161,10 @@ ipcMain.on('hermes:pet-overlay:control', (_event, payload) => {
 
 // --- HUD mode (chrome-free floating chat) -----------------------------------
 ipcMain.handle('hermes:hud:open', async (_event, request) => {
-  openHudWindow(typeof request?.sessionId === 'string' ? request.sessionId : null)
+  openHudWindow(
+    typeof request?.sessionId === 'string' ? request.sessionId : null,
+    typeof request?.profile === 'string' ? request.profile : null
+  )
 
   return { ok: true }
 })
@@ -11752,6 +11818,9 @@ ipcMain.handle('hermes:git:review:commitContext', async (_event, repoPath) =>
 )
 ipcMain.handle('hermes:git:review:push', async (_event, repoPath) => reviewPush(repoPath, resolveGitBinary()))
 ipcMain.handle('hermes:git:review:shipInfo', async (_event, repoPath) => reviewShipInfo(repoPath, resolveGhBinary()))
+ipcMain.handle('hermes:git:review:prList', async (_event, repoPath, branches, numbers) =>
+  reviewPrList(repoPath, resolveGhBinary(), branches, numbers)
+)
 ipcMain.handle('hermes:git:review:createPr', async (_event, repoPath) =>
   reviewCreatePr(repoPath, resolveGitBinary(), resolveGhBinary())
 )
