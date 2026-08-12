@@ -1243,6 +1243,7 @@ def build_turn_context(
         agent._interrupt_thread_signal_pending = False
     else:
         agent._interrupt_message = None
+        agent._interrupt_stop_kind = None
         agent._interrupt_thread_signal_pending = False
 
     # Notify memory providers of the new turn (BEFORE prefetch_all).
