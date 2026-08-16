@@ -655,6 +655,12 @@ def finalize_turn(
                 "⚠️ The turn was interrupted because the client disconnected. "
                 "Send any message to continue."
             )
+        elif getattr(agent, "_interrupt_message", None):
+            # Redirect: an incoming user message interrupted the turn. The
+            # next turn answers that message, so synthesizing "stopped before
+            # a reply was generated" would be misleading (#84236 review).
+            # Leave final_response empty; the next turn handles it.
+            pass
         else:
             final_response = "⚡ Turn interrupted — stopped before a reply was generated."
 
