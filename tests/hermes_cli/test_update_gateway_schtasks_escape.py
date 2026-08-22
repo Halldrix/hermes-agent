@@ -163,9 +163,79 @@ class TestSpawnViaScheduledTaskHelper:
             gateway_windows, "_exec_schtasks", lambda *a, **kw: (0, "", "")
         )
         monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda **kw: [])
-        # find_gateway_pids returns empty set before and after
-        monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [])
+        # A PRE-EXISTING gateway is still running (draining): /Run succeeded and
+        # no NEW pid appeared, so we must NOT report success — the pre-existing
+        # gateway satisfies nothing and a fallback direct spawn would race with
+        # IgnoreNew (the task's start would be suppressed).
+        monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [999])
         assert gateway_windows._spawn_via_scheduled_task() is False
+
+    def test_run_accepted_no_prior_gateway_counts_as_success(self, monkeypatch):
+        """Cold starts can exceed the poll window; /Run accepted + empty
+        pre-set must count as success instead of racing a direct spawn."""
+        from hermes_cli import gateway, gateway_windows
+
+        monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+        monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+        monkeypatch.setattr(
+            gateway_windows,
+            "_task_action_matches_expected",
+            lambda: True,
+        )
+        monkeypatch.setattr(gateway_windows, "_launcher_is_ours", lambda: True)
+        monkeypatch.setattr(
+            gateway_windows, "_exec_schtasks", lambda *a, **kw: (0, "", "")
+        )
+        # Poll window expires without a visible PID (still importing).
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda **kw: [])
+        monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [])
+        assert gateway_windows._spawn_via_scheduled_task() is True
+
+    def test_skips_reinstall_when_task_action_and_launcher_are_current(self, monkeypatch):
+        """No delete+create when /Query /XML matches our .vbs and the .cmd is
+        ours — avoids UAC-protected re-register on hosts where it fails."""
+        from hermes_cli import gateway, gateway_windows
+
+        install_mock = MagicMock()
+        monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+        monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_task_action_matches_expected", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_launcher_is_ours", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_install_scheduled_task", install_mock)
+        monkeypatch.setattr(
+            gateway_windows, "_exec_schtasks", lambda *a, **kw: (0, "", "")
+        )
+        wait_mock = MagicMock(return_value=[12345])
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", wait_mock)
+        monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [])
+        assert gateway_windows._spawn_via_scheduled_task() is True
+        install_mock.assert_not_called()
+
+    def test_snapshots_pids_before_triggering(self, monkeypatch):
+        """pre_pids must be captured BEFORE schtasks /Run fires."""
+        from hermes_cli import gateway, gateway_windows
+
+        order = []
+
+        def fake_find(**kw):
+            order.append("find")
+            return []
+
+        def fake_exec(*a, **kw):
+            order.append("run")
+            return (0, "", "")
+
+        monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+        monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_task_action_matches_expected", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_launcher_is_ours", lambda: True)
+        monkeypatch.setattr(gateway_windows, "_write_task_script", MagicMock())
+        monkeypatch.setattr(gateway_windows, "_install_scheduled_task", MagicMock())
+        monkeypatch.setattr(gateway_windows, "_exec_schtasks", fake_exec)
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", lambda **kw: [7])
+        monkeypatch.setattr(gateway, "find_gateway_pids", fake_find)
+        gateway_windows._spawn_via_scheduled_task()
+        assert order == ["find", "run"] or order[:2] == ["find", "run"]
 
     def test_returns_true_when_task_triggered_and_new_pid_appears(self, monkeypatch):
         from hermes_cli import gateway, gateway_windows
@@ -233,28 +303,25 @@ class TestSpawnViaScheduledTaskHelper:
 
 
 class TestWatcherSchtasksBlock:
-    """The watcher inline script must refresh the task and check for NEW pids."""
+    """The watcher inline script must trigger the task and check for NEW pids."""
 
     def test_watcher_script_contains_task_refresh_and_pid_snapshot(self):
-        """The embedded watcher script refreshes the task scripts and snapshots
-        pre-existing gateway PIDs so it only counts NEW processes."""
+        """The embedded watcher script snapshots pre-existing gateway PIDs
+        BEFORE the /Run trigger and only counts NEW processes. Script refresh
+        was intentionally removed from the hot path (delete+create can hit
+        UAC 'Access is denied' on live hosts where /Run alone works, and
+        re-registering clobbers user-customized launchers)."""
         from hermes_cli import gateway
 
-        # The watcher is a textwrap.dedent string frozen inside the function.
-        # We verify its contents by calling _spawn_gateway_restart_watcher
-        # and checking the generated argv.  Since we can't easily capture the
-        # internal watcher source without spawning a process, we instead
-        # assert on the module-level source by extracting the script via
-        # a controlled invocation on a non-Windows platform (no-op).
-        # For a content-level check, read the raw function source.
         import inspect
         source = inspect.getsource(gateway._spawn_gateway_restart_watcher)
 
-        # 1. Task scripts must be refreshed before triggering.
-        assert "_write_task_script" in source
-        assert "_install_scheduled_task" in source
+        # 1. No delete+create re-register in the hot path.
+        assert "_write_task_script" not in source
+        assert "_install_scheduled_task" not in source
 
-        # 2. Pre-existing PIDs must be snapshotted before the poll.
-        assert "_pre_pids = set(_fgp())" in source
+        # 2. Pre-existing PIDs must be snapshotted BEFORE the trigger.
+        assert source.index("_pre_pids = set(_fgp())") < source.index('"/Run"')
         assert "_new = set(_fgp()) - _pre_pids" in source
-        assert "_started_via_task = _ok" in source
+        # 3. /Run accepted + empty pre-set counts as success (cold-start race).
+        assert "_started_via_task = _ok or not _pre_pids" in source

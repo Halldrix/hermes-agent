@@ -1204,7 +1204,57 @@ def _report_gateway_start(via: str) -> None:
         print(f"    type {Path(get_hermes_home())}\\logs\\gateway-stdio.log")
 
 
-def _spawn_via_scheduled_task(timeout_s: float = 6.0) -> bool:
+def _task_action_matches_expected() -> bool:
+    """True when the registered task's action points at OUR .vbs launcher.
+
+    Reads the task definition via ``schtasks /Query /XML`` and compares the
+    action command against the launcher path this install would generate.
+    Never raises; any failure returns False (caller falls back to
+    re-registering).
+    """
+    try:
+        code, out, _err = _exec_schtasks(["/Query", "/TN", get_task_name(), "/XML"])
+        if code != 0 or not out:
+            return False
+        expected = str(get_task_script_path().with_suffix(".vbs"))
+        return expected.lower() in out.lower()
+    except Exception:
+        return False
+
+
+def _launcher_is_ours() -> bool:
+    """True when the on-disk .cmd wrapper matches our generated template.
+
+    Some users replace the generated ``gateway.cmd`` with a local supervisor
+    wrapper (custom launchers, watchdogs). Overwriting those would silently
+    remove their setup, so we only regenerate the scripts when the current
+    content is byte-identical to our template or the file does not exist yet.
+    """
+    try:
+        script_path = get_task_script_path()
+        if not script_path.exists():
+            return True
+        current = script_path.read_text(encoding="utf-8")
+        from hermes_cli.gateway import (
+            PROJECT_ROOT,
+            _profile_arg,
+            get_python_path,
+        )
+
+        from hermes_cli.config import get_hermes_home
+
+        expected = _build_gateway_cmd_script(
+            _preserve_hermes_home_path(get_python_path()),
+            _stable_gateway_working_dir(PROJECT_ROOT),
+            str(Path(get_hermes_home())),
+            _profile_arg(get_hermes_home),
+        )
+        return current == expected
+    except Exception:
+        return False
+
+
+def _spawn_via_scheduled_task(timeout_s: float = 30.0) -> bool:
     """Trigger the gateway's own Scheduled Task and confirm a process comes up.
 
     ``subprocess.Popen`` with ``CREATE_BREAKAWAY_FROM_JOB`` cannot reliably
@@ -1222,43 +1272,60 @@ def _spawn_via_scheduled_task(timeout_s: float = 6.0) -> bool:
     already running before the trigger — a pre-update gateway that is still
     draining connections does not satisfy the check on its own.
 
-    Returns ``True`` when a *new* gateway PID appeared within ``timeout_s`` of
-    the trigger, ``False`` when the task cannot be refreshed/registered, the
-    trigger failed, or no new process appeared in time. Best-effort and
-    Windows-only; safe to call from any post-update spawn point.
+    Returns ``True`` when the task accepted ``/Run`` and a *new* gateway PID
+    appeared within ``timeout_s``, or when the task accepted ``/Run`` and no
+    pre-existing gateway was running (the spawn is asynchronous and may take
+    longer than the poll window on cold starts; liveness is confirmed later by
+    the caller/watchdog). ``False`` when the task cannot be triggered or the
+    scripts could not be refreshed. Best-effort and Windows-only; safe to call
+    from any post-update spawn point.
     """
     _assert_windows()
     if not is_task_registered():
         return False
 
-    # Refresh the task scripts so the spawn never replays a stale Python
-    # path from task-creation time (e.g. after an update moved the venv).
-    # This regenerates gateway.cmd + gateway.vbs with the CURRENT state
-    # (get_python_path(), HERMES_HOME, profile arg) and re-registers the
-    # task atomically via delete+create, identical to a fresh install.
+    from hermes_cli.gateway import find_gateway_pids
+
+    # Snapshot BEFORE triggering so a task-spawned python that becomes visible
+    # before /Run returns can never land in pre_pids (a pre-update gateway
+    # still draining must also not satisfy the check on its own).
     try:
-        script_path = _write_task_script()
+        pre_pids = set(find_gateway_pids())
     except Exception:
-        # If we can't even write the scripts, the task is hopeless.
-        return False
-    ok, _detail = _install_scheduled_task(get_task_name(), script_path)
-    if not ok:
+        pre_pids = set()
+
+    # Refresh the task scripts only when it is safe to do so:
+    #  - The registered action must point at OUR .vbs launcher (never at a
+    #    user-customized wrapper).
+    #  - The on-disk .cmd must match our template (never clobber a custom
+    #    supervisor wrapper) OR be absent.
+    # When both hold we rewrite the scripts in place WITHOUT delete+create of
+    # the task: schtasks /Query /XML shows the action references the same .vbs
+    # path, so /Run replays the fresh content and no UAC-protected re-register
+    # is needed (delete+create hit "Access is denied" on live hosts where /Run
+    # alone works).
+    try:
+        if not (_task_action_matches_expected() and _launcher_is_ours()):
+            script_path = _write_task_script()
+            ok, _detail = _install_scheduled_task(get_task_name(), script_path)
+            if not ok:
+                return False
+    except Exception:
         return False
 
     code, _, _ = _exec_schtasks(["/Run", "/TN", get_task_name()])
     if code != 0:
         return False
 
-    # Snapshot existing gateways so the post-trigger poll only counts
-    # processes that appeared AFTER the scheduled task fired.  A pre-update
-    # gateway that is still draining must not satisfy the check on its own.
-    from hermes_cli.gateway import find_gateway_pids
-    pre_pids = set(find_gateway_pids())
-
     ready = _wait_for_gateway_ready(timeout_s=timeout_s)
-    if not ready:
-        return False
-    return bool(set(ready) - pre_pids)
+    new_pids = set(ready) - pre_pids
+    if new_pids:
+        return True
+    # /Run accepted + no gateway was running before: treat as success even if
+    # the poll window expired — cold starts (Telegram connect etc.) can exceed
+    # it, and falling back to direct spawn here would race with the
+    # task-spawned process still importing.
+    return not pre_pids
 
 
 

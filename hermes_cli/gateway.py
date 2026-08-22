@@ -1014,28 +1014,25 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
             try:
                 from hermes_cli import gateway_windows as _gw
                 if _gw.is_task_registered():
-                    # Refresh task scripts with the CURRENT Python path so the
-                    # Scheduled Task never replays a stale command from
-                    # task-creation time (e.g. after an update moved the venv).
-                    # Falls back to direct spawn if _write_task_script fails.
-                    _script = _gw._write_task_script()
-                    _gw._install_scheduled_task(_gw.get_task_name(), _script)
-
                     _task = _gw.get_task_name()
+                    # Snapshot BEFORE the trigger: a task-spawned python that
+                    # becomes visible before /Run returns must not land in the
+                    # pre-existing set.
+                    import time as _t
+                    from hermes_cli.gateway import find_gateway_pids as _fgp
+                    _pre_pids = set(_fgp())
                     _r = subprocess.run(
                         ["schtasks", "/Run", "/TN", _task],
                         capture_output=True, timeout=10,
                     )
                     if _r.returncode == 0:
-                        _started_via_task = True
-                        # Wait (up to 6s) for a NEW gateway process to appear
-                        # (one that did not exist before the task fired).  A
-                        # pre-update gateway still draining must not satisfy
-                        # the check on its own.  Delayed import to keep the
-                        # top of this watcher minimal.
-                        import time as _t
-                        from hermes_cli.gateway import find_gateway_pids as _fgp
-                        _pre_pids = set(_fgp())
+                        # Wait for a NEW gateway process. On cold starts this
+                        # can take longer than the poll window (Telegram
+                        # connect ~26s on real hosts), so if /Run was accepted
+                        # and no gateway existed before, treat the task route
+                        # as successful and let liveness checks/watchdogs
+                        # confirm later — falling back to direct spawn here
+                        # would race with the task-spawned process.
                         _deadline = _t.monotonic() + 6
                         _ok = False
                         while _t.monotonic() < _deadline:
@@ -1044,7 +1041,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
                                 _ok = True
                                 break
                             _t.sleep(0.4)
-                        _started_via_task = _ok
+                        _started_via_task = _ok or not _pre_pids
             except Exception:
                 _started_via_task = False
 
