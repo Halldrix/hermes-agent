@@ -139,6 +139,8 @@ class TestSpawnViaScheduledTaskHelper:
         install_mock = MagicMock(return_value=(True, "created"))
         monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
         monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+        # Launcher is NOT ours -> refresh path runs (write + reinstall).
+        monkeypatch.setattr(gateway_windows, "_launcher_is_ours", lambda: False)
         monkeypatch.setattr(gateway_windows, "_write_task_script", write_mock)
         monkeypatch.setattr(gateway_windows, "_install_scheduled_task", install_mock)
         monkeypatch.setattr(
@@ -244,6 +246,8 @@ class TestSpawnViaScheduledTaskHelper:
         install_mock = MagicMock(return_value=(True, "created"))
         monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
         monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: True)
+        # Launcher is NOT ours -> refresh path runs (write + reinstall).
+        monkeypatch.setattr(gateway_windows, "_launcher_is_ours", lambda: False)
         monkeypatch.setattr(gateway_windows, "_write_task_script", write_mock)
         monkeypatch.setattr(gateway_windows, "_install_scheduled_task", install_mock)
         monkeypatch.setattr(

@@ -1223,18 +1223,20 @@ def _task_action_matches_expected() -> bool:
 
 
 def _launcher_is_ours() -> bool:
-    """True when the on-disk .cmd wrapper matches our generated template.
+    """True when the on-disk .vbs launcher matches our generated template.
 
-    Some users replace the generated ``gateway.cmd`` with a local supervisor
-    wrapper (custom launchers, watchdogs). Overwriting those would silently
-    remove their setup, so we only regenerate the scripts when the current
-    content is byte-identical to our template or the file does not exist yet.
+    The Scheduled Task action runs the ``.vbs`` (which embeds the python
+    path), so only the ``.vbs`` matters for spawn correctness — the ``.cmd``
+    is a manual-run artifact and may legitimately be a user-customized
+    supervisor wrapper; overwriting it would silently remove their setup.
+    We refresh scripts only when the current ``.vbs`` is byte-identical to
+    our template or absent.
     """
     try:
-        script_path = get_task_script_path()
-        if not script_path.exists():
+        vbs_path = get_task_script_path().with_suffix(".vbs")
+        if not vbs_path.exists():
             return True
-        current = script_path.read_text(encoding="utf-8")
+        current = vbs_path.read_text(encoding="utf-8")
         from hermes_cli.gateway import (
             PROJECT_ROOT,
             _profile_arg,
@@ -1243,10 +1245,11 @@ def _launcher_is_ours() -> bool:
 
         from hermes_cli.config import get_hermes_home
 
-        expected = _build_gateway_cmd_script(
+        hermes_home = str(Path(get_hermes_home()))
+        expected = _build_gateway_vbs_script(
             _preserve_hermes_home_path(get_python_path()),
             _stable_gateway_working_dir(PROJECT_ROOT),
-            str(Path(get_hermes_home())),
+            hermes_home,
             _profile_arg(get_hermes_home),
         )
         return current == expected
@@ -1294,22 +1297,24 @@ def _spawn_via_scheduled_task(timeout_s: float = 30.0) -> bool:
     except Exception:
         pre_pids = set()
 
-    # Refresh the task scripts only when it is safe to do so:
-    #  - The registered action must point at OUR .vbs launcher (never at a
-    #    user-customized wrapper).
-    #  - The on-disk .cmd must match our template (never clobber a custom
-    #    supervisor wrapper) OR be absent.
-    # When both hold we rewrite the scripts in place WITHOUT delete+create of
-    # the task: schtasks /Query /XML shows the action references the same .vbs
-    # path, so /Run replays the fresh content and no UAC-protected re-register
-    # is needed (delete+create hit "Access is denied" on live hosts where /Run
-    # alone works).
+    # Refresh the task scripts ONLY when the .vbs launcher is ours. The task's
+    # registered action points at the stable .vbs path and /Run executes the
+    # file content CURRENTLY on disk — so refreshing the embedded python path
+    # after an update is a plain file write, never a delete+create of the task
+    # (delete+create can hit UAC "Access is denied" on live hosts where /Run
+    # alone works, and re-registering clobbers user-customized launchers).
+    # The .cmd is a manual-run artifact: if a user replaced it with their own
+    # supervisor wrapper we leave it untouched either way.
     try:
-        if not (_task_action_matches_expected() and _launcher_is_ours()):
+        if not _launcher_is_ours():
             script_path = _write_task_script()
             ok, _detail = _install_scheduled_task(get_task_name(), script_path)
             if not ok:
                 return False
+        elif _task_action_matches_expected() is False:
+            # Task action points somewhere else than our .vbs (user-edited in
+            # taskschd.msc): respect it and just trigger what is registered.
+            pass
     except Exception:
         return False
 
@@ -1321,11 +1326,22 @@ def _spawn_via_scheduled_task(timeout_s: float = 30.0) -> bool:
     new_pids = set(ready) - pre_pids
     if new_pids:
         return True
-    # /Run accepted + no gateway was running before: treat as success even if
-    # the poll window expired — cold starts (Telegram connect etc.) can exceed
-    # it, and falling back to direct spawn here would race with the
-    # task-spawned process still importing.
-    return not pre_pids
+    if not pre_pids:
+        # /Run accepted + no gateway was running before: treat as success even
+        # if the poll window expired — cold starts (Telegram connect etc.) can
+        # exceed it, and falling back to direct spawn here would race with the
+        # task-spawned process still importing.
+        return True
+    # A gateway was already running and IgnoreNew may have silently suppressed
+    # the start. End the in-flight instance and retry ONCE via the task so we
+    # preserve the job-escape guarantee instead of falling back to direct
+    # spawn inside the dying parent job (#84185).
+    _exec_schtasks(["/End", "/TN", get_task_name()])
+    code, _, _ = _exec_schtasks(["/Run", "/TN", get_task_name()])
+    if code != 0:
+        return False
+    ready = _wait_for_gateway_ready(timeout_s=timeout_s)
+    return bool(set(ready) - {p for p in pre_pids})
 
 
 
