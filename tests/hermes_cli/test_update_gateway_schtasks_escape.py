@@ -280,6 +280,48 @@ class TestSpawnViaScheduledTaskHelper:
         monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", wait_mock)
         assert gateway_windows._spawn_via_scheduled_task() is False
 
+    def test_launcher_is_ours_true_for_current_template_vbs(self, tmp_path, monkeypatch):
+        """_launcher_is_ours() must return True when the on-disk .vbs is
+        byte-identical to what _write_task_script would generate.
+
+        Regression for a live-host bug (jrleal10, PR #84409): the helper
+        passed the get_hermes_home FUNCTION to _profile_arg instead of its
+        result, raising TypeError inside Path(); the broad except swallowed
+        it and returned False unconditionally — sending every profile with
+        an official .vbs down the delete+create/UAC path on every update.
+        This test exercises the REAL body (no mocking of _launcher_is_ours).
+        """
+        from hermes_cli import gateway, gateway_windows
+        from hermes_cli.config import get_hermes_home
+
+        hermes_home = str(Path(get_hermes_home()))
+        expected_vbs = gateway_windows._build_gateway_vbs_script(
+            gateway_windows._preserve_hermes_home_path(gateway.get_python_path()),
+            gateway_windows._stable_gateway_working_dir(gateway.PROJECT_ROOT),
+            hermes_home,
+            gateway._profile_arg(hermes_home),
+        )
+        fake_script = tmp_path / "Hermes_Gateway.cmd"
+        fake_script.write_text("@echo off\n", encoding="utf-8")
+        fake_vbs = fake_script.with_suffix(".vbs")
+        fake_vbs.write_bytes(expected_vbs.encode("utf-8"))
+
+        monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: fake_script)
+        # The real body must run: no monkeypatch of _launcher_is_ours here.
+        assert gateway_windows._launcher_is_ours() is True
+
+    def test_launcher_is_ours_false_when_vbs_customized(self, tmp_path, monkeypatch):
+        """A user-customized .vbs must NOT be considered ours."""
+        from hermes_cli import gateway, gateway_windows
+
+        fake_script = tmp_path / "Hermes_Gateway.cmd"
+        fake_script.write_text("@echo off\n", encoding="utf-8")
+        fake_vbs = fake_script.with_suffix(".vbs")
+        fake_vbs.write_text("' custom supervisor launcher\nWScript.Quit 0\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_windows, "get_task_script_path", lambda: fake_script)
+        assert gateway_windows._launcher_is_ours() is False
+
     def test_returns_false_when_script_write_fails(self, monkeypatch):
         """If _write_task_script fails, _spawn_via_scheduled_task must bail."""
         from hermes_cli import gateway_windows

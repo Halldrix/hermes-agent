@@ -1250,9 +1250,11 @@ def _launcher_is_ours() -> bool:
             _preserve_hermes_home_path(get_python_path()),
             _stable_gateway_working_dir(PROJECT_ROOT),
             hermes_home,
-            _profile_arg(get_hermes_home),
+            _profile_arg(hermes_home),
         )
-        return current == expected
+        # _write_task_script writes CRLF line endings; normalize both sides so
+        # a checkout/transfer that flipped EOLs does not force a rewrite.
+        return current.replace("\r\n", "\n") == expected.replace("\r\n", "\n")
     except Exception:
         return False
 
@@ -1268,12 +1270,16 @@ def _spawn_via_scheduled_task(timeout_s: float = 30.0) -> bool:
     ``schtasks /Run`` is the only spawn path guaranteed to survive the
     parent-job teardown.
 
-    Before triggering, the Scheduled Task is re-registered with the CURRENT
-    ``gateway.cmd``/``gateway.vbs`` scripts so the spawn never replays a stale
-    Python path from task-creation time (issue #84185 follow-up).  The check
-    afterwards confirms that a *new* gateway process appeared that was not
-    already running before the trigger — a pre-update gateway that is still
-    draining connections does not satisfy the check on its own.
+    Before triggering, the Scheduled Task is refreshed ONLY when the on-disk
+    ``.vbs`` launcher does not match our generated template (or is absent):
+    the task action points at a stable ``.vbs`` path and ``/Run`` executes
+    whatever content is currently on disk, so refreshing the embedded Python
+    path after an update is a plain file write — never a delete+create of
+    the task (which can hit UAC "Access is denied" and would clobber
+    user-customized launchers).  The check afterwards confirms that a *new*
+    gateway process appeared that was not already running before the trigger
+    — a pre-update gateway that is still draining connections does not
+    satisfy the check on its own.
 
     Returns ``True`` when the task accepted ``/Run`` and a *new* gateway PID
     appeared within ``timeout_s``, or when the task accepted ``/Run`` and no
