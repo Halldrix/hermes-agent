@@ -2977,29 +2977,44 @@ print(','.join(scripts))
     Write-Success "All dependencies installed"
 }
 
+function Install-HermesCommandLaunchers {
+    param(
+        [Parameter(Mandatory=$true)] [string]$Root
+    )
+
+    # Expose ONLY the Hermes launchers on PATH -- never the whole
+    # venv\Scripts directory. Requiring hermes.exe before creating bin keeps
+    # the PATH stage from reporting success with an unusable command.
+    $scriptsDir = Join-Path $Root "venv\Scripts"
+    $requiredSource = Join-Path $scriptsDir "hermes.exe"
+    if (-not (Test-Path -LiteralPath $requiredSource -PathType Leaf)) {
+        throw "Cannot set up the hermes command: required launcher not found: $requiredSource"
+    }
+
+    $hermesBin = Join-Path $Root "bin"
+    New-Item -ItemType Directory -Force -Path $hermesBin | Out-Null
+    foreach ($launcher in @("hermes.exe", "hermes-acp.exe")) {
+        $src = Join-Path $scriptsDir $launcher
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            Copy-Item -Force -LiteralPath $src -Destination (Join-Path $hermesBin $launcher)
+        }
+    }
+
+    $requiredDestination = Join-Path $hermesBin "hermes.exe"
+    if (-not (Test-Path -LiteralPath $requiredDestination -PathType Leaf)) {
+        throw "Cannot set up the hermes command: launcher was not installed: $requiredDestination"
+    }
+    return $hermesBin
+}
+
 function Set-PathVariable {
     Write-Info "Setting up hermes command..."
     
     if ($NoVenv) {
         $hermesBin = "$InstallDir"
     } else {
-        # Expose ONLY the hermes launchers on PATH -- never the whole
-        # venv\Scripts directory. venv\Scripts contains python.exe /
-        # pythonw.exe / pip.exe, and putting it on the user PATH silently
-        # hijacks the `python` command in every terminal on the machine
-        # (#83797): unrelated projects start resolving python to Hermes'
-        # runtime interpreter. A dedicated bin dir with copies of the
-        # launcher exes keeps `hermes` globally available without
-        # shadowing anything. (Launcher exes embed the venv interpreter
-        # path, so they work from any location and survive updates.)
         $hermesBin = "$InstallDir\bin"
-        New-Item -ItemType Directory -Force -Path $hermesBin | Out-Null
-        foreach ($launcher in @("hermes.exe", "hermes-acp.exe")) {
-            $src = "$InstallDir\venv\Scripts\$launcher"
-            if (Test-Path $src) {
-                Copy-Item -Force $src "$hermesBin\$launcher"
-            }
-        }
+        Install-HermesCommandLaunchers -Root $InstallDir | Out-Null
     }
     
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -3552,6 +3567,57 @@ function Install-BrowserUseCli {
     }
 }
 
+function Test-CuaDriverRuntimeContract {
+    param([Parameter(Mandatory = $true)][string]$DriverPath)
+
+    try {
+        $versionOutput = (& $DriverPath --version 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        $versionMatch = [regex]::Match($versionOutput, '(\d+\.\d+\.\d+)')
+        if (-not $versionMatch.Success) {
+            return $false
+        }
+        if ([version]($versionMatch.Groups[1].Value) -lt [version]'0.20.0') {
+            return $false
+        }
+
+        $manifestOutput = (& $DriverPath manifest 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $manifestOutput) {
+            return $false
+        }
+        $manifest = $manifestOutput | ConvertFrom-Json
+        if (-not $manifest.mcp_invocation.args) {
+            return $false
+        }
+
+        $required = @{
+            mcp = @('--socket', '--grant')
+            serve = @(
+                '--socket', '--permission-mode', '--capability-manifest',
+                '--approve-capability-manifest', '--embedded'
+            )
+            stop = @('--socket')
+        }
+        foreach ($commandName in $required.Keys) {
+            $command = $manifest.subcommands | Where-Object { $_.name -eq $commandName }
+            if (-not $command) {
+                return $false
+            }
+            $argNames = @($command.args | ForEach-Object { $_.name })
+            foreach ($requiredArg in $required[$commandName]) {
+                if ($requiredArg -notin $argNames) {
+                    return $false
+                }
+            }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 # cua-driver powers the computer_use toolset (background desktop control).
 # Provision it at install time so enabling the tool later -- via `hermes
 # tools`, the dashboard, or the desktop app -- is a config flip, not a
@@ -3563,9 +3629,13 @@ function Install-CuaDriver {
         Write-Info "Skipping Computer Use (cua-driver) install (-SkipComputerUse)"
         return
     }
-    if (Get-Command cua-driver -ErrorAction SilentlyContinue) {
-        Write-Success "Computer Use driver (cua-driver) already installed"
-        return
+    $existingCuaDriver = Get-Command cua-driver -ErrorAction SilentlyContinue
+    if ($existingCuaDriver) {
+        if (Test-CuaDriverRuntimeContract -DriverPath $existingCuaDriver.Source) {
+            Write-Success "Computer Use driver (cua-driver) already installed and compatible"
+            return
+        }
+        Write-Warn "Existing cua-driver is old or incomplete; repairing it"
     }
 
     Write-Info "Installing Computer Use driver (cua-driver)..."
@@ -3582,10 +3652,11 @@ function Install-CuaDriver {
         if (Wait-Job $job -Timeout 660) {
             Receive-Job $job -ErrorAction SilentlyContinue | Out-Null
             Remove-Job $job -Force -ErrorAction SilentlyContinue
-            if (Get-Command cua-driver -ErrorAction SilentlyContinue) {
+            $installedCuaDriver = Get-Command cua-driver -ErrorAction SilentlyContinue
+            if ($installedCuaDriver -and (Test-CuaDriverRuntimeContract -DriverPath $installedCuaDriver.Source)) {
                 Write-Success "Computer Use driver installed (enable via 'hermes tools' -> Computer Use)"
             } else {
-                Write-Warn "Computer Use driver install did not complete -- it will install on demand when you enable the tool."
+                Write-Warn "Computer Use driver install did not produce a compatible runtime -- repair it before enabling the tool."
                 Write-Info "Install later with: hermes computer-use install"
             }
         } else {

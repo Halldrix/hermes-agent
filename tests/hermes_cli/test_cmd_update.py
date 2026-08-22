@@ -326,6 +326,49 @@ class TestCmdUpdateMigrationPrompt:
             # The misleading question must NOT appear for a pure version bump.
             assert "configure them now" not in out.lower()
 
+    def test_version_bump_only_surfaces_migration_resets(
+        self, mock_args, capsys
+    ):
+        """A quiet version-bump migration that RESETS a user setting must say so.
+
+        Regression for #86656: the v33→v34 personality reset ran with
+        quiet=True and its results dict was discarded, so the update printed
+        "no new settings to configure" while silently wiping
+        display.personality. Migration-step mutations (config_added) and
+        warnings must be re-surfaced even in the silent branch.
+        """
+        with patch("shutil.which", return_value=None), patch(
+            "subprocess.run"
+        ) as mock_run, patch("builtins.input") as mock_input, patch(
+            "hermes_cli.config.get_missing_env_vars", return_value=[]
+        ), patch(
+            "hermes_cli.config.get_missing_config_fields", return_value=[]
+        ), patch(
+            "hermes_cli.update_cmd._reload_config_modules"
+        ), patch(
+            "hermes_cli.update_cmd._run_config_check_fresh", return_value=(33, 34)
+        ), patch(
+            "hermes_cli.update_cmd._run_migrate_config_fresh",
+            return_value={
+                "env_added": [],
+                "config_added": ["display.personality=none (one-time reset)"],
+                "warnings": ["Disabled suspicious MCP server 'evil'"],
+            },
+        ):
+            mock_run.side_effect = _make_run_side_effect(
+                branch="main", verify_ok=True, commit_count="1"
+            )
+
+            cmd_update(mock_args)
+
+            mock_input.assert_not_called()
+            out = capsys.readouterr().out
+            assert "Updating config format (v33 → v34)" in out
+            assert "no new settings to configure" in out
+            # The migration's mutation note and warning must NOT be swallowed.
+            assert "display.personality=none (one-time reset)" in out
+            assert "Disabled suspicious MCP server 'evil'" in out
+
     def test_new_options_are_listed_by_name_before_prompt(
         self, mock_args, capsys
     ):
@@ -842,7 +885,15 @@ class TestNodeRuntimeNpmResolution:
         )
 
     def test_git_failure_zip_fallback_rebuilds_missing_desktop(self, tmp_path, monkeypatch):
-        """The Windows ZIP fallback restores Desktop after replacing ``apps/``."""
+        """The Windows ZIP fallback keeps Desktop intact when replacing ``apps/``.
+
+        Contract updated for the #70337/#87331 release-dir graft: the built
+        desktop app (release/win-unpacked/Hermes.exe) is preserved THROUGH
+        the swap — previously this test pinned the old repair shape (exe
+        deleted by the swap, then rebuilt from scratch). The rebuild hook
+        still runs (mocked _desktop_build_needed=True), but it now finds
+        the packaged exe alive rather than missing.
+        """
         import zipfile
 
         from hermes_cli import main as hm
@@ -928,7 +979,12 @@ class TestNodeRuntimeNpmResolution:
                 gateway_mode=False,
             )
 
-        assert desktop_builds == [True]
+        # Release-dir graft (#70337): the packaged exe SURVIVES the swap, so
+        # the rebuild hook observed it present (False), and the bytes are the
+        # original build — never deleted, never rebuilt from nothing.
+        assert desktop_builds == [False]
+        assert packaged_exe.exists()
+        assert packaged_exe.read_bytes() == b"desktop"
 
 
 class TestUpdateNodeDependencies:
