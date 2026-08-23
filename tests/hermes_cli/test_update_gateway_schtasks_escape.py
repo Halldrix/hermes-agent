@@ -103,7 +103,7 @@ class TestColdStartEscape:
     def test_cold_start_reports_failure_when_spawn_does_not_survive(
         self, capsys, cold_start_mocks
     ):
-        """Direct spawn returns a PID but the gateway never comes up → ✗, no ✓."""
+        """Direct spawn returns a PID but the gateway never comes up -> warning, no ✓."""
         from hermes_cli import update_cmd
 
         cold_start_mocks.spawn_via_schtasks.return_value = False
@@ -114,9 +114,10 @@ class TestColdStartEscape:
         out = capsys.readouterr().out
         cold_start_mocks.spawn_detached.assert_called_once()
         cold_start_mocks.wait_for_ready.assert_called_once()
-        assert "did not survive" in out
-        assert "hermes gateway start" in out
-        assert "✓ Starting Windows gateway after update" not in out
+        # Failure surfaces through the shared _report_gateway_start helper.
+        assert "no process detected" in out
+        assert "⚠" in out
+        assert "✓" not in out
 
 class TestSpawnViaScheduledTaskHelper:
     """_spawn_via_scheduled_task returns False unless a NEW gateway actually shows up."""
