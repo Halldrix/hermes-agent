@@ -135,6 +135,13 @@ def _get_handler(path: Path) -> RotatingFileHandler:
     # Keep audit records out of the standard-library root logger graph; they
     # are written directly as raw lines to the file.
     handler.setLevel(logging.INFO)
+    # Evict handlers for a DIFFERENT resolved path (HERMES_HOME / profile
+    # moved in-process): leaving them in the cache would leak their fds.
+    # Path-change rotations are rare, so a linear sweep on rebuild is fine.
+    for old_path, old_handler in list(_handlers.items()):
+        if old_path != path:
+            old_handler.close()
+            _handlers.pop(old_path, None)
     _handlers[path] = handler
     return handler
 

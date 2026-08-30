@@ -82,5 +82,39 @@ def test_audit_honors_max_size_and_rotates(profile_home, monkeypatch):
     assert path.stat().st_size < 50 * 1024, "live audit log grew unboundedly"
 
 
+def test_audit_evicts_handler_when_hermes_home_moves(profile_home, monkeypatch):
+    """A HERMES_HOME / profile move in-process must not leak the old
+    handler's fd: writing to a new path closes the previous handler."""
+    import hermes_cli.dashboard_auth.audit as audit_mod
+
+    old_home = profile_home
+    new_home = old_home.parent / "moved-home"
+    new_home.mkdir()
+
+    # First write targets the fixture's home (populates _handlers).
+    audit_log(AuditEvent.LOGIN_START, provider="nous", ip="1.2.3.4")
+    old_path = old_home / "logs" / "dashboard-auth.log"
+    assert audit_mod._handlers[old_path] is not None
+
+    # Move HERMES_HOME → the audit path changes mid-process.
+    monkeypatch.setenv("HERMES_HOME", str(new_home))
+    audit_log(AuditEvent.LOGIN_SUCCESS, provider="nous", user_id="u1", ip="1.2.3.4")
+
+    new_path = new_home / "logs" / "dashboard-auth.log"
+    # New handler exists for the new path, old handler evicted + closed.
+    assert new_path.exists(), f"new home audit log not created at {new_path}"
+    assert new_path in audit_mod._handlers
+    assert old_path not in audit_mod._handlers, (
+        "old-path handler must be evicted after HERMES_HOME moves"
+    )
+    # Both records still present (old and new locations each hold their own).
+    assert json.loads(old_path.read_text().splitlines()[0])["event"] == "login_start"
+
+    # Restore: subsequent writes keep going to the new home.
+    audit_log(AuditEvent.LOGOUT, user_id="u1", ip="1.2.3.4")
+    lines = new_path.read_text().splitlines()
+    assert len(lines) == 2, lines  # login_success + logout on the new path
+
+
 
 
