@@ -200,6 +200,33 @@ def _terminate_safe_preview(
         return False, f"termination failed: {type(exc).__name__}"
 
 
+def _is_updater_owned_daemon(cmdline: str) -> bool:
+    """Return True when *cmdline* is a known memory-provider daemon (e.g. Hindsight).
+
+    Shares parser discipline with `_is_pausable_gateway`: shlex tokenization,
+    profile-aware. Matches `python* -m hindsight_api.main --daemon` (with
+    / Docker launches (those need direction-2: managed-service / dedicated venv).
+    """
+    import shlex  # noqa: PLC0415
+    try:
+        tokens = shlex.split(cmdline)
+    except ValueError:
+        return False
+    # Module invocation pattern.
+    for i, tok in enumerate(tokens):
+        if tok == "-m" and i + 1 < len(tokens):
+            module = tokens[i + 1]
+            if "hindsight_api" in module.lower() and ("main" in module.lower() or module.lower().endswith(".main")):
+                return any(arg == "--daemon" for arg in tokens)
+    # Executable fallback (Windows pythonw / venv shim paths with spaces).
+    name = tokens[0] if tokens else ""
+    name_low = name.lower()
+    if ("hindsight" in name_low or name_low in {"python.exe", "pythonw.exe", "python", "pythonw"}) and \
+       any(arg == "--daemon" for arg in tokens):
+        return True
+    return False
+
+
 def _is_pausable_gateway(cmdline: str) -> bool:
     """Return True when *cmdline* is a gateway process the updater can pause.
 
@@ -249,8 +276,13 @@ def main() -> None:
         _emit_probe_fail(f"scan aborted: {exc}")
 
     processes = []
+    provider_daemons = []
     for pid, name, cmdline in matches:
         if _is_pausable_gateway(cmdline):
+            continue
+        # Memory-provider daemon exemption (e.g. Hindsight daemon running from venv).
+        if _is_updater_owned_daemon(cmdline):
+            provider_daemons.append({"pid": pid, "name": name, "cmdline": _redact_sensitive_cmdline(cmdline)[:120]})
             continue
         process = {
             "pid": pid,
@@ -263,14 +295,22 @@ def main() -> None:
         process.update(_local_preview_metadata(pid, name))
         processes.append(process)
 
-    exempted = sum(1 for _pid, _name, cmdline in matches if _is_pausable_gateway(cmdline))
+    # (`blocked` remains based on `processes` only). The updater must handle
+    # them via a separate mechanism (see update_cmd.py direction); this JSON
+    # only makes them visible to the Desktop preflight and downstream logic.
+    provider_daemon_count = len(provider_daemons)
+    exempted_gateways = sum(1 for _pid, _name, cmdline in matches if _is_pausable_gateway(cmdline))
     data = {
         "ok": True,
         "blocked": bool(processes),
         "processes": processes,
-        # Diagnostic only: gateway processes present but not counted as
-        # blockers because the downstream updater pauses them itself.
-        "pausable_gateways": exempted,
+        # Diagnostic: provider daemons present (not blockers by design here).
+        "provider_daemons": provider_daemon_count,
+        # If we include the list, the Electron client must know how to interpret it.
+        # For now, keep it minimal: count only. Full list can be added when Electron
+        "provider_daemon_list": provider_daemons,
+        # Gateway exemption count (existing contract preserved).
+        "pausable_gateways": exempted_gateways,
     }
     print(json.dumps(data))
     sys.exit(0)

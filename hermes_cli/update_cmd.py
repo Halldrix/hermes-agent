@@ -3193,6 +3193,12 @@ def _refresh_active_memory_provider_dependencies() -> None:
     print()
     print(f"→ Refreshing active memory provider dependencies ({provider})...")
 
+    # for the active provider but does NOT pause/relaunch the daemon itself. The
+    # daemon may still hold the venv (see issue #100060). For Hermes-launched
+    # daemons, the venv-blocker scan (`_is_updater_owned_daemon`) now reports them
+    # as `provider_daemon_list`; the updater must still coordinate with the spawn
+    # ledger to stop/relaunch. External services (Scheduled Task / Docker) are not
+    # See `hermes_cli/_scan_venv_blockers.py`: `_is_updater_owned_daemon`.
     try:
         _install_dependencies(provider, force=True)
     except Exception as exc:
