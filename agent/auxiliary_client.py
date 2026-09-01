@@ -6009,7 +6009,7 @@ def _format_response_preview(response: Any, budget: int = 300) -> str:
         r = repr(response)
         suffix = "..." if len(r) > budget else ""
         return f"{type(response).__name__}(no non-None fields); repr: {r[:budget]!r}{suffix}"
-    items = ", ".join(f"{k}={v!r}" for k, v in list(fields.items())[:6])
+    items = ", ".join(f"{k}={v!r}"[:budget] for k, v in list(fields.items())[:6])
     suffix = "..." if len(fields) > 6 else ""
     return (
         f"{type(response).__name__}({len(fields)} non-None fields): "
