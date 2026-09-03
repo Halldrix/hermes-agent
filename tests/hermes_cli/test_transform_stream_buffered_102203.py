@@ -49,17 +49,19 @@ class TestTransformHookGate:
 
     def test_gate_true_when_hook_registered(self):
         cli = _make_cli(streaming_enabled=True)
-        with patch("hermes_cli.plugins.has_hook", return_value=True):
+        with patch("hermes_cli.plugins.has_mutating_hook", return_value=True):
             assert cli._transform_llm_output_hook_active() is True
 
     def test_gate_false_without_hook(self):
         cli = _make_cli(streaming_enabled=True)
-        with patch("hermes_cli.plugins.has_hook", return_value=False):
+        with patch("hermes_cli.plugins.has_mutating_hook", return_value=False):
             assert cli._transform_llm_output_hook_active() is False
 
     def test_gate_fail_open_on_plugin_error(self):
         cli = _make_cli(streaming_enabled=True)
-        with patch("hermes_cli.plugins.has_hook", side_effect=RuntimeError("boom")):
+        with patch(
+            "hermes_cli.plugins.has_mutating_hook", side_effect=RuntimeError("boom")
+        ):
             assert cli._transform_llm_output_hook_active() is False
 
 

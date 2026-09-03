@@ -926,9 +926,18 @@ class PluginContext:
                 logger.warning("Plugin '%s' locale file %s skipped: %s", self.manifest.name, file, exc)
         return handles
 
-    def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
-        """Register a lifecycle hook callback (unknown names warn but are still stored)."""
-        return self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+    def register_hook(self, hook_name: str, callback: Callable, *, mutates: bool = False) -> PluginRegistration:
+        """Register a lifecycle hook callback (unknown names warn but are still stored).
+
+        ``mutates`` is metadata-only: it tells the host whether the hook's return value REPLACES
+        the streamed/final payload (``True``) or is purely observational (``False``). Surfaces
+        that stream deltas to users need this to decide whether token streaming must be
+        suppressed up-front. Defaults to ``False`` so existing plugins keep working unchanged.
+        """
+        handle = self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+        flags = self._manager._hooks_mutating_flags.setdefault(hook_name, [])
+        flags.append(bool(mutates))
+        return handle
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
         """Register behavior-changing middleware (request kinds rewrite the payload, execution kinds
@@ -1176,6 +1185,12 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._hooks: dict[str, list[Callable]] = {}
         # Fallback hooks registered by a memory provider before general discovery.
         self._memory_hook_registrations: dict[tuple[str, str], list[PluginRegistration]] = {}
+        # Parallel bookkeeping to ``_hooks``: for each registered callback, whether it declared
+        # ``mutates=True`` at registration. Pairs of entries at the same index across both
+        # structures describe a single registration. Two registrations can share the same
+        # callable object, so a correspondence keyed by ``id(callback)`` would collapse —
+        # keep them aligned by index instead.
+        self._hooks_mutating_flags: dict[str, list[bool]] = {}
         self._middleware: dict[str, list[Callable]] = {}
         self._plugin_tool_names: set[str] = set()
         self._plugin_platform_names: set[str] = set()
@@ -1923,6 +1938,14 @@ def has_hook(hook_name: str) -> bool:
     Lazy-discovers first — same gate-before-invoke rationale as :func:`has_middleware` (tracking #64178).
     """
     return _delivery_manager().has_hook(hook_name)
+
+
+def has_mutating_hook(hook_name: str) -> bool:
+    """True when a loaded plugin handles a hook and marked it ``mutates=True`` at registration.
+
+    Lazy-discovers first — same gate-before-invoke rationale as :func:`has_hook` (tracking #64178).
+    """
+    return _delivery_manager().has_mutating_hook(hook_name)
 
 
 def iter_hook_callbacks(hook_name: str) -> tuple[Callable, ...]:
