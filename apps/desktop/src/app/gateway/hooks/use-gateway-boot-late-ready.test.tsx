@@ -8,7 +8,6 @@ import { endGatewaySwitch } from '@/store/gateway-switch'
 import { notifyError } from '@/store/notifications'
 import { $activeGatewayProfile } from '@/store/profile'
 import {
-  $activeSessionId,
   $awaitingResponse,
   $busy,
   $connection,
@@ -380,6 +379,7 @@ describe('#96743 — late backend.ready must unstick a boot whose retries were e
 
   it('ignores a backend.ready that arrives AFTER a completed boot (post-boot progress re-emit)', async () => {
     const desktop = fakeDesktop()
+
     ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
 
     render(<Harness />)
