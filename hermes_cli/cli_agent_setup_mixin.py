@@ -611,18 +611,43 @@ class CLIAgentSetupMixin:
                 pass
             return False
 
+    def _stream_delta_with_hook_gate(self, text):
+        """Stream delta callback that re-checks the hook gate per token.
+
+        ``_init_agent`` runs once at boot, but plugins register hooks at /
+        after startup too. A late-registered ``transform_llm_output`` with a
+        callback baked at ``_init_agent`` time would still garble output.
+
+        Gating per token keeps the CLI safe regardless of registration order:
+        the moment any ``transform_llm_output`` hook is live, we stop
+        forwarding deltas. The agent still accumulates ``final_response`` so
+        the post-transform Panel renders the final text exactly once.
+
+        The gate is evaluated on every call (cheap dict lookup in the plugin
+        manager) so a hook can turn streaming off mid-turn. We deliberately
+        do not gate on ``text is None`` — a turn-boundary ``None`` flush is
+        always passed through so stream state resets cleanly even when the
+        hook is active.
+        """
+        if text is None:
+            if self._stream_delta is not None:
+                self._stream_delta(text)
+            return
+        if self._transform_llm_output_hook_active():
+            return
+        if self._stream_delta is not None:
+            self._stream_delta(text)
+
     def _resolve_stream_delta_callback(self):
         """Decide the ``stream_delta_callback`` value for ``_init_agent``.
 
-        Extracted as a named method so tests can drive the same wiring
-        decision the production path executes, without duplicating the
-        expression: suppress token streaming whenever a mutating
-        ``transform_llm_output`` hook is registered (#102203)."""
+        Returns the per-token wrapper ``_stream_delta_with_hook_gate`` so the
+        hook gate is re-evaluated for every delta (handles late registration)
+        rather than a baked-yes/no decision made once at startup.
+        """
         if not self.streaming_enabled:
             return None
-        if self._transform_llm_output_hook_active():
-            return None
-        return self._stream_delta
+        return self._stream_delta_with_hook_gate
 
     def _resume_history_limit_error(self, tip_only: bool = False):
         """Return a safe-resume error without materializing transcript rows.
