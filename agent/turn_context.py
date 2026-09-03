@@ -1626,32 +1626,32 @@ def build_turn_context(
         )
         if _api_content is not None and _api_content != _turn_user_msg.get("content"):
             _turn_user_msg["api_content"] = _api_content
-            # In-place preflight compaction has ALREADY inserted this turn's
-            # user row (archive_and_compact runs before prefetch/pre_llm_call
-            # can compose the sidecar), and the crash persist below identity-
-            # skips every compacted dict (they are all in the rebound
-            # conversation_history) — so the stamp would never reach the DB.
-            # Backfill it onto the freshly-inserted row directly. Rotation
-            # mode needs nothing here: its compacted copies flush to the
-            # child session after this stamp.
-            if _preflight_compressed and bool(
-                getattr(agent, "_last_compaction_in_place", False)
-            ):
-                _db = getattr(agent, "_session_db", None)
-                if _db is not None:
-                    try:
-                        _db.set_latest_user_api_content(
-                            agent.session_id,
-                            _turn_user_msg.get("content"),
-                            _api_content,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "in-place compaction api_content backfill failed "
-                            "for session=%s",
-                            agent.session_id or "none",
-                            exc_info=True,
-                        )
+            # The stamp must reach the DB even when the row already exists.
+            # Two paths land a sidecar-less user row before this point:
+            #  - In-place preflight compaction: archive_and_compact inserts
+            #    the row, and the crash persist identity-skips every
+            #    compacted dict.
+            #  - CLI close-persist / early flush: a signal handler or
+            #    cross-process flush reads the staged dict and writes the
+            #    row before this stamp runs (#102194). The marker-based
+            #    flush then skips it forever.
+            # set_latest_user_api_content is content-guarded: it no-ops
+            # when the newest row already has the exact sidecar or when
+            # the live content no longer matches (persist override).
+            _db = getattr(agent, "_session_db", None)
+            if _db is not None:
+                try:
+                    _db.set_latest_user_api_content(
+                        agent.session_id,
+                        _turn_user_msg.get("content"),
+                        _api_content,
+                    )
+                except Exception:
+                    logger.warning(
+                        "api_content backfill failed for session=%s",
+                        agent.session_id or "none",
+                        exc_info=True,
+                    )
 
     # Crash-resilience: persist the inbound user turn before the first LLM
     # call. Runs after preflight compression (which rewrites history anyway)
