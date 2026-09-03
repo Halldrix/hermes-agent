@@ -72,7 +72,7 @@ import {
   shouldLatchHostKeyChangedFailure,
   shouldLatchRemoteReauthFailure
 } from './backend-start-failure'
-import { formatBootTransitionLog } from './boot-transition-log'
+import { formatBootTransitionLog, trySendBootProgress } from './boot-transition-log'
 import {
   detectRemoteDisplay,
   isWindowsBinaryPathInWsl,
@@ -1852,9 +1852,11 @@ function broadcastBootProgress(): boolean {
     return false
   }
 
-  webContents.send('hermes:boot-progress', bootProgressState)
-
-  return true
+  // webContents.send() can still throw if the window dies between the
+  // destroyed checks above and the call itself. trySendBootProgress swallows
+  // it and reports not-delivered so the boot transition log line is still
+  // written — that log is the whole point when the renderer is gone (#96743).
+  return trySendBootProgress(webContents, 'hermes:boot-progress', bootProgressState)
 }
 
 // Bootstrap-event broadcast channel + state. The bootstrap runner emits a

@@ -46,3 +46,22 @@ export function formatBootTransitionLog(
 
   return options.delivered === false ? `${withError} not-delivered` : withError
 }
+
+/**
+ * Sends the boot-progress payload to the renderer, swallowing the throw that
+ * occurs when the window dies between the caller's isDestroyed() checks and
+ * the send itself. Returns true only when the send actually went out.
+ *
+ * The whole point of the transition log is to record what happened when the
+ * renderer *didn't* see it — so a destroyed-mid-send window must report
+ * not-delivered, never skip the log line (#96743).
+ */
+export function trySendBootProgress(sender: { send(channel: string, payload: unknown): void }, channel: string, payload: unknown): boolean {
+  try {
+    sender.send(channel, payload)
+
+    return true
+  } catch {
+    return false
+  }
+}

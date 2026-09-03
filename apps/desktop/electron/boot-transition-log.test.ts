@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 
 import { describe, test } from 'vitest'
 
-import { formatBootTransitionLog } from './boot-transition-log'
+import { formatBootTransitionLog, trySendBootProgress } from './boot-transition-log'
 
 // #96743 item 3: every main→renderer boot state transition should land in
 // desktop.log so a stuck post-ready boot is diagnosable after the fact
@@ -55,5 +55,41 @@ describe('formatBootTransitionLog', () => {
 
     assert.match(line, /backend\.remote/)
     assert.match(line, /error="boom"/)
+  })
+})
+
+describe('trySendBootProgress', () => {
+  test('returns true when the send succeeds', () => {
+    let sent: [string, unknown] | null = null
+
+    const ok = trySendBootProgress(
+      {
+        send(channel: string, payload: unknown) {
+          sent = [channel, payload]
+        }
+      },
+      'hermes:boot-progress',
+      { phase: 'backend.ready' }
+    )
+
+    assert.equal(ok, true)
+    assert.deepEqual(sent, ['hermes:boot-progress', { phase: 'backend.ready' }])
+  })
+
+  test('swallows a thrown send (window destroyed mid-call) and returns false', () => {
+    // The window can be destroyed between the caller's isDestroyed() checks
+    // and the actual send; the throw must be contained so the transition log
+    // still records the transition as not-delivered (#96743 review nit).
+    const ok = trySendBootProgress(
+      {
+        send() {
+          throw new Error('Object has been destroyed')
+        }
+      },
+      'hermes:boot-progress',
+      { phase: 'backend.ready' }
+    )
+
+    assert.equal(ok, false)
   })
 })
