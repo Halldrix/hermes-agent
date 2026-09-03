@@ -589,7 +589,7 @@ class CLIAgentSetupMixin:
             return False
 
     def _transform_llm_output_hook_active(self) -> bool:
-        """True when a transform_llm_output hook is registered (#102203).
+        """True when a transform_llm_output hook that MUTATES is registered (#102203).
 
         A mutating hook replaces the final response after streaming has
         already printed tokens; any post-hoc suffix repair (banner /
@@ -597,16 +597,22 @@ class CLIAgentSetupMixin:
         no way to revoke bytes already rendered. Skip token streaming for
         those sessions and let run_conversation's final-response Panel
         branch (cli.py ~17664) print the transformed text once.
+
+        Purely observational hooks (``register_hook(..., mutates=False)``,
+        the default) keep streaming enabled — they cannot alter the final
+        text, so the streamed bytes match the final render.
         """
         try:
             from cli import logger
-            from hermes_cli.plugins import has_hook
+            from hermes_cli.plugins import has_mutating_hook
 
-            return has_hook("transform_llm_output")
+            return has_mutating_hook("transform_llm_output")
         except Exception:  # pragma: no cover - plugin manager may be unavailable
             try:
                 from cli import logger
-                logger.debug("transform_llm_output hook check failed", exc_info=True)
+                logger.debug(
+                    "transform_llm_output mutating-hook check failed", exc_info=True
+                )
             except Exception:
                 pass
             return False
