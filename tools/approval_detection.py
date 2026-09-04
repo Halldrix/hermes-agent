@@ -863,6 +863,23 @@ def _execution_flag_findings(command: str):
                     finding = _read_tool_exec_flag(executable_name, args)
                     if finding:
                         yield (f"arbitrary program execution via {executable_name} {finding[0]}", finding[1])
+                # `cmd /c|/k` (and the git-bash //c //k spellings) hands the
+                # rest of the line to an arbitrary payload. Without this,
+                # `cmd /c powershell -File x.ps1` reached no gate at all while
+                # the direct form required approval — the trivial bypass
+                # reported in #102847. Options may precede the verb
+                # (`cmd /u /c ...` — /u is a modifier, not the payload), and
+                # the payload may be a single quoted string
+                # (`cmd /c "powershell -File x.ps1"`). Tokenize the whole tail
+                # with shlex so quoted payloads surface, find the LAST /c|/k,
+                # and scan the remaining tokens as a nested command.
+                if executable_name in {"cmd", "cmd.exe"}:
+                    verb_index = None
+                    for index in range(1, len(tokens)):
+                        if tokens[index].lower() in {"/c", "/k", "//c", "//k"}:
+                            verb_index = index
+                    if verb_index is not None:
+                        yield from _execution_flag_findings(" ".join(tokens[verb_index + 1 :]))
 
 
 def _skip_shell_whitespace(command: str, pos: int) -> int:
@@ -1070,19 +1087,6 @@ def _iter_shell_command_word_spans(command: str):
             yield (word_start, word_end, word)
             if lower_word in _COMMAND_WRAPPER_WORDS:
                 skip_wrapper_options = lower_word in {"sudo", "env"}
-            elif lower_word in {"cmd", "cmd.exe"}:
-                # `cmd /c|/k` hands the rest of the line to the payload
-                # interpreter. Without this, `cmd /c powershell -File x.ps1`
-                # reached no gate at all while the direct form required
-                # approval — the trivial bypass reported in #102847. /c and
-                # /k are cmd's "run the payload" verbs, not sudo-style
-                # options; git-bash spells them //c //k (MSYS path escapes).
-                # Options before the verb (`cmd /u /c ...`) stop the scan.
-                next_start, _, next_word = _read_shell_word(command, pos)
-                if next_word.lower() in {"/c", "/k", "//c", "//k"}:
-                    pos = next_start + len(next_word)
-                else:
-                    break
             elif _ENV_ASSIGNMENT_RE.fullmatch(deobfuscated):
                 skip_wrapper_options = False
             else:

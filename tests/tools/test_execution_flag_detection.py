@@ -367,7 +367,26 @@ def test_powershell_file_bypass_via_cmd_wrapper_is_gated():
         "cmd /k pwsh -f x.ps1",
         # git-bash/MSYS (the reporter's shell) escapes to //c.
         "cmd //c powershell -File x.ps1",
+        # options/markers before the verb must not hide the payload.
+        "cmd /u /c powershell -File x.ps1",
+        # whole-payload quoted (the canonical `cmd /c "..."` idiom).
+        'cmd /c "powershell -File x.ps1"',
+        'cmd.exe /c "powershell -NoProfile -ExecutionPolicy Bypass -File C:/x/repro.ps1"',
     ]:
         dangerous, key, description = detect_dangerous_command(command)
         assert dangerous is True, f"bypass via wrapper: {command!r}"
         assert description == "script execution via -File/-f flag (PowerShell)", (command, description)
+
+
+def test_cmd_wrapper_does_not_gate_benign_payloads():
+    """cmd /c <benign> must NOT gain approval just because it is a wrapper."""
+    for command in [
+        "cmd /c echo hello",
+        "cmd /c dir",
+        "cmd /c npm install",
+        "cmd /c git status",
+        "cmd /?",
+        "cmd /u",
+        'cmd /c "echo hello"',
+    ]:
+        assert detect_dangerous_command(command) == (False, None, None), command
