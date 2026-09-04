@@ -103,20 +103,20 @@ class TestColdStartEscape:
     def test_cold_start_reports_failure_when_spawn_does_not_survive(
         self, capsys, cold_start_mocks
     ):
-        """Direct spawn returns a PID but the gateway never comes up -> warning, no ✓."""
+        """Direct spawn returns a PID but the gateway never comes up -> raises, no ✓."""
         from hermes_cli import update_cmd
 
         cold_start_mocks.spawn_via_schtasks.return_value = False
         cold_start_mocks.spawn_detached.return_value = 54321
         cold_start_mocks.wait_for_ready.return_value = []
-        update_cmd._cold_start_windows_gateway_after_update()
+        # main's cold-start contract: an unverified spawn raises rather than
+        # printing a ✓ that would be a lie (the shared liveness gate).
+        with pytest.raises(RuntimeError, match="did not become ready"):
+            update_cmd._cold_start_windows_gateway_after_update()
 
         out = capsys.readouterr().out
         cold_start_mocks.spawn_detached.assert_called_once()
         cold_start_mocks.wait_for_ready.assert_called_once()
-        # Failure surfaces through the shared _report_gateway_start helper.
-        assert "no process detected" in out
-        assert "⚠" in out
         assert "✓" not in out
 
 class TestSpawnViaScheduledTaskHelper:
