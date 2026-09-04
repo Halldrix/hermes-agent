@@ -54,7 +54,7 @@ def _neutral_backend(monkeypatch):
 
 def _fake_cli(tmp_path, body="cat >/dev/null; echo hello-from-cli"):
     script = tmp_path / "browser-use"
-    script.write_text("#!/bin/sh\n" + body + "\n")
+    script.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
 
@@ -303,6 +303,12 @@ class TestTimeoutTeardown:
             raise subprocess.TimeoutExpired(cmd, timeout)
 
         monkeypatch.setattr(bu_cli, "_run_cli_no_pipes", fake_runner)
+        # The real tree-kill lives in browser_tool (psutil/taskkill); stub it
+        # so the assertion observes the teardown actually reaching Chrome.
+        monkeypatch.setattr(
+            "tools.browser_tool._kill_process_tree",
+            lambda proc: setattr(type(DeadProc), "killed", True),
+        )
         out = _result(bu_cli.browser_exec("print('hi')", timeout_s=5))
         assert "torn down" in out["error"]
         assert bu_cli._LEASES == {}
@@ -315,7 +321,7 @@ class TestChromeLaunch:
         os.makedirs(lease.tmp_dir, exist_ok=True)
         profile = os.path.join(lease.runtime_dir, "chrome-profile")
         os.makedirs(profile, exist_ok=True)
-        with open(os.path.join(profile, "DevToolsActivePort"), "w") as f:
+        with open(os.path.join(profile, "DevToolsActivePort"), "w", encoding="utf-8") as f:
             f.write("12345\n/devtools/browser/abc\n")
         monkeypatch.setattr(bu_cli, "_chrome_binary", lambda: "/fake/chrome")
         monkeypatch.setattr(bu_cli, "_cdp_live", lambda url, timeout=2.0: True)

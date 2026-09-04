@@ -567,26 +567,18 @@ def _teardown_lease(key: str) -> None:
     lease.chrome_proc = None
     if chrome is not None:
         try:
-            if os.name != "nt":
-                try:
-                    os.killpg(os.getpgid(chrome.pid), 15)
-                except Exception:
-                    chrome.terminate()
-                try:
-                    chrome.wait(timeout=5)
-                except Exception:
-                    try:
-                        os.killpg(os.getpgid(chrome.pid), 9)
-                    except Exception:
-                        chrome.kill()
-            else:
-                chrome.terminate()
-                try:
-                    chrome.wait(timeout=5)
-                except Exception:
-                    chrome.kill()
+            from tools.browser_tool import _kill_process_tree
+
+            _kill_process_tree(chrome)
         except Exception:
-            pass
+            try:
+                chrome.terminate()
+                chrome.wait(timeout=5)
+            except Exception:
+                try:
+                    chrome.kill()
+                except Exception:
+                    pass
     import shutil as _shutil
 
     _shutil.rmtree(lease.runtime_dir, ignore_errors=True)
