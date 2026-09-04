@@ -357,6 +357,29 @@ def test_powershell_file_legacy_approval_key_compatibility():
     assert "script execution via -e/-c flag" in aliases
 
 
+def test_powershell_file_historical_regex_approval_authorizes_new_findings():
+    """A persisted pre-migration approval stored under the exact historical
+    regex-derived key must still authorize a new `-File` finding through the
+    real consumer (`is_approved`), not just the intermediate alias set. The
+    alias map stores sets per key with no graph closure, so the -File key must
+    include the regex key directly (review feedback on #102955)."""
+    from tools.approval import is_approved, load_permanent
+    from tools.approval_detection import _approval_key_aliases
+
+    historical_regex_key = r"(python[23]?|perl|ruby|node)\s+-[ec]\s+"
+    aliases = _approval_key_aliases("script execution via -File/-f flag (PowerShell)")
+    assert historical_regex_key in aliases
+
+    load_permanent({historical_regex_key})
+    try:
+        assert is_approved("session", "script execution via -File/-f flag (PowerShell)")
+    finally:
+        from tools import approval as _approval
+
+        with _approval._lock:
+            _approval._permanent_approved.discard(historical_regex_key)
+
+
 def test_powershell_file_bypass_via_cmd_wrapper_is_gated():
     """`cmd /c powershell -File ...` ran with no gate at all (#102847) — a silent
     bypass of the approval the direct form triggers. The cmd /c payload is itself
@@ -388,5 +411,11 @@ def test_cmd_wrapper_does_not_gate_benign_payloads():
         "cmd /?",
         "cmd /u",
         'cmd /c "echo hello"',
+        # The FIRST /c|/k owns the whole remainder; a later /c is payload
+        # DATA. `cmd /c echo /c powershell -File x.ps1` just prints text —
+        # gating it was a false positive (review feedback on #102955).
+        "cmd /c echo /c powershell -File x.ps1",
+        "cmd /c echo /k powershell -File x.ps1",
+        "cmd /c printf '%s' //c powershell -File x.ps1",
     ]:
         assert detect_dangerous_command(command) == (False, None, None), command

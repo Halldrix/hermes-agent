@@ -419,18 +419,27 @@ def _interpreter_exec_flag_description(family: str, flag: str) -> str:
 
 # Legacy approval keys keep resolving after the -File split: an approval saved
 # under the shared `-e/-c` key (or its older regex-derived key) still covers
-# -File runs, and vice versa.
+# -File runs, and vice versa. The -File key pairs with BOTH the shared
+# description and the historical regex-derived key: `_approval_key_aliases()`
+# returns only the stored set (no graph closure), so pairing through a single
+# intermediate would leave one of the two pre-migration spellings unable to
+# authorize a new `-File` finding (review feedback on #102955).
+_EXEC_FLAG_LEGACY_REGEX_KEY = r"(python[23]?|perl|ruby|node)\s+-[ec]\s+"
 _REMOVED_PATTERN_KEY_ALIASES = {
-    _EXEC_FLAG_LEGACY_KEY: r"(python[23]?|perl|ruby|node)\s+-[ec]\s+",
+    _EXEC_FLAG_LEGACY_KEY: _EXEC_FLAG_LEGACY_REGEX_KEY,
     _EXEC_FLAG_FILE_KEY: _EXEC_FLAG_LEGACY_KEY,
     "script execution via heredoc": r"(python[23]?|perl|ruby|node)\s+<<",
 }
+_REMOVED_PATTERN_KEY_ALIAS_PAIRS = [
+    (_EXEC_FLAG_FILE_KEY, _EXEC_FLAG_LEGACY_KEY),
+    (_EXEC_FLAG_FILE_KEY, _EXEC_FLAG_LEGACY_REGEX_KEY),
+]
 # description <-> legacy regex-derived key (the old approval key, kept for backwards compatibility
 # with stored allowlist/session entries), both ways.
 _PATTERN_KEY_ALIASES: dict[str, set[str]] = {}
 for _canonical_key, _legacy_key in [
     (d, p.split(r'\b')[1] if r'\b' in p else p[:20]) for p, d in DANGEROUS_PATTERNS
-] + list(_REMOVED_PATTERN_KEY_ALIASES.items()):
+] + list(_REMOVED_PATTERN_KEY_ALIASES.items()) + _REMOVED_PATTERN_KEY_ALIAS_PAIRS:
     _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update({_canonical_key, _legacy_key})
     _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, _canonical_key})
 
@@ -871,13 +880,21 @@ def _execution_flag_findings(command: str):
                 # (`cmd /u /c ...` — /u is a modifier, not the payload), and
                 # the payload may be a single quoted string
                 # (`cmd /c "powershell -File x.ps1"`). Tokenize the whole tail
-                # with shlex so quoted payloads surface, find the LAST /c|/k,
-                # and scan the remaining tokens as a nested command.
+                # with shlex so quoted payloads surface, then hand everything
+                # after the FIRST /c|/k to the nested scan. cmd semantics: the
+                # first control verb owns the entire remainder, so a `/c` in
+                # the payload (`cmd /c echo /c powershell -File x.ps1`) is
+                # payload DATA — taking the last verb would gate benign echo
+                # lines that merely print the text (review feedback on #102955).
                 if executable_name in {"cmd", "cmd.exe"}:
-                    verb_index = None
-                    for index in range(1, len(tokens)):
-                        if tokens[index].lower() in {"/c", "/k", "//c", "//k"}:
-                            verb_index = index
+                    verb_index = next(
+                        (
+                            index
+                            for index in range(1, len(tokens))
+                            if tokens[index].lower() in {"/c", "/k", "//c", "//k"}
+                        ),
+                        None,
+                    )
                     if verb_index is not None:
                         yield from _execution_flag_findings(" ".join(tokens[verb_index + 1 :]))
 
