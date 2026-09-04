@@ -398,10 +398,32 @@ DANGEROUS_PATTERNS = [
 
 DANGEROUS_PATTERNS_COMPILED = [(re.compile(p, _RE_FLAGS), d) for p, d in DANGEROUS_PATTERNS]
 
-# Preserve approvals stored under the removed interpreter regex rules.
+# Block reason for interpreter exec flags. One shared key for every inline-code
+# flag: the reason names the matched flag so an agent reading the block knows
+# what actually tripped the gate (#102847) — `powershell -File x.ps1` reported
+# "via -e/-c flag" while the command contained no -e/-c at all, burning agent
+# iterations hunting for a flag that did not exist.
+_EXEC_FLAG_LEGACY_KEY = "script execution via -e/-c flag"
+# -File/-f run a script from disk, not inline code. Still approval-worthy
+# (a .ps1 is arbitrary code) but its own description so the reason is truthful.
+_EXEC_FLAG_FILE_KEY = "script execution via -File/-f flag (PowerShell)"
+_POWERSHELL_FILE_FLAGS = {"-file", "-f"}
+
+
+def _interpreter_exec_flag_description(family: str, flag: str) -> str:
+    """Map the matched exec flag to its block reason (approval key)."""
+    if family == "powershell" and flag in _POWERSHELL_FILE_FLAGS:
+        return _EXEC_FLAG_FILE_KEY
+    return _EXEC_FLAG_LEGACY_KEY
+
+
+# Legacy approval keys keep resolving after the -File split: an approval saved
+# under the shared `-e/-c` key (or its older regex-derived key) still covers
+# -File runs, and vice versa.
 _REMOVED_PATTERN_KEY_ALIASES = {
-    "script execution via -e/-c flag": "(python[23]?|perl|ruby|node)\\s+-[ec]\\s+",
-    "script execution via heredoc": "(python[23]?|perl|ruby|node)\\s+<<",
+    _EXEC_FLAG_LEGACY_KEY: r"(python[23]?|perl|ruby|node)\s+-[ec]\s+",
+    _EXEC_FLAG_FILE_KEY: _EXEC_FLAG_LEGACY_KEY,
+    "script execution via heredoc": r"(python[23]?|perl|ruby|node)\s+<<",
 }
 # description <-> legacy regex-derived key (the old approval key, kept for backwards compatibility
 # with stored allowlist/session entries), both ways.
@@ -827,8 +849,9 @@ def _execution_flag_findings(command: str):
             if not tokens:
                 continue
             args = tokens[1:]
-            if family and _interpreter_exec_flag(family, args):
-                yield ("script execution via -e/-c flag", None)
+            exec_flag = _interpreter_exec_flag(family, args) if family else None
+            if exec_flag:
+                yield (_interpreter_exec_flag_description(family, exec_flag), None)
             elif family and any(token.startswith("<<") for token in args):
                 yield ("script execution via heredoc", None)
             else:
@@ -1047,6 +1070,19 @@ def _iter_shell_command_word_spans(command: str):
             yield (word_start, word_end, word)
             if lower_word in _COMMAND_WRAPPER_WORDS:
                 skip_wrapper_options = lower_word in {"sudo", "env"}
+            elif lower_word in {"cmd", "cmd.exe"}:
+                # `cmd /c|/k` hands the rest of the line to the payload
+                # interpreter. Without this, `cmd /c powershell -File x.ps1`
+                # reached no gate at all while the direct form required
+                # approval — the trivial bypass reported in #102847. /c and
+                # /k are cmd's "run the payload" verbs, not sudo-style
+                # options; git-bash spells them //c //k (MSYS path escapes).
+                # Options before the verb (`cmd /u /c ...`) stop the scan.
+                next_start, _, next_word = _read_shell_word(command, pos)
+                if next_word.lower() in {"/c", "/k", "//c", "//k"}:
+                    pos = next_start + len(next_word)
+                else:
+                    break
             elif _ENV_ASSIGNMENT_RE.fullmatch(deobfuscated):
                 skip_wrapper_options = False
             else:
