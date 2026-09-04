@@ -139,6 +139,31 @@ class TestCheckWebApiKeyWithAuto:
         assert wt.check_web_api_key() is False
 
 
+class TestNormalizationHelpers:
+    """The single normalization point for stored backend names."""
+
+    def test_raw_name_strips_lowercases_and_blanks(self):
+        assert wt._raw_backend_name({"backend": "  Tavily "}) == "tavily"
+        assert wt._raw_backend_name({"backend": None}) == ""
+        assert wt._raw_backend_name({}) == ""
+
+    def test_auto_sentinel_matches_exact_token_only(self):
+        assert wt._is_auto_sentinel("auto") is True
+        assert wt._is_auto_sentinel("AUTO") is False  # raw names are pre-lowered
+        assert wt._is_auto_sentinel("autodetect") is False
+        assert wt._is_auto_sentinel("") is False
+
+    def test_configured_name_normalizes_auto_to_unset(self):
+        assert wt._configured_backend_name({"backend": "auto"}) == ""
+        assert wt._configured_backend_name({"backend": "  AUTO "}) == ""
+        assert wt._configured_backend_name({"backend": "tavily"}) == "tavily"
+
+    def test_per_capability_key_reads_through_same_helper(self):
+        cfg = {"search_backend": "AUTO", "extract_backend": "exa"}
+        assert wt._configured_backend_name(cfg, "search_backend") == ""
+        assert wt._configured_backend_name(cfg, "extract_backend") == "exa"
+
+
 class TestRegistryPathUnaffected:
     def test_registry_resolver_still_degrades_unknown_names(self, monkeypatch):
         # The registry resolver already treats unknown configured names as
