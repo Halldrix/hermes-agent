@@ -240,6 +240,22 @@ def _managed_bin_dir() -> str:
     return str(Path(get_hermes_home()) / "bin")
 
 
+def _user_local_bin_dir() -> Optional[str]:
+    """The standard user-level tool dir (~/.local/bin on POSIX; uv's default
+    tool bin dir on Windows). Desktop/TUI workers may start with a minimal
+    PATH that omits it even when `uv tool install browser-use` put the
+    binary there.
+    """
+    try:
+        if os.name == "nt":
+            base = os.environ.get("APPDATA")
+            return str(Path(base) / "uv" / "bin") if base else None
+        return str(Path(os.path.expanduser("~")) / ".local" / "bin")
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("Could not resolve user-local bin dir: %s", e)
+        return None
+
+
 def _find_cli() -> Optional[List[str]]:
     """Locate the browser-use CLI, or None when it can't be run. MANAGED-FIRST: Hermes' own ``$HERMES_HOME/bin``
     copy always wins so every session drives one Hermes-controlled binary; PATH and the user-level tool dir
@@ -567,7 +583,7 @@ def _teardown_lease(key: str) -> None:
     lease.chrome_proc = None
     if chrome is not None:
         try:
-            from tools.browser_tool import _kill_process_tree
+            from tools.browser_tool_lifecycle import _kill_process_tree
 
             _kill_process_tree(chrome)
         except Exception:

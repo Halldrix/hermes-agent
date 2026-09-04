@@ -306,7 +306,7 @@ class TestTimeoutTeardown:
         # The real tree-kill lives in browser_tool (psutil/taskkill); stub it
         # so the assertion observes the teardown actually reaching Chrome.
         monkeypatch.setattr(
-            "tools.browser_tool._kill_process_tree",
+            "tools.browser_tool_lifecycle._kill_process_tree",
             lambda proc: setattr(type(DeadProc), "killed", True),
         )
         out = _result(bu_cli.browser_exec("print('hi')", timeout_s=5))
