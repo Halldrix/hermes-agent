@@ -90,6 +90,81 @@ def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_er
     return logged_in
 
 
+# Dashboard-auth refresh health: the "Nous Portal auth (logged in)" row above
+# reports CLI-credential *presence*, which says nothing about the dashboard
+# refresh path (a 3 req/s rejection storm once ran invisible beneath that green
+# tick, #98338 Defect 4). This reads the dashboard-auth audit log — passive,
+# never triggering a refresh — and reports the recent REFRESH_FAILURE rate.
+_REFRESH_LOG_TAIL_LINES = 5000
+_REFRESH_WINDOW_SEC = 3600.0
+_REFRESH_STORM_ISSUE_COUNT = 20
+
+
+def _summarize_refresh_failures(lines, *, window_s: float, now) -> tuple:
+    """Aggregate ``(total, by_reason, latest_ts)`` for refresh_failure audit lines
+    inside the window. Pure (takes lines) so tests need no HERMES_HOME. Only
+    aggregates are returned — raw lines (and any fields) never surface."""
+    import datetime as _dt
+    import json as _json
+    from collections import Counter as _Counter
+
+    cutoff = now.timestamp() - window_s
+    reasons: dict = _Counter()
+    latest = None
+    for line in lines:
+        try:
+            entry = _json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("event") != "refresh_failure":
+            continue
+        try:
+            ts = _dt.datetime.fromisoformat(str(entry.get("ts", ""))).timestamp()
+        except ValueError:
+            continue
+        if ts < cutoff:
+            continue
+        reasons[str(entry.get("reason", "unknown"))] += 1
+        if latest is None or ts > latest:
+            latest = ts
+    return sum(reasons.values()), dict(reasons), latest
+
+
+@doctor_check()
+def _check_dashboard_auth_refresh(should_fix: bool, f: Finding) -> None:
+    """Recent dashboard-auth REFRESH_FAILURE rate from the audit log."""
+    from hermes_cli.dashboard_auth.audit import resolve_log_path
+
+    with warn_on_error("Dashboard refresh health", "(could not read audit log: {e})"):
+        import datetime as _dt
+        from collections import deque
+
+        path = resolve_log_path()
+        if not path.exists():
+            check_info("Dashboard refresh: no audit log yet (no dashboard-auth activity)")
+            return
+        with open(path, encoding="utf-8") as fh:
+            tail = deque(fh, maxlen=_REFRESH_LOG_TAIL_LINES)
+        total, by_reason, _ = _summarize_refresh_failures(
+            tail, window_s=_REFRESH_WINDOW_SEC,
+            now=_dt.datetime.now(_dt.timezone.utc))
+        if total == 0:
+            check_ok("Dashboard refresh", "(no failures in the last hour)")
+            return
+        top = ", ".join(f"{n} {reason}" for reason, n in
+                        sorted(by_reason.items(), key=lambda kv: -kv[1])[:3])
+        if total >= _REFRESH_STORM_ISSUE_COUNT:
+            check_fail("Dashboard refresh",
+                       f"({total} failures in the last hour: {top} — see dashboard-auth.log)")
+            f.issues.append(
+                f"Dashboard auth refresh failing ({total} REFRESH_FAILURE in the last hour: "
+                f"{top}). Inspect dashboard-auth.log; a looping client or a struggling "
+                f"upstream is likely.")
+        else:
+            check_warn("Dashboard refresh",
+                       f"({total} failures in the last hour: {top})")
+
+
 @doctor_check()
 def _check_api_connectivity(should_fix: bool, f: Finding) -> None:
     """Parallel HTTP/SDK probes for every configured provider; results printed in submission order."""
@@ -113,6 +188,7 @@ DOCTOR_CHECKS = (
     (None, _check_config_file), (None, _check_config_drift),
     ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement),
     ('Plugin import paths (removed Sep 14, 2026)', _check_plugin_compat), ('Auth Providers', _check_auth_providers),
+    (None, _check_dashboard_auth_refresh),
     ('Directory Structure', _check_directory_structure), (None, _check_state_db),
     (None, _check_gateway_supervision), (None, _check_command_installation),
     ('External Tools', _check_git_and_rg), (None, _check_terminal_backend), (None, _check_node_and_browser),
