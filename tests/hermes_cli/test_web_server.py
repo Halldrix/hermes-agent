@@ -5126,6 +5126,79 @@ class TestHeadlessServeTokenPage:
             assert ws._SESSION_TOKEN not in resp.text
 
 
+class TestSpaSessionTokenLiveRead:
+    """Both served pages must inject the LIVE ``web_server._SESSION_TOKEN``.
+
+    ``mount_spa()`` runs at import time but ``start_server()`` rebinds the token
+    afterwards via ``_apply_ssh_session_token()`` (``--ssh-session-token-file``,
+    Desktop SSH). A mount-time copy serves a token the API rejects, so Desktop
+    (which adopts the served token) 401s every /api call (#102930).
+    """
+
+    _TOKEN_RE = r'window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:\\.|[^"\\])*")'
+
+    def test_headless_root_serves_token_applied_after_mount(self, monkeypatch):
+        import json as _json
+        import re
+
+        client, ws = TestHeadlessServeTokenPage._headless_client(
+            monkeypatch, gated=False
+        )
+        original_token = ws._SESSION_TOKEN
+        try:
+            ws._apply_ssh_session_token("ssh-token-applied-after-mount")
+            resp = client.get("/")
+            assert resp.status_code == 200
+            match = re.search(self._TOKEN_RE, resp.text)
+            assert match, resp.text
+            assert _json.loads(match.group(1)) == "ssh-token-applied-after-mount"
+        finally:
+            ws._apply_ssh_session_token(original_token)
+
+    def test_spa_index_serves_token_applied_after_mount(
+        self, tmp_path, monkeypatch
+    ):
+        import json as _json
+        import re
+
+        client, _dist = TestServeIndexMissingIndex._client_with_dist(
+            tmp_path, monkeypatch, write_index=True
+        )
+        import hermes_cli.web_server as ws
+
+        original_token = ws._SESSION_TOKEN
+        try:
+            ws._apply_ssh_session_token("ssh-token-applied-after-mount")
+            resp = client.get("/chat")
+            assert resp.status_code == 200
+            match = re.search(self._TOKEN_RE, resp.text)
+            assert match, resp.text
+            assert _json.loads(match.group(1)) == "ssh-token-applied-after-mount"
+        finally:
+            ws._apply_ssh_session_token(original_token)
+
+    def test_spa_index_omits_token_when_mounted_app_gated(
+        self, tmp_path, monkeypatch
+    ):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text(
+            "<html><head></head><body>SPA</body></html>", encoding="utf-8"
+        )
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.delenv("HERMES_SERVE_HEADLESS", raising=False)
+        spa_app = FastAPI()
+        spa_app.state.auth_required = True
+        _web_server_dashboard.mount_spa(spa_app)
+        resp = TestClient(spa_app).get("/chat")
+        assert resp.status_code == 200
+        assert "__HERMES_SESSION_TOKEN__" not in resp.text
+
+
 class TestHashedAssetCacheHeaders:
     """Hashed /assets/* responses must be immutable-cacheable; index.html
     must stay no-store so it always references the current hashes

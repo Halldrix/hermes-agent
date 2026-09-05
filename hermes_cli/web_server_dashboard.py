@@ -102,7 +102,15 @@ def mount_spa(application: FastAPI):
     with a missing dist per-request (404 JSON / ``check_dir=False``), so a long-lived
     ``--skip-build`` process recovers the moment a build appears on disk — no restart.
     """
-    from hermes_cli.web_server import WEB_DIST, _DASHBOARD_EMBEDDED_CHAT_ENABLED, _SESSION_TOKEN, app
+    # ``_SESSION_TOKEN`` is deliberately NOT imported by value: mount_spa() runs at
+    # import time, while start_server() rebinds ``web_server._SESSION_TOKEN`` afterwards
+    # via _apply_ssh_session_token() (--ssh-session-token-file, Desktop SSH). A frozen
+    # copy would serve a token the API middleware rejects (401 on every /api call).
+    # The handlers below must read it live off the module. (WEB_DIST and
+    # _DASHBOARD_EMBEDDED_CHAT_ENABLED are static config, never rebound, so
+    # by-value capture is correct for them.)
+    from hermes_cli import web_server as _ws
+    from hermes_cli.web_server import WEB_DIST, _DASHBOARD_EMBEDDED_CHAT_ENABLED
 
     # `hermes serve` is the headless backend: it must NEVER serve the browser SPA, even if a
     # dist is lying around, so only the JSON-RPC/WS/API surface is reachable.
@@ -120,7 +128,7 @@ def mount_spa(application: FastAPI):
             if full_path == "" and not gated:
                 return HTMLResponse(
                     "<!doctype html><html><head><script>"
-                    f"window.__HERMES_SESSION_TOKEN__={json.dumps(_SESSION_TOKEN)};"
+                    f"window.__HERMES_SESSION_TOKEN__={json.dumps(_ws._SESSION_TOKEN)};"
                     "window.__HERMES_AUTH_REQUIRED__=false;"
                     f"</script></head><body>{_HEADLESS_MSG}</body></html>",
                     headers=_NO_STORE,
@@ -139,7 +147,7 @@ def mount_spa(application: FastAPI):
     def _serve_index(prefix: str = ""):
         """index.html with the session token + base-path injected.
 
-        When the OAuth auth gate is active (``app.state.auth_required``), the legacy
+        When the OAuth auth gate is active (``application.state.auth_required``), the legacy
         ``_SESSION_TOKEN`` is NOT injected — the SPA reads identity from ``/api/auth/me`` over
         cookie auth; ``__HERMES_AUTH_REQUIRED__`` tells it which scheme to use for /api/pty
         and /api/ws (ticket vs token).
@@ -150,8 +158,11 @@ def mount_spa(application: FastAPI):
             # Partial build / wiped dist / permissions: same JSON 404 as a fully-missing dist.
             return JSONResponse({"error": "Frontend not built. Run: cd web && npm run build"}, status_code=404)
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
-        gated = bool(getattr(app.state, "auth_required", False))
-        token_js = "" if gated else f'window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
+        gated = bool(getattr(application.state, "auth_required", False))
+        # Live read (see note above): the token is rebound after import on the
+        # Desktop SSH path. json.dumps like the headless page — the token comes
+        # from --ssh-session-token-file (external input), never interpolate raw.
+        token_js = "" if gated else f"window.__HERMES_SESSION_TOKEN__={json.dumps(_ws._SESSION_TOKEN)};"
         bootstrap_script = (
             f"<script>{token_js}"
             f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
