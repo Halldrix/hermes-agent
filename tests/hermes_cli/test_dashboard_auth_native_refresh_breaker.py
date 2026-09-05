@@ -18,6 +18,8 @@ Run: scripts/run_tests.sh tests/hermes_cli/test_dashboard_auth_native_refresh_br
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -28,6 +30,7 @@ from hermes_cli.dashboard_auth import (
 )
 from hermes_cli.dashboard_auth import native_flow
 from hermes_cli.dashboard_auth import routes as routes_mod
+from hermes_cli.dashboard_auth import refresh_singleflight
 from hermes_cli.dashboard_auth.base import ProviderError
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
@@ -52,6 +55,7 @@ class _FlakyProvider(StubAuthProvider):
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch):
     native_flow._reset_for_tests()
+    refresh_singleflight._reset_for_tests()
     routes_mod._reset_native_refresh_breaker()
     # Deterministic windows: no sleeping in tests.
     monkeypatch.setattr(routes_mod, "_BREAKER_FAIL_THRESHOLD", 3)
@@ -63,6 +67,7 @@ def _reset_state(monkeypatch):
     prev_port = getattr(web_server.app.state, "bound_port", None)
     yield
     native_flow._reset_for_tests()
+    refresh_singleflight._reset_for_tests()
     routes_mod._reset_native_refresh_breaker()
     clear_providers()
     web_server.app.state.auth_required = prev_required
@@ -86,6 +91,9 @@ def breaker_client():
 
 
 def _refresh(client, token="rt-looping", provider="flaky"):
+    # Breaker tests replay the same token repeatedly; the single-flight cache
+    # would serve a stale verdict and mask the breaker decision we're testing.
+    refresh_singleflight._reset_for_tests()
     return client.post(
         "/auth/native/refresh",
         json={"refresh_token": token, "provider": provider},
@@ -184,3 +192,41 @@ class TestIpStormBackstop:
                 f"tok-{i}", f"10.{i // 250}.{i % 250}", "transient"
             )
         assert len(routes_mod._ip_transients) <= routes_mod._IP_TABLE_MAX + 1
+
+
+class TestStaleProbeExpiry:
+    """A half-open probe whose record never lands (crash between check and
+    record) must not wedge the credential: it expires after a full cooldown
+    and exactly one fresh probe is admitted."""
+
+    def _tripped_state(self, client, provider, token="rt-looping"):
+        for _ in range(3):
+            assert _refresh(client, token=token).status_code == 503
+        assert _refresh(client, token=token).json()["error"] == "breaker_open"
+        key = routes_mod._breaker_bucket(token)
+        st = routes_mod._breaker_state[key]
+        # Let the cooldown elapse without sleeping.
+        st["open_at"] -= routes_mod._BREAKER_COOLDOWN_SEC + 1.0
+        return st
+
+    def test_stale_probe_expires_and_admits_fresh_probe(self, breaker_client):
+        client, provider = breaker_client
+        st = self._tripped_state(client, provider)
+        # Simulate the lost record: probe admitted long ago, never resolved.
+        st["probing"] = True
+        st["probe_at"] = time.monotonic() - routes_mod._BREAKER_COOLDOWN_SEC - 1.0
+        calls = provider.refresh_calls
+        r = _refresh(client)
+        assert provider.refresh_calls == calls + 1
+        assert r.json().get("error") != "breaker_open"
+
+    def test_fresh_probe_still_refuses_concurrent_probers(self, breaker_client):
+        client, provider = breaker_client
+        st = self._tripped_state(client, provider)
+        # A live probe still guards: concurrent probers are refused.
+        st["probing"] = True
+        st["probe_at"] = time.monotonic()
+        calls = provider.refresh_calls
+        r = _refresh(client)
+        assert r.json()["error"] == "breaker_open"
+        assert provider.refresh_calls == calls
