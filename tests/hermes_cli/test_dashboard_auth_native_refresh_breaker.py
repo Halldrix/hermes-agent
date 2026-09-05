@@ -128,6 +128,22 @@ class TestCredentialBreaker:
         assert r.status_code == 503
         assert r.json().get("error") != "breaker_open"
 
+    def test_failed_probe_rearms_full_cooldown(self, breaker_client, monkeypatch):
+        client, provider = breaker_client
+        for _ in range(3):
+            assert _refresh(client).status_code == 503
+        assert _refresh(client).json()["error"] == "breaker_open"
+        calls_at_open = provider.refresh_calls
+        # Elapsed cooldown → one probe goes through and fails transiently.
+        monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 0.0)
+        assert _refresh(client).status_code == 503
+        assert provider.refresh_calls == calls_at_open + 1
+        # Cooldown re-armed by the failed probe: with a long cooldown the
+        # very next request is refused WITHOUT touching the provider.
+        monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 3600.0)
+        assert _refresh(client).json()["error"] == "breaker_open"
+        assert provider.refresh_calls == calls_at_open + 1
+
     def test_permanent_rejections_never_trip_breaker(self, breaker_client):
         client, provider = breaker_client
         provider.fail = False
@@ -161,3 +177,10 @@ class TestIpStormBackstop:
         assert last.json()["error"] == "storm_backstop"
         # Bounded fan-out despite a fresh credential every attempt.
         assert provider.refresh_calls <= 5
+
+    def test_ip_table_stays_bounded(self):
+        for i in range(routes_mod._IP_TABLE_MAX + 500):
+            routes_mod._breaker_record(
+                f"tok-{i}", f"10.{i // 250}.{i % 250}", "transient"
+            )
+        assert len(routes_mod._ip_transients) <= routes_mod._IP_TABLE_MAX + 1
