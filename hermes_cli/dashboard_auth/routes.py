@@ -368,6 +368,7 @@ _BREAKER_COOLDOWN_SEC = 30.0
 _BREAKER_MAX_BUCKETS = 4096
 _IP_STORM_MAX = 30
 _IP_STORM_WINDOW_SEC = 60.0
+_IP_TABLE_MAX = 4096
 _breaker_state: Dict[str, Dict[str, Any]] = {}
 _breaker_lock = threading.Lock()
 _ip_transients: Dict[str, Deque[float]] = defaultdict(deque)
@@ -448,6 +449,20 @@ def _breaker_record(refresh_token: str, ip: str, outcome: str) -> None:
         while bucket and bucket[0] < now - _IP_STORM_WINDOW_SEC:
             bucket.popleft()
         bucket.append(now)
+        if len(_ip_transients) > _IP_TABLE_MAX:
+            _prune_ip_buckets(now)
+
+
+def _prune_ip_buckets(now: float) -> None:
+    """Caller must hold ``_breaker_lock``. Drop expired IP buckets, then oldest."""
+    cutoff = now - _IP_STORM_WINDOW_SEC
+    for key in [k for k, bucket in _ip_transients.items()
+                if not bucket or bucket[-1] < cutoff]:
+        del _ip_transients[key]
+        if len(_ip_transients) <= _IP_TABLE_MAX:
+            return
+    while len(_ip_transients) > _IP_TABLE_MAX:
+        _ip_transients.pop(next(iter(_ip_transients)))
 
 
 def _reset_native_refresh_breaker() -> None:
