@@ -703,7 +703,10 @@ class SessionMessagesMixin:
             return session_id
         try:
             session_id = self.get_compression_tip(session_id) or session_id
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never resolve against a refused read
             pass
         with self._read_ctx() as conn:
             current = session_id

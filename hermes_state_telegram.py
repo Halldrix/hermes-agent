@@ -104,7 +104,10 @@ class SessionTelegramTopicsMixin:
         """``fetchone`` that treats an unmigrated table as None."""
         try:
             return self._read_one(sql, params)
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as unmigrated
             return None
 
     def apply_telegram_topic_migration(self) -> None:
@@ -233,7 +236,10 @@ class SessionTelegramTopicsMixin:
                 "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? ORDER BY updated_at DESC",
                 (profile_name, str(chat_id)),
             )
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as absent bindings
             return []
         return [dict(row) for row in rows]
 

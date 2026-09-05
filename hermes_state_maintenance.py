@@ -303,6 +303,9 @@ class SessionMaintenanceMixin:
                     return None
                 return [int(conn.execute(f"PRAGMA {name}").fetchone()[0]) for name in names]
         except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never degrade to unknown size
             logger.debug(fail_msg, exc)
             return None
 

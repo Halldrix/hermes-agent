@@ -14,6 +14,7 @@ from functools import partial
 from pathlib import Path
 
 from hermes_cli.sessions_cmd_browse import _relative_time, _session_browse_picker
+from hermes_state_errors import StateDbWriterHeldError
 
 
 def get_hermes_home():
@@ -97,7 +98,7 @@ def _cmd_repair(args):
         return
     print(f"✗ {db_path} does not open cleanly: {reason}")
     if getattr(args, "check_only", False):
-        return
+        return 1  # an unclean check is a failed check for scripting/CI callers
     print("Repairing (a backup copy is made first)…")
     report = repair_state_db_schema(db_path, backup=not getattr(args, "no_backup", False))
     if report.get("repaired"):
@@ -126,6 +127,7 @@ def _cmd_repair(args):
         f"    hermes sessions recover --source {source_hint} \\\n"
         "        --output recovered-state.db"
     )
+    return 1  # a failed repair is never exit 0 for scripting/CI callers
 
 
 def _cmd_recover(args):
@@ -964,5 +966,10 @@ def cmd_sessions(args, sessions_parser=None):
             sessions_parser.print_help()
             return
         return handler(db, args)
+    except StateDbWriterHeldError as e:
+        # Single-writer gate (#103339): another process (usually the running
+        # gateway) owns this state.db — report, don't traceback.
+        print(f"Error: {e}")
+        return 1
     finally:
         db.close()

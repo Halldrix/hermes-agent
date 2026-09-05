@@ -266,6 +266,9 @@ class SessionCompressionMixin:
         try:
             self._write_sql(sql, params)
         except sqlite3.Error as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): a refused write is never "logged and done"
             logger.warning("%s(%s) failed: %s", op, session_id, exc)
 
     def record_compression_failure_cooldown(

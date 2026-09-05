@@ -480,7 +480,10 @@ class SessionSessionsMixin:
                 f"OR end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))",
                 (now, reason, session_id), session_id, reason,
             )))
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): a refused end is never "not ended"
             return False
 
     def update_session_cwd(
@@ -592,7 +595,10 @@ class SessionSessionsMixin:
                 "SELECT last_activity_description, last_activity_provenance FROM sessions WHERE id = ?",
                 (session_id,),
             )
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as missing row
             row = None
         if row is not None and not row[0] and (not row[1] or row[1] == ActivityProvenance.UNKNOWN.value):
             return
@@ -852,7 +858,10 @@ class SessionSessionsMixin:
             return False
         try:
             row = self.get_session(session_id)
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never hide a live session as absent
             return False
         if not row or not row.get("archived"):
             return False
@@ -862,7 +871,10 @@ class SessionSessionsMixin:
             tip_id = self.get_compression_tip(session_id) or session_id
             if tip_id != session_id:
                 tip = self.get_session(tip_id) or row
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never judge recoverability on stale state
             pass
         if (tip.get("end_reason") or "") not in self.RECOVERABLE_END_REASONS:
             return False

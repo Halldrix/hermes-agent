@@ -314,6 +314,9 @@ class SessionSearchMixin:
         try:
             more = self._execute_write(_do)
         except sqlite3.OperationalError as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never spin the transient retry loop
             logger.debug(fail_msg, exc)
             return True  # transient (lock contention) — caller retries
         if more is False:
@@ -386,6 +389,9 @@ class SessionSearchMixin:
         try:
             return bool(self._execute_write(_do))
         except sqlite3.OperationalError as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never spin the transient retry loop
             logger.debug("FTS trash teardown chunk failed (will retry): %s", exc)
             return True
 
@@ -879,7 +885,10 @@ class SessionSearchMixin:
         sql, params = self._fts_match_sql(table, match_query, order_by_sql, **kwargs)
         try:
             return [dict(row) for row in self._read_all(sql, params)]
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as FTS syntax
             if operational_debug:
                 logger.debug(operational_debug, exc_info=True)
             return None
@@ -952,7 +961,10 @@ class SessionSearchMixin:
             return
         try:
             stale = self._read_one("SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_STALE_KEY,))
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as fresh
             return
         if stale is not None:
             self._fts_stale = True
@@ -971,7 +983,10 @@ class SessionSearchMixin:
                         rows = conn.execute(sql, list(contexts)).fetchall()
                     for row in rows:
                         contexts[row["match_id"]].append(row)
-                except Exception:
+                except Exception as exc:
+                    from hermes_state_errors import is_gate_refusal
+                    if is_gate_refusal(exc):
+                        raise  # structural gate refusal (#103339): never swallow as no context
                     contexts = {}
                 for match in batch:
                     try:
@@ -1053,7 +1068,10 @@ class SessionSearchMixin:
             sql, params = self._fts_match_sql("messages_fts", query, **route)
             try:
                 matches = [dict(row) for row in self._read_all(sql, params)]
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                from hermes_state_errors import is_gate_refusal
+                if is_gate_refusal(exc):
+                    raise  # structural gate refusal (#103339): never swallow as FTS syntax
                 return []  # FTS5 syntax error despite sanitization
             except sqlite3.DatabaseError as exc:
                 # Corruption parent class: detach the derived indexes and answer from
@@ -1075,6 +1093,9 @@ class SessionSearchMixin:
                 seen_ids = {m["id"] for m in matches}
                 matches.extend(m for m in gap_matches if m["id"] not in seen_ids)
             except sqlite3.OperationalError as exc:
+                from hermes_state_errors import is_gate_refusal
+                if is_gate_refusal(exc):
+                    raise  # structural gate refusal (#103339): never return a partial gap as complete
                 logger.debug("Unindexed-gap supplement skipped: %s", exc)
 
         # unicode61 puts no boundary between Latin and adjacent CJK ("修改youer服务端" is

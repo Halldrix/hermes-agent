@@ -31,7 +31,7 @@ from hermes_state_common import escape_like as _escape_like, stat_db_file_identi
 from hermes_state_errors import (
     _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
     _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError,
-    StateDbReplacedError, _is_no_more_rows, classify_persistence_error, is_malformed_db_error,
+    StateDbReplacedError, StateDbWriterHeldError, _is_no_more_rows, classify_persistence_error, is_malformed_db_error,
     is_malformed_schema_error,
 )
 from hermes_state_guard import (
@@ -53,6 +53,7 @@ from hermes_state_dbfile import (
 from hermes_state_messages import SessionMessagesMixin
 from hermes_state_wal import _WAL_INCOMPAT_MARKERS, apply_database_pragmas, apply_wal_with_fallback
 from hermes_state_repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
+from hermes_state_writergate import acquire_writer_gate
 from hermes_state_titles import SessionTitlesMixin
 from hermes_state_usage import SessionUsageMixin
 from hermes_state_maintenance import SessionMaintenanceMixin
@@ -419,6 +420,9 @@ class SessionDB(
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or _default_db_path()
+        # Set first: __del__/close() consult it on every path, including a
+        # failed open whose attribute block below never ran.
+        self._gate_release_pending = False
         _ensure_test_isolation(self.db_path)  # before any connection/pragma/mkdir
         self.read_only = read_only
         self._lock = threading.Lock()
@@ -482,13 +486,32 @@ class SessionDB(
             raise
         finally:
             if not initialization_complete:
+                # Gate presence was announced at _open_writer entry; a failed
+                # open must not leave it pinned (otherwise a later repair sees
+                # a phantom writer and starves). The live-but-doomed
+                # connection closes FIRST: close-time WAL work must settle
+                # while our presence still holds off structural takes.
                 conn, self._conn = self._conn, None
                 self._close_connection_quietly(conn)
+                if not self.read_only:
+                    try:
+                        from hermes_state_writergate import release_writer_gate
+                        if not release_writer_gate(self.db_path, self):
+                            self._gate_release_pending = True
+                    except Exception:
+                        pass
 
     def _open_writer(self) -> None:
         """Writable open: preflight, zero-byte quarantine, connect + schema (one in-place repair of a
         malformed sqlite_master), generation stamp."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Structural gate (#103339): announce writer presence BEFORE any sqlite
+        # open/DDL so the proof lifetime covers the mutation. Structural takes
+        # (repair/checkpoint) hold the global lock and then scan presences;
+        # our presence being held from before _connect makes either order
+        # (open-first or surgery-first) refuse the second party. Fail-closed
+        # on presence-establishment failure as well.
+        acquire_writer_gate(self.db_path, owner=self)
         # Read-only file/sidecar preflight BEFORE the first connection: an actionable message
         # instead of an opaque "attempt to write a readonly database" from inside _init_schema.
         preflight_db_writability(self.db_path, db_label="state.db")
@@ -517,9 +540,31 @@ class SessionDB(
                 "repair (a backup copy is made first).", exc,
             )
             self._close_connection_quietly(self._conn)
-            if not repair_state_db_schema(self.db_path).get("repaired"):
+            # Structural gate (#103339): self-heal runs in the same process
+            # that already announced presence. The exclusive take counts own
+            # presences as live (unrelated owners must not be invisible), so
+            # drop ours before repairing — our connection is closed anyway —
+            # and re-pin after. A foreign writer announcing in between makes
+            # the repair refuse (correct); a foreign surgery makes our
+            # re-acquire refuse (correct).
+            try:
+                from hermes_state_writergate import release_writer_gate
+                release_writer_gate(self.db_path, self)
+            except Exception:
+                pass
+            try:
+                if not repair_state_db_schema(self.db_path).get("repaired"):
+                    raise
+                # Re-pin BEFORE reopening: a foreign surgery may have taken
+                # the global while we were repairing (we dropped presence).
+                # Propagate its refusal — never open SQLite under a surgery.
+                acquire_writer_gate(self.db_path, owner=self)
+                self._connect_and_init_with_lock_patience()
+            except Exception:
+                # Repair failed/refused, or our re-admission lost to a foreign
+                # surgery: __init__'s finally releases any partial pin and
+                # closes the (never opened) conn. Do NOT reopen here.
                 raise
-            self._connect_and_init_with_lock_patience()
         # FTS optimization is OPT-IN (`hermes db optimize`); no background worker races session lifecycle.
         self._ensure_db_file_generation()
 
@@ -761,14 +806,36 @@ class SessionDB(
             "state.db connection for %s was closed while a %s was still in "
             "flight — reopening (teardown/worker race, #94736)", self.db_path, context,
         )
+        # Structural gate (#103339): re-pin admission BEFORE opening SQLite
+        # for BOTH contexts — _open_writer_conn() opens a read-write handle
+        # with WAL handling either way, so a read reopen must not join a live
+        # surgery's WAL either. Fail-closed; the callback/read has not run.
+        acquire_writer_gate(self.db_path, owner=self)
         try:
             self._conn = self._open_writer_conn()
         except Exception as exc:
+            # Never leave a half-opened connection behind a refusal: the
+            # next writer would inherit a live handle outside the proof.
+            # Close first, release after (same order as the init-fail path):
+            # close-time WAL work settles while presence still holds off
+            # structural takes.
+            conn, self._conn = self._conn, None
+            self._close_connection_quietly(conn)
+            try:
+                from hermes_state_writergate import release_writer_gate
+                if not release_writer_gate(self.db_path, self):
+                    self._gate_release_pending = True
+            except Exception:
+                pass
             raise sqlite3.OperationalError(
                 f"state.db connection was closed while a {context} was still "
                 f"in flight (a session-teardown path called close() before "
                 f"this worker finished — #94736) and the automatic reopen failed: {exc}"
             ) from exc
+        # The racing close() released this instance's share; the pre-open
+        # acquire above already re-pinned it, so nothing more to do. This
+        # second call is a cheap idempotent registry hit.
+        acquire_writer_gate(self.db_path, owner=self)
 
     def _execute_write(
         self, fn: Callable[[sqlite3.Connection], T], patience_s: Optional[float] = None,
@@ -777,7 +844,18 @@ class SessionDB(
         is handled here (callers must not commit). Returns *fn*'s result.
         BEGIN IMMEDIATE takes the WAL write lock up front so contention surfaces
         immediately; on locked/busy the Python lock is released, a jitter slept,
-        and the WHOLE callback retried — *fn* must stay idempotent under retry."""
+        and the WHOLE callback retried — *fn* must stay idempotent under retry.
+
+        Single-writer gate (#103339): the first write of a process announces
+        presence (``<state.db>.writer.<pid>.lock``); structural operations
+        (repair surgery) refuse while any presence is live. Row writes
+        themselves proceed under SQLite's own WAL locking no matter how many
+        processes announce — and are refused only while a surgery holds the
+        global structural lock (fail-closed in both directions).
+        Read-only handles never reach this path. ``close()`` releases this
+        instance's presence share."""
+        if not self.read_only:
+            acquire_writer_gate(self.db_path, owner=self)
         if patience_s is None:
             patience_s = self._WRITE_PATIENCE_S
         deadline = time.monotonic() + patience_s
@@ -832,6 +910,8 @@ class SessionDB(
                     continue
                 raise
             except sqlite3.Error as exc:
+                if isinstance(exc, StateDbWriterHeldError):
+                    raise  # fail-closed (structural gate): never retry as locked/busy
                 # 'no more rows' is a transient engine error on contended WAL appends (some builds
                 # raise it as InterfaceError, a sibling of DatabaseError): retry like locked/busy.
                 if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
@@ -933,6 +1013,8 @@ class SessionDB(
                     self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                 except sqlite3.Error:
                     pass
+        except StateDbWriterHeldError:
+            raise
         except sqlite3.Error as exc:
             logger.debug("state.db generation stamp skipped: %s", exc)
 
@@ -946,7 +1028,10 @@ class SessionDB(
         elif self._conn is not None and not self._db_file_application_id:
             try:
                 pragma_row = self._read_one("PRAGMA application_id")
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
+                from hermes_state_errors import is_gate_refusal
+                if is_gate_refusal(exc):
+                    raise  # structural gate refusal (#103339): never mis-observe identity under surgery
                 pragma_row = None
             if pragma_row and pragma_row[0]:
                 self._db_file_application_id = int(pragma_row[0])
@@ -1173,11 +1258,30 @@ class SessionDB(
                 # A clean close lets SQLite unlink the sidecars (a legitimate end of the
                 # generation, not a split): a teardown-race reopen must re-adopt.
                 self._db_sidecar_identity = {}
+        # Single-writer gate (#103339): release this instance's presence
+        # share (best effort, never breaks close). Presence drops when the
+        # last in-process owner closes; a live gateway's registry-owned
+        # handle is never closed mid-life, so it keeps announcing exactly
+        # while it can write. Registry-owned early-return above skips this
+        # (not our share to release).
+        if not self.read_only:
+            try:
+                from hermes_state_writergate import release_writer_gate
+                if not release_writer_gate(self.db_path, self):
+                    # Mutex Ward: the presence hold is still pinned (flock
+                    # held, share restored). Keep retry state so __del__
+                    # drains it independently — close() must never return a
+                    # record that names a live pid with no retry left.
+                    self._gate_release_pending = True
+                else:
+                    self._gate_release_pending = False
+            except Exception:
+                pass
 
     def __del__(self) -> None:
         """Safety net: close() if the caller forgot. Attribute access stays
         guarded: module teardown order is undefined."""
-        if self.__dict__.get("_conn") is not None:
+        if self.__dict__.get("_conn") is not None or self.__dict__.get("_gate_release_pending"):
             try:
                 self.close()
             except Exception:

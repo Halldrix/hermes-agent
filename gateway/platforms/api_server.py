@@ -2761,8 +2761,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 stale = db.get_session_by_title(title_filter) if title_filter == BOT_CHAT_TITLE else None
                 if stale and stale.get("archived") and db.unarchive_recoverable_session(stale["id"]):
                     sessions = await _list()
-            except Exception:
-                pass  # resolution degrades to today's no-row behavior
+            except Exception as exc:
+                # A structural writer-gate refusal (see #103339) must not
+                # degrade the listing to an empty 200 — the caller would read
+                # "no canonical chat" and mint a duplicate. Map it to the
+                # store-busy 503 envelope (retry shortly), like every other
+                # unavailable-store path here.
+                from hermes_state_errors import is_gate_refusal
+                if is_gate_refusal(exc):
+                    return _error_response(
+                        "Session database busy: a structural operation owns the store; retry shortly.",
+                        503, code="session_db_unavailable")
+                # resolution degrades to today's no-row behavior
+                pass
         # Back-filled pins arrive PAST the limit, so counting them would report
         # another page that doesn't exist. Only the recency window decides.
         windowed = sum(1 for s in sessions if not s.get("pinned"))

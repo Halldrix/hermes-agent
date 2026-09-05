@@ -74,8 +74,8 @@ def is_disk_full_error(exc: BaseException | str | None) -> bool:
 
 # Every classify_persistence_error bucket; consumers enumerate this tuple.
 PERSISTENCE_ERROR_CAUSES = (
-    "locked", "compression", "compression_closed", "turn_lease", "corrupt", "replaced", "disk",
-    "unknown",
+    "locked", "gate_setup", "compression", "compression_closed", "turn_lease", "corrupt", "replaced",
+    "disk", "unknown",
 )
 
 
@@ -178,12 +178,50 @@ _STATE_DB_CORRUPT_MSG = (
 )
 
 
+class StateDbWriterHeldError(sqlite3.OperationalError):
+    """Another process holds ``<state.db>.writer.lock``: this process must not
+    write (a second WAL writer corrupts the live database, #103339).
+
+    Subclasses OperationalError so generic sqlite handlers treat it as an
+    operational refusal; it is raised BEFORE ``_execute_write``'s retry loop,
+    so it never waits out a patience window — the holder keeps the gate for
+    its lifetime, and only stopping that process frees it.
+    """
+
+
+class StateDbGateSetupError(StateDbWriterHeldError):
+    """The gate's own coordination files cannot be established (unwritable
+    dir, unflockable presence file): retrying NEVER helps, unlike a live
+    holder that will eventually leave (#103339).
+
+    Still a StateDbWriterHeldError (structural paths must refuse it via
+    is_gate_refusal), but classify_persistence_error reports it as
+    "gate_setup" so patience loops (turn lease) raise at once instead of
+    polling a permanent failure.
+    """
+
+
+def is_gate_refusal(exc: BaseException) -> bool:
+    """Shared classifier for the structural-gate refusal (#103339).
+
+    Every fallback that degrades a read/write to empty/None/logged-and-done
+    must re-raise when this returns True — a refused admission is never a
+    missing row, an FTS syntax error, or a completed write. Single choke
+    point so new swallow sites cannot drift from the contract.
+    """
+    return isinstance(exc, StateDbWriterHeldError)
+
+
 _PERSISTENCE_CAUSE_BY_TYPE = (
     (SessionTurnLeaseLostError, "turn_lease"),
     (CompressionSessionClosedError, "compression_closed"),
     (CompressionSessionBusyError, "compression"),
     (StateDbReplacedError, "replaced"),
     (StateDbCorruptError, "corrupt"),
+    # Subclass BEFORE its parent: a permanent setup failure is never "locked"
+    # (patience loops must raise at once, not poll it).
+    (StateDbGateSetupError, "gate_setup"),
+    (StateDbWriterHeldError, "locked"),
 )
 _PERSISTENCE_CAUSE_BY_PHRASE = (
     (("turn lease",), "turn_lease"),

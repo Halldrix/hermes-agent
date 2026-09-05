@@ -639,7 +639,10 @@ class SessionGatewayMixin:
                 return None
             return {"state": row["handoff_state"], "platform": row["handoff_platform"],
                     "error": row["handoff_error"]}
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as no handoff
             return None
 
     def list_pending_handoffs(self) -> List[Dict[str, Any]]:
@@ -651,7 +654,10 @@ class SessionGatewayMixin:
                 "WHERE s.handoff_state = 'pending' "
                 "ORDER BY s.started_at ASC")
             return [self._session_row_dict(r) for r in rows]
-        except Exception:
+        except Exception as exc:
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise  # structural gate refusal (#103339): never swallow as no pendings
             return []
 
     def claim_handoff(self, session_id: str) -> bool:
@@ -697,9 +703,13 @@ class SessionGatewayMixin:
             return ids
         try:
             return self._execute_write(_do) or []
-        except Exception:
+        except Exception as exc:
             # Swallow but never silently: a persistently failing reclaim leaves poisonous
             # 'running' rows in place, so the operator needs a trace.
+            # A gate refusal is never a reclaim failure (see #103339).
+            from hermes_state_errors import is_gate_refusal
+            if is_gate_refusal(exc):
+                raise
             logger.warning(
                 "reclaim_stale_running_handoffs failed; stranded 'running' "
                 "handoff rows (if any) were left in place", exc_info=True)

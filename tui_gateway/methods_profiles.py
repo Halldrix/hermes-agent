@@ -131,7 +131,13 @@ def _resurrect_recoverable_canonical(db, profile_path, session_id):
             return bool(wdb.unarchive_recoverable_session(session_id))
         finally:
             _best_effort(lambda: _lazy("hermes_state_registry", "release_or_close")(wdb))
-    except Exception:
+    except Exception as exc:
+        from hermes_state_errors import is_gate_refusal
+        # A writer-gate refusal must not degrade an existing canonical chat to
+        # absent: propagating lets the _profile_handler emit a 5061 error row
+        # instead of a silent canonical_session=None (P1, #103339).
+        if is_gate_refusal(exc):
+            raise
         return False
 
 
@@ -168,7 +174,12 @@ def _canonical_session_row(db, profile_path):
             "started_at": tip_row.get("started_at") or started,
             "last_active": tip_row.get("last_activity_at") or tip_row.get("started_at") or started,
             "message_count": tip_row.get("message_count") or 0}
-    except Exception:
+    except Exception as exc:
+        from hermes_state_errors import is_gate_refusal
+        # Same fail-closed rule as _resurrect_recoverable_canonical: a gate
+        # refusal is store-busy, never "no canonical chat" (P1, #103339).
+        if is_gate_refusal(exc):
+            raise
         return None
 
 

@@ -47,3 +47,51 @@ def test_import_missing_file_returns_1(tmp_path, monkeypatch, capsys):
     rc = sc.cmd_sessions(_args("import", path=str(tmp_path / "nope.jsonl")))
     assert rc == 1
     assert "file not found" in capsys.readouterr().out.lower()
+
+
+def test_repair_failed_returns_1(tmp_path, monkeypatch, capsys):
+    import hermes_state_repair
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    import hermes_state
+
+    db_path = home / "state.db"
+    db_path.write_bytes(b"not a database")
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(
+        hermes_state_repair, "_db_opens_cleanly", lambda path: "file is not a database")
+    monkeypatch.setattr(
+        hermes_state_repair, "repair_state_db_schema",
+        lambda *a, **k: {"repaired": False, "error": "boom"})
+    rc = sc.cmd_sessions(_args("repair"))
+    assert rc == 1
+    assert "repair failed" in capsys.readouterr().out.lower()
+
+
+def test_repair_clean_returns_none(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from hermes_state import SessionDB
+    SessionDB(tmp_path / "state.db")  # initialize an empty store
+    import hermes_state
+
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    rc = sc.cmd_sessions(_args("repair"))
+    assert rc is None
+    assert "opens cleanly" in capsys.readouterr().out.lower()
+
+
+def test_repair_check_only_unclean_returns_1(tmp_path, monkeypatch, capsys):
+    import hermes_state
+    import hermes_state_repair
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db_path = tmp_path / "state.db"
+    db_path.write_bytes(b"not a database")
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(
+        hermes_state_repair, "_db_opens_cleanly", lambda path: "file is not a database")
+    rc = sc.cmd_sessions(_args("repair", check_only=True))
+    assert rc == 1
+    assert "does not open cleanly" in capsys.readouterr().out.lower()
