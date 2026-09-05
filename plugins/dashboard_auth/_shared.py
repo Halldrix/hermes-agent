@@ -135,9 +135,15 @@ def exchange_token(
 
     A 400 (OAuth-shaped error envelope) raises ``bad_request_exc`` — ``InvalidCodeError``
     for the auth-code path, ``RefreshExpiredError`` for refresh — so the middleware's
-    distinct handling is preserved. Any other non-200, transport failure, missing
-    ``token_key`` or non-bearer ``token_type`` raises ``ProviderError``. Redirects are
-    deliberately NOT followed: the body carries an auth code / refresh token.
+    distinct handling is preserved. A 401/403 *with* an OAuth error envelope is also a
+    credential verdict (the IDP understood the request and refused it: dead/foreign
+    token) and raises ``bad_request_exc`` — reporting it as ``ProviderError`` (503,
+    "transient") invites unbounded client retries against a token that can never
+    succeed (#98338). A 401/403 *without* an envelope stays ``ProviderError``: it may
+    be a WAF/proxy block, never a signal to force re-login. Any other non-200,
+    transport failure, missing ``token_key`` or non-bearer ``token_type`` raises
+    ``ProviderError``. Redirects are deliberately NOT followed: the body carries an
+    auth code / refresh token.
     """
     try:
         response = httpx.post(url, data=data, headers={**JSON_HEADERS, **(headers or {})}, timeout=TOKEN_ENDPOINT_TIMEOUT_SEC)
@@ -146,6 +152,10 @@ def exchange_token(
     if response.status_code == 400:
         error_code = parse_json_body(response).get("error", "invalid_request")
         raise bad_request_exc(f"{idp} rejected token request: {error_code}")
+    if response.status_code in (401, 403):
+        envelope = parse_json_body(response)
+        if isinstance(envelope.get("error"), str):
+            raise bad_request_exc(f"{idp} rejected token request: {envelope['error']}")
     if response.status_code != 200:
         raise ProviderError(f"{endpoint} returned {response.status_code}: {response.text[:200]!r}")
     payload = parse_json_body(response)
