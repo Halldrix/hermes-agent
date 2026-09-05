@@ -84,14 +84,35 @@ def _write_log(path, lines):
 
 
 class TestDashboardAuthRefreshCheck:
-    def test_storm_fails_with_issue(self, tmp_path, monkeypatch, capsys):
+    def test_registered_in_doctor_checks(self):
+        assert doctor_mod._check_dashboard_auth_refresh in [
+            c for _, c in doctor_mod.DOCTOR_CHECKS
+        ]
+
+    def test_storm_fails_with_manual_issue(self, tmp_path, monkeypatch, capsys):
         log = tmp_path / "logs" / "dashboard-auth.log"
         _write_log(log, [_line("refresh_failure") for _ in range(25)])
         monkeypatch.setattr(audit_mod, "resolve_log_path", lambda: log)
         finding = doctor_mod._check_dashboard_auth_refresh(False)
-        assert len(finding.issues) == 1
-        assert "25" in finding.issues[0]
+        assert len(finding.manual_issues) == 1
+        assert "25" in finding.manual_issues[0]
         assert "✗" in capsys.readouterr().out
+
+    def test_large_log_reads_bounded_tail_only(self, tmp_path, monkeypatch):
+        # A storm-grown log must not force a full-file read: entries older than
+        # the byte-tail window are ignored even though the file is huge.
+        import json as _json
+
+        log = tmp_path / "logs" / "dashboard-auth.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        filler = _json.dumps({"event": "old_filler"}) + "x" * 200 + "\n"
+        log.write_text(filler * 5000, encoding="utf-8")  # ~1 MB of old noise
+        with log.open("a", encoding="utf-8") as fh:
+            fh.writelines([_line("refresh_failure") for _ in range(3)])
+        monkeypatch.setattr(audit_mod, "resolve_log_path", lambda: log)
+        finding = doctor_mod._check_dashboard_auth_refresh(False)
+        assert finding.manual_issues == []
+        assert finding.issues == []
 
     def test_few_failures_warn_without_issue(self, tmp_path, monkeypatch, capsys):
         log = tmp_path / "logs" / "dashboard-auth.log"
