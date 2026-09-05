@@ -360,6 +360,10 @@ def _reset_password_rate_limit() -> None:
 # on restart), same as the password limiter.
 _REFRESH_RATE_MAX_ATTEMPTS = 10
 _REFRESH_RATE_WINDOW_SEC = 60.0
+# Distinct-credential buckets are never evicted by the sliding window (only their
+# timestamps expire), so cap the table: beyond this, purge expired buckets, then
+# drop oldest-inserted. Best-effort bounds memory under token-rotation abuse.
+_REFRESH_RATE_MAX_BUCKETS = 4096
 _refresh_attempts: Dict[str, Deque[float]] = defaultdict(deque)
 _refresh_attempts_lock = threading.Lock()
 
@@ -369,12 +373,26 @@ def _refresh_token_bucket(refresh_token: str) -> str:
     return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
 
 
+def _prune_refresh_buckets(cutoff: float) -> None:
+    """Drop expired buckets first, then oldest-inserted, until back under the cap.
+    Caller must hold ``_refresh_attempts_lock``."""
+    for key in [k for k, bucket in _refresh_attempts.items()
+                if not bucket or bucket[-1] < cutoff]:
+        del _refresh_attempts[key]
+        if len(_refresh_attempts) <= _REFRESH_RATE_MAX_BUCKETS:
+            return
+    while len(_refresh_attempts) > _REFRESH_RATE_MAX_BUCKETS:
+        _refresh_attempts.pop(next(iter(_refresh_attempts)))
+
+
 def _native_refresh_rate_limited(refresh_token: str) -> tuple[bool, float]:
     """``(limited, retry_after_sec)``; records the attempt when allowed. An empty
     token shares one bucket — fail-safe toward throttling."""
     now = time.monotonic()
     cutoff = now - _REFRESH_RATE_WINDOW_SEC
     with _refresh_attempts_lock:
+        if len(_refresh_attempts) > _REFRESH_RATE_MAX_BUCKETS:
+            _prune_refresh_buckets(cutoff)
         bucket = _refresh_attempts[_refresh_token_bucket(refresh_token)]
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
