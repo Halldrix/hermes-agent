@@ -35,7 +35,12 @@ from hermes_cli.dashboard_auth import (
 )
 from hermes_cli.dashboard_auth import native_flow
 from hermes_cli.dashboard_auth.base import ProviderError, RefreshExpiredError
-from hermes_cli.dashboard_auth.routes import _reset_native_refresh_rate_limit
+from hermes_cli.dashboard_auth.routes import (
+    _REFRESH_RATE_MAX_BUCKETS,
+    _native_refresh_rate_limited,
+    _refresh_attempts,
+    _reset_native_refresh_rate_limit,
+)
 from plugins.dashboard_auth._shared import exchange_token
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
@@ -83,11 +88,17 @@ class TestRefreshRejectionClassification:
         with pytest.raises(RefreshExpiredError):
             _exchange(401, {"error": "invalid_token"})
 
-    def test_403_without_envelope_stays_transient(self):
-        # No JSON envelope: may be a WAF/proxy block, not a credential
-        # verdict — must not force a re-login on an ambiguous signal.
+    def test_403_with_unknown_envelope_code_stays_transient(self):
+        # A WAF/proxy JSON envelope without a known token-rejection code must
+        # not force a re-login — nor may a non-JSON block page.
+        with pytest.raises(ProviderError):
+            _exchange(403, {"error": "forbidden"})
         with pytest.raises(ProviderError):
             _exchange(403, "<html>blocked</html>", ctype="text/html")
+
+    def test_rejection_code_match_is_case_insensitive(self):
+        with pytest.raises(RefreshExpiredError):
+            _exchange(403, {"error": "Invalid_Grant"})
 
     def test_429_and_500_stay_transient(self):
         with pytest.raises(ProviderError):
@@ -176,3 +187,12 @@ class TestNativeRefreshThrottle:
         # merits (401, dead token), not throttled by the first storm.
         assert r.status_code == 401
         assert r.json()["error"] == "session_expired"
+
+    def test_bucket_table_stays_bounded(self):
+        # Token-rotation abuse must not grow the bucket table without limit.
+        for i in range(_REFRESH_RATE_MAX_BUCKETS + 500):
+            _native_refresh_rate_limited(f"rotated-token-{i}")
+        assert len(_refresh_attempts) <= _REFRESH_RATE_MAX_BUCKETS + 1
+        # The limiter still works after pruning.
+        limited, _ = _native_refresh_rate_limited("fresh-token-after-prune")
+        assert limited is False
