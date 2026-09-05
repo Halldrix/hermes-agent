@@ -96,6 +96,7 @@ def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_er
 # tick, #98338 Defect 4). This reads the dashboard-auth audit log — passive,
 # never triggering a refresh — and reports the recent REFRESH_FAILURE rate.
 _REFRESH_LOG_TAIL_LINES = 5000
+_REFRESH_LOG_TAIL_BYTES = 512 * 1024
 _REFRESH_WINDOW_SEC = 3600.0
 _REFRESH_STORM_ISSUE_COUNT = 20
 
@@ -137,14 +138,19 @@ def _check_dashboard_auth_refresh(should_fix: bool, f: Finding) -> None:
 
     with warn_on_error("Dashboard refresh health", "(could not read audit log: {e})"):
         import datetime as _dt
-        from collections import deque
 
         path = resolve_log_path()
         if not path.exists():
             check_info("Dashboard refresh: no audit log yet (no dashboard-auth activity)")
             return
-        with open(path, encoding="utf-8") as fh:
-            tail = deque(fh, maxlen=_REFRESH_LOG_TAIL_LINES)
+        # Read the last N lines without holding the whole file: seek back at most
+        # _REFRESH_LOG_TAIL_BYTES (bounded I/O even when a storm grew the log).
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - _REFRESH_LOG_TAIL_BYTES))
+            tail_bytes = fh.read()
+        tail = tail_bytes.splitlines()[-_REFRESH_LOG_TAIL_LINES:]
         total, by_reason, _ = _summarize_refresh_failures(
             tail, window_s=_REFRESH_WINDOW_SEC,
             now=_dt.datetime.now(_dt.timezone.utc))
@@ -156,11 +162,11 @@ def _check_dashboard_auth_refresh(should_fix: bool, f: Finding) -> None:
         if total >= _REFRESH_STORM_ISSUE_COUNT:
             check_fail("Dashboard refresh",
                        f"({total} failures in the last hour: {top} — see dashboard-auth.log)")
-            f.issues.append(
+            f.manual_issues.append(
                 f"Dashboard auth refresh failing ({total} REFRESH_FAILURE in the last hour: "
                 f"{top}). Inspect dashboard-auth.log; a looping client or a struggling "
                 f"upstream is likely.")
-        else:
+        elif total > 0:
             check_warn("Dashboard refresh",
                        f"({total} failures in the last hour: {top})")
 
