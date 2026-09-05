@@ -395,7 +395,9 @@ def _prune_breaker_buckets(now: float) -> None:
 
 def _breaker_check(refresh_token: str, ip: str) -> tuple[bool, str, float]:
     """``(refuse, reason, retry_after)``. Admits exactly one half-open probe per
-    cooldown; concurrent probers keep getting refused until it resolves."""
+    cooldown; concurrent probers keep getting refused until it resolves. A
+    probe that never resolves expires after a full cooldown, so one lost
+    record cannot wedge the credential forever."""
     now = time.monotonic()
     key = _breaker_bucket(refresh_token)
     with _breaker_lock:
@@ -405,8 +407,14 @@ def _breaker_check(refresh_token: str, ip: str) -> tuple[bool, str, float]:
             if now - st["open_at"] < _BREAKER_COOLDOWN_SEC:
                 return True, "breaker_open", _BREAKER_COOLDOWN_SEC - (now - st["open_at"])
             if st["probing"]:
-                return True, "breaker_open", 0.0
+                # A probe whose record never landed (crash between check and
+                # record) must not wedge the credential: expire it after a
+                # full cooldown and admit exactly one fresh probe.
+                if now - (st.get("probe_at") or now) < _BREAKER_COOLDOWN_SEC:
+                    return True, "breaker_open", 0.0
+                st["probing"] = False
             st["probing"] = True
+            st["probe_at"] = now
             return False, "", 0.0
         bucket = _ip_transients[ip or "_unknown_"]
         cutoff = now - _IP_STORM_WINDOW_SEC
@@ -427,13 +435,14 @@ def _breaker_record(refresh_token: str, ip: str, outcome: str) -> None:
             _breaker_state.pop(key, None)
             return
         st = _breaker_state.setdefault(
-            key, {"fails": deque(), "open_at": None, "probing": False})
+            key, {"fails": deque(), "open_at": None, "probing": False, "probe_at": None})
         was_probe = st["probing"]
         cutoff = now - _BREAKER_WINDOW_SEC
         while st["fails"] and st["fails"][0] < cutoff:
             st["fails"].popleft()
         st["fails"].append(now)
         st["probing"] = False
+        st["probe_at"] = None
         if was_probe:
             # Failed half-open probe: re-arm the full cooldown, or every
             # request past the first trip would probe straight through.
