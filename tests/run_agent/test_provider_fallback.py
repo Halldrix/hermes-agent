@@ -126,7 +126,7 @@ class TestFallbackChainAdvancement:
 
         expected = (
             "⚠️ Model fallback: gpt-5.6-sol via openai-codex unavailable "
-            "(rate limit); using glm-5.2 via zai."
+            "(rate limit); using glm-5.2 via zai. Primary retried in ~1 min."
         )
         assert agent._pending_fallback_notice == [expected]
         assert agent._retry_status_buffer[-1] == ("status", expected)
@@ -153,7 +153,7 @@ class TestFallbackChainAdvancement:
 
         assert agent._pending_fallback_notice == [
             "⚠️ Model fallback: gpt-5.6-sol via openai-codex unavailable "
-            "(rate limit); using glm-5.2 via zai.",
+            "(rate limit); using glm-5.2 via zai. Primary retried in ~1 min.",
             "⚠️ Model fallback: glm-5.2 via zai unavailable "
             "(provider overloaded); using deepseek-v4-flash via deepseek.",
         ]
@@ -502,3 +502,105 @@ class TestFallbackExtraBodyReResolution:
         agent.request_overrides["temperature"] = 0.2
         self._activate(agent)
         assert agent.request_overrides.get("temperature") == 0.2
+
+
+class TestFallbackNoticeCooldownSuffix:
+    """The fallback notice carries the armed rate-limit cooldown (#104120).
+
+    The duration is the authoritative "service resumes" moment the process
+    already computed; the notice must surface it instead of discarding it.
+    """
+
+    def _activate(self, agent, reason):
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            return_value=(_mock_client(base_url="https://api.z.ai/v1"), "glm-5.2"),
+        ):
+            assert agent._try_activate_fallback(reason) is True
+        return agent._pending_fallback_notice[-1]
+
+    def test_rate_limit_notice_carries_first_level_cooldown(self):
+        agent = _make_agent(
+            fallback_model={"provider": "zai", "model": "glm-5.2"},
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        notice = self._activate(agent, FailoverReason.rate_limit)
+        assert notice.endswith("Primary retried in ~1 min.")
+
+    def test_billing_and_upstream_reasons_carry_suffix(self):
+        for reason in (FailoverReason.billing, FailoverReason.upstream_rate_limit):
+            agent = _make_agent(
+                fallback_model={"provider": "zai", "model": "glm-5.2"},
+            )
+            agent.model = "gpt-5.6-sol"
+            agent.provider = "openai-codex"
+            notice = self._activate(agent, reason)
+            assert "Primary retried in ~1 min." in notice
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            FailoverReason.overloaded,
+            FailoverReason.server_error,
+            FailoverReason.timeout,
+            None,
+        ],
+    )
+    def test_non_rate_limit_reasons_omit_suffix(self, reason):
+        agent = _make_agent(
+            fallback_model={"provider": "zai", "model": "glm-5.2"},
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        notice = self._activate(agent, reason)
+        assert "Primary retried in" not in notice
+        assert notice.endswith(".")
+
+    def test_chain_switch_from_active_fallback_omits_suffix(self):
+        agent = _make_agent(
+            fallback_model=[
+                {"provider": "zai", "model": "glm-5.2"},
+                {"provider": "deepseek", "model": "deepseek-v4-flash"},
+            ],
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        clients = [
+            _mock_client(base_url="https://api.z.ai/v1"),
+            _mock_client(base_url="https://api.deepseek.com/v1"),
+        ]
+        with patch(
+            "agent.auxiliary_client.resolve_provider_client",
+            side_effect=[(clients[0], "glm-5.2"), (clients[1], "deepseek-v4-flash")],
+        ):
+            assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+            assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+        first, second = agent._pending_fallback_notice[-2:]
+        assert first.endswith("Primary retried in ~1 min.")
+        assert "Primary retried in" not in second
+        assert agent._rate_limit_backoff_count == 1
+
+    def test_escalated_backoff_surfaces_in_notice(self):
+        agent = _make_agent(
+            fallback_model={"provider": "zai", "model": "glm-5.2"},
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        agent._rate_limit_backoff_count = 4  # next level arms 960s → ~16 min
+        notice = self._activate(agent, FailoverReason.rate_limit)
+        assert notice.endswith("Primary retried in ~16 min.")
+
+    @pytest.mark.parametrize(
+        "seconds, expected",
+        [
+            (60, " Primary retried in ~1 min."),
+            (120, " Primary retried in ~2 min."),
+            (960, " Primary retried in ~16 min."),
+            (1920, " Primary retried in ~32 min."),
+            (3840, " Primary retried in ~1 h."),
+            (14400, " Primary retried in ~4 h."),
+        ],
+    )
+    def test_cooldown_suffix_formatting(self, seconds, expected):
+        assert chat_completion_helpers._format_rate_limit_cooldown_suffix(seconds) == expected
