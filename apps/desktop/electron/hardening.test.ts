@@ -9,6 +9,7 @@ import { test } from 'vitest'
 import {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
+  classifyOpenTarget,
   DATA_URL_READ_DEFAULT_MAX_MB,
   dataUrlReadMaxBytesFromMb,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -87,6 +88,46 @@ test('clampDataUrlReadMaxMb defaults and bounds the attach size preference', () 
 test('attachment upload cap is bounded above the preview default', () => {
   assert.equal(ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES, 256 * 1024 * 1024)
   assert.ok(ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES > dataUrlReadMaxBytesFromMb(DATA_URL_READ_DEFAULT_MAX_MB))
+})
+
+test('classifyOpenTarget sends filesystem paths to the resolver, not the URL allowlist', () => {
+  const fileTargets = [
+    '~/.hermes/memories/USER.md',
+    '~',
+    '~/',
+    './notes.md',
+    '../up/notes.md',
+    '.\\notes.md',
+    '/abs/path/notes.md',
+    'file:///abs/path/notes.md',
+    'FILE:///abs/path/notes.md',
+    'C:\\Users\\me\\notes.md',
+    'C:/Users/me/notes.md',
+    '\\\\server\\share\\notes.md'
+  ]
+
+  for (const target of fileTargets) {
+    assert.equal(classifyOpenTarget(target), 'file', `${target} must resolve as a file`)
+  }
+
+  for (const target of ['https://example.com/x', 'http://127.0.0.1:3000/x', 'mailto:me@example.com']) {
+    assert.equal(classifyOpenTarget(target), 'web', `${target} must open externally`)
+  }
+
+  const rejected = [
+    '',
+    '   ',
+    'javascript:alert(1)',
+    'ftp://host/notes.md',
+    'data:text/plain,hi',
+    'custom-scheme://thing',
+    'notaurl',
+    'C:relative\\notes.md'
+  ]
+
+  for (const target of rejected) {
+    assert.equal(classifyOpenTarget(target), 'reject', `${target} must stay rejected`)
+  }
 })
 
 test('attachment data URL helper reads bytes above the preview default without changing that limit', async () => {

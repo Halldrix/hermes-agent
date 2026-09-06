@@ -132,6 +132,45 @@ describe('collectArtifactsForSession', () => {
     ])
   })
 
+  it('keeps gateway tilde file paths raw so the main process can expand and resolve them', () => {
+    const artifacts = collectArtifactsForSession(makeSession(), [
+      {
+        content: 'Saved to ~/.hermes/memories/USER.md',
+        role: 'assistant',
+        timestamp: 2000
+      }
+    ])
+
+    expect(artifacts).toHaveLength(1)
+    expect(artifacts[0]).toMatchObject({
+      kind: 'file',
+      label: 'USER.md',
+      value: '~/.hermes/memories/USER.md'
+    })
+    // Local mode has no URL form for `~` (`file://~/…` misreads the tilde as
+    // the URL host and drops it): the href stays raw so `hermes:openExternal`
+    // expands it through the hardened path check instead of throwing
+    // "Invalid external URL" (#104123).
+    expect(artifacts[0]?.href).toBe('~/.hermes/memories/USER.md')
+  })
+
+  it('routes remote tilde artifacts through the authenticated download bridge', () => {
+    $connection.set({ baseUrl: 'https://gw', mode: 'remote', token: 'secret' } as never)
+
+    const artifacts = collectArtifactsForSession(makeSession(), [
+      {
+        content: 'Saved to ~/.hermes/memories/USER.md',
+        role: 'assistant',
+        timestamp: 2000
+      }
+    ])
+
+    expect(artifacts).toHaveLength(1)
+    expect(artifacts[0]?.href).toBe(
+      'https://gw/api/files/download?path=~%2F.hermes%2Fmemories%2FUSER.md&token=secret'
+    )
+  })
+
   it('keeps an explicit browser screenshot but ignores page assets', () => {
     const payload = JSON.stringify({
       images: ['https://cdn.example.com/advertising/banner.gif'],
