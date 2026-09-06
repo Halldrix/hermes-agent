@@ -2020,7 +2020,7 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
 
 
 def _format_rate_limit_cooldown_suffix(backoff_seconds: int) -> str:
-    """Render an armed rate-limit cooldown as a user-facing duration (" Primary retried in ~16 min.").
+    """Render an armed rate-limit cooldown as a user-facing duration ("Primary retried in ~16 min.").
 
     The stored deadline is monotonic-based, so it is rendered as a duration, never as a
     wall-clock time (unsafe across suspend)."""
