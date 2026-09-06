@@ -463,7 +463,8 @@ class LlamaServerSupervisor:
                     return
                 self._consec_failures[key] = 0
                 now = time.monotonic()
-                if now - self._recovery_at.get(key, 0.0) < self.watchdog_cooldown_s:
+                last = self._recovery_at.get(key)
+                if last is not None and now - last < self.watchdog_cooldown_s:
                     return
                 self._recovery_at[key] = now
             threading.Thread(target=self._recover_wedged_model, args=(key,),

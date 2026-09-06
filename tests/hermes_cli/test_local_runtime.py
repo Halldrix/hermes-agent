@@ -926,6 +926,25 @@ def test_watchdog_cooldown_bounds_recovery(stub_server, tmp_path):
     assert getattr(handler, "unloaded", []) == ["m"]
 
 
+def test_watchdog_first_recovery_fires_on_fresh_boot(stub_server, tmp_path, monkeypatch):
+    """Fresh-boot sentinel: on a machine booted seconds ago time.monotonic()
+    is tiny, so a 0.0-default 'last recovery' looks recent and wrongly
+    cooldown-blocks the first-ever recovery (CI runners boot fresh — this
+    failed deterministically there while passing on long-uptime dev boxes)."""
+    import time as _time
+
+    port, handler = stub_server
+    _wedged(handler)
+    sup = _make_watchdog(tmp_path, port, watchdog_failure_threshold=1,
+                         watchdog_cooldown_s=3600)
+    monkeypatch.setattr(_time, "monotonic", lambda: 100.0)
+    try:
+        sup.note_inference_result("m", ok=False, reason="server_error")
+    finally:
+        monkeypatch.undo()
+    assert _wait_until(lambda: getattr(handler, "unloaded", []) == ["m"])
+
+
 def test_watchdog_bad_config_values_fall_back_to_defaults(tmp_path):
     from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
 
