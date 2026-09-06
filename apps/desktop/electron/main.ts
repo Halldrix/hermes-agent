@@ -207,6 +207,7 @@ import { readAndConsumeHandoffResult } from './handoff-result'
 import {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
+  classifyOpenTarget,
   DATA_URL_READ_DEFAULT_MAX_MB,
   dataUrlReadMaxBytesFromMb,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -1771,10 +1772,31 @@ function loadWindowUrl(win, url, label) {
 }
 
 function openExternalUrl(rawUrl) {
-  const raw = String(rawUrl || '').trim()
+  let raw = String(rawUrl || '').trim()
 
   if (!raw) {
     return false
+  }
+
+  // Raw filesystem paths are not URLs: expand `~`, resolve relative targets
+  // against the Hermes cwd like file previews do, and re-enter the `file:`
+  // branch below as a proper file URL. Without this, `~/…` dies in
+  // `new URL()` ("Invalid external URL") and `C:\…` misparses as a `c:`
+  // scheme rejected by the allowlist.
+  if (classifyOpenTarget(raw) === 'file' && !/^file:/i.test(raw)) {
+    try {
+      let baseDir
+
+      if (/^\.\.?[\\/]/.test(raw)) {
+        baseDir = resolveHermesCwd()
+      }
+
+      raw = pathToFileURL(
+        resolveRequestedPathForIpc(expandUserPath(raw), { baseDir, purpose: 'Open external file' })
+      ).toString()
+    } catch {
+      return false
+    }
   }
 
   let parsed

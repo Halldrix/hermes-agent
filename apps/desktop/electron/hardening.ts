@@ -354,6 +354,50 @@ function rejectUnsafePathSyntax(filePath, purpose = 'File read') {
   return raw
 }
 
+// Classify a user-initiated open target BEFORE parsing it as a URL. Raw
+// filesystem paths (`~/…`, `./…`, `/abs`, `C:\…`, UNC, `file:`) are not URLs:
+// `new URL()` either throws on them or misreads a drive letter as a scheme
+// (`c:`), so they must reach the hardened path resolver instead of the
+// protocol allowlist. Anything else must parse as `http:`/`https:`/`mailto:`
+// or it is rejected (`javascript:`, `ftp:`, unknown schemes, bare words).
+function classifyOpenTarget(rawUrl) {
+  const raw = String(rawUrl ?? '').trim()
+
+  if (!raw) {
+    return 'reject'
+  }
+
+  if (
+    raw === '~' ||
+    raw.startsWith('~/') ||
+    raw.startsWith('~\\') ||
+    raw.startsWith('./') ||
+    raw.startsWith('../') ||
+    raw.startsWith('.\\') ||
+    raw.startsWith('..\\') ||
+    raw.startsWith('/') ||
+    raw.startsWith('\\\\') ||
+    /^[A-Za-z]:[\\/]/.test(raw) ||
+    /^file:/i.test(raw)
+  ) {
+    return 'file'
+  }
+
+  let protocol = ''
+
+  try {
+    protocol = new URL(raw).protocol
+  } catch {
+    return 'reject'
+  }
+
+  if (protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:') {
+    return 'web'
+  }
+
+  return 'reject'
+}
+
 function resolveRequestedPathForIpc(filePath, options: { purpose?: string; baseDir?: fs.PathOrFileDescriptor } = {}) {
   const purpose = String(options.purpose || 'File read')
   let raw = rejectUnsafePathSyntax(filePath, purpose)
@@ -531,6 +575,7 @@ async function readFileDataUrlForIpc(
 export {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
+  classifyOpenTarget,
   DATA_URL_READ_DEFAULT_MAX_MB,
   DATA_URL_READ_MAX_MAX_MB,
   DATA_URL_READ_MIN_MAX_MB,

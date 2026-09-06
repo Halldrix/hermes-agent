@@ -127,6 +127,15 @@ export function mediaExternalUrl(path: string): string {
     }
   }
 
+  // Tilde and relative paths have no URL form that survives a round trip:
+  // `file://~/…` misreads `~` as the URL host and drops it. Return them raw —
+  // the `hermes:openExternal` handler expands `~` and resolves them through
+  // the hardened path check, and the artifacts page routes remote ones
+  // through the authenticated download bridge first.
+  if (/^(?:~\/|\.\.?\/)/.test(path)) {
+    return path
+  }
+
   return /^file:/i.test(path) ? path : `file://${path}`
 }
 
