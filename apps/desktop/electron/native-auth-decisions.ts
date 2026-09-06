@@ -2,7 +2,7 @@
  * native-auth-decisions.ts
  *
  * Pure decision helpers extracted from main.ts for the RFC 8252 native-app
- * auth flow. These encode six choices that were each the site of a real
+ * auth flow. These encode seven choices that were each the site of a real
  * runtime bug — invisible to the mocked flow tests because the tests never
  * exercised the real main.ts internals. Keeping them pure + unit-tested here
  * prevents silent regressions:
@@ -36,7 +36,14 @@
  *      OAuth cookie partition, so a cookieless native (or native-password)
  *      session could list files via `hermes:api` and still 401 on Download.
  *
- * All six are trivial once named; the value is the test that pins the
+ *   7. resolveLocalFileToken — a token/local descriptor that reaches the file
+ *      save path WITHOUT its session token must fall back to this process's
+ *      loopback credential (#104023: credential-less loopback fetch → the
+ *      dashboard answers 401, surfaced as a download failure). The fallback
+ *      fires ONLY for loopback targets so the local credential can never
+ *      leak to a remote host.
+ *
+ * All seven are trivial once named; the value is the test that pins the
  * contract so the god-file call sites can't drift back to the buggy shape.
  */
 
@@ -131,6 +138,72 @@ export function resolveGatedDownloadAuth(
   }
 
   return { kind: 'token', token: connectionToken ?? null }
+}
+
+/** Loopback hosts the desktop may serve a local backend on. Mirrors the
+ * dashboard gate's `_LOOPBACK_HOST_VALUES` (`hermes_cli/web_server.py`). */
+const LOOPBACK_GATEWAY_HOSTS = new Set(['::1', '127.0.0.1', 'localhost'])
+
+/**
+ * True when `baseUrl` targets this machine's loopback interface over http(s).
+ * Anything else — unparseable URL, non-http(s) scheme, non-loopback host —
+ * answers false so a fallback credential is never attached to it.
+ */
+export function isLoopbackGatewayUrl(baseUrl: string | null | undefined): boolean {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) {
+    return false
+  }
+
+  let hostname = ''
+
+  try {
+    const parsed = new URL(baseUrl)
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false
+    }
+
+    hostname = parsed.hostname.toLowerCase()
+  } catch {
+    return false
+  }
+
+  // Node keeps IPv6 brackets in `hostname`; strip them defensively.
+  const unbracketed = hostname.replace(/^\[(.*)\]$/, '$1')
+
+  return LOOPBACK_GATEWAY_HOSTS.has(unbracketed)
+}
+
+export interface LocalFileTokenCandidates {
+  connectionToken?: null | string
+  envToken?: null | string
+  poolToken?: null | string
+}
+
+/**
+ * Resolve the session token a gated file download presents for a
+ * token/local connection.
+ *
+ * Precedence: the descriptor's own token first (today's behaviour,
+ * unchanged); then — ONLY for loopback targets — the pooled backend token
+ * for the same backend, then the process loopback credential. A descriptor
+ * that lost its token (#104023) still authenticates against the backend main
+ * itself spawned, while a non-loopback target never receives either fallback.
+ * Empty strings count as absent everywhere.
+ */
+export function resolveLocalFileToken(
+  baseUrl: string | null | undefined,
+  candidates: LocalFileTokenCandidates = {}
+): string | null {
+  if (candidates.connectionToken) {
+    return candidates.connectionToken
+  }
+
+  if (!isLoopbackGatewayUrl(baseUrl)) {
+    return null
+  }
+
+  return candidates.poolToken || candidates.envToken || null
 }
 
 export interface AdvertisedAuthProvider {

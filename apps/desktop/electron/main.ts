@@ -194,6 +194,7 @@ import {
   gatewayFilePath,
   gatewayFileRequestPaths,
   isNotFoundError,
+  matchPoolTokenForGatewayUrl,
   parseDataUrlToBuffer,
   pumpStreamToFile,
   resolveGatewayFileBackend,
@@ -258,6 +259,7 @@ import {
   oauthTicketFailureAuthMessage,
   resolveGatedDownloadAuth,
   resolveJsonBody,
+  resolveLocalFileToken,
   resolveOauthRestAuth,
   resolveReadinessProbeAuth
 } from './native-auth-decisions'
@@ -8091,6 +8093,25 @@ async function gatedFileAuth(connection: GatewayFileConnection) {
   const nativeAt =
     connection.authMode === 'oauth' ? await ensureNativeAccessToken(connection.baseUrl).catch(() => null) : null
 
+  if (connection.authMode !== 'oauth') {
+    // A token/local descriptor can reach here without its session token
+    // (#104023: the loopback fetch goes out credential-less and the
+    // dashboard answers 401, surfaced as a download failure). Resolve through
+    // the loopback ladder — descriptor token first, then the pooled backend
+    // token for the same backend, then this process's loopback credential —
+    // so the save still authenticates against the backend main itself
+    // spawned. Non-loopback targets never receive either fallback.
+    const token = resolveLocalFileToken(connection.baseUrl, {
+      connectionToken: connection.token,
+      envToken: process.env.HERMES_DASHBOARD_SESSION_TOKEN,
+      poolToken: matchPoolTokenForGatewayUrl(connection.baseUrl, backendPool.values())
+    })
+
+    if (token) {
+      return { kind: 'token' as const, token }
+    }
+  }
+
   return resolveGatedDownloadAuth(connection.authMode, nativeAt, connection.token)
 }
 
@@ -13092,6 +13113,14 @@ async function startHermes() {
       childAlive: () => hermesProcess.exitCode === null && !hermesProcess.killed,
       rememberLog
     })
+
+    // Publish the adopted loopback credential for credential-less loopback
+    // consumers in this process (gated file downloads, #104023). The child
+    // already receives it via spawn env; without this mirror the main process
+    // itself holds no copy when a resolved descriptor drops its token.
+    if (authToken) {
+      process.env.HERMES_DASHBOARD_SESSION_TOKEN = authToken
+    }
 
     // Verify the WebSocket session token before declaring backend ready.
     const wsUrl = `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`
