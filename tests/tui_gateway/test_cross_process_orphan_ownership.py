@@ -504,3 +504,275 @@ def test_automatic_desktop_cleanup_preserves_sibling_and_ends_sole_owner(
         assert ended == [(session_id, reason) for reason in reasons]
     finally:
         _stop_child(child, release_file)
+
+
+# ── #104691: the reclaim sweep must not vouch for dead-lane records ──
+
+def _acquire_root_lease(session_id: str, live_session_id: str):
+    lease, message = try_acquire_active_session(
+        session_id=session_id,
+        surface="desktop",
+        config={},
+        metadata={"live_session_id": live_session_id},
+        track_liveness=True,
+    )
+    assert lease is not None and message is None
+    return lease
+
+
+def _dead_lane_record(lease, *, last_active: float, created_at: float, transport=None, running: bool = False, agent_ready=None) -> dict:
+    return {
+        "active_session_lease": lease,
+        "transport": server._detached_ws_transport if transport is None else transport,
+        "running": running,
+        "last_active": last_active,
+        "created_at": created_at,
+        "agent_ready": agent_ready,
+        "source": "desktop",
+        "session_key": "zombie-session",
+    }
+
+
+def test_reclaim_preserves_record_building_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record whose agent is still building keeps its lease (agent_ready unset, non-lazy)."""
+    _pin_reclaim_env(monkeypatch)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {"ui": _dead_lane_record(lease, last_active=old, created_at=old,
+                                agent_ready=threading.Event())},
+    )
+
+    try:
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+def _pin_reclaim_env(monkeypatch: pytest.MonkeyPatch, *, floor: float = 0.0, grace: float = 0.0, delegations: bool = False) -> None:
+    monkeypatch.setattr(server, "_LEASE_RECLAIM_IDLE_S", floor, raising=False)
+    monkeypatch.setattr("hermes_cli.active_sessions._SELF_ORPHAN_GRACE_SECONDS", grace)
+    monkeypatch.setattr(
+        server, "_session_has_active_delegations", lambda sid, session=None: delegations
+    )
+
+
+def test_reclaim_drops_lease_backed_by_dead_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core #104691 repro: a lease vouched only by a dead-lane record is reclaimed."""
+    _pin_reclaim_env(monkeypatch)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server, "_sessions", {"ui": _dead_lane_record(lease, last_active=old, created_at=old)}
+    )
+
+    assert server._own_live_lease_ids() == set()
+    server._reclaim_orphaned_leases()
+    assert active_session_registry_snapshot() == []
+    # The dead lease object is detached too: the next submit must claim a fresh
+    # fenced lease instead of short-circuiting on the stale object.
+    assert "active_session_lease" not in server._sessions["ui"]
+    assert lease.released is True
+
+
+def test_reclaim_preserves_lease_backed_by_running_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mid-turn record (running) still owns its lease, even on a dead transport."""
+    _pin_reclaim_env(monkeypatch)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {"ui": _dead_lane_record(lease, last_active=old, created_at=old, running=True)},
+    )
+
+    try:
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+def test_reclaim_preserves_lease_with_live_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record on a live transport is not a dead lane, however idle it is."""
+    _pin_reclaim_env(monkeypatch)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {"ui": _dead_lane_record(lease, last_active=old, created_at=old, transport=object())},
+    )
+
+    try:
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+def test_reclaim_preserves_lease_with_active_delegations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Live background work keeps the lane (and its lease) alive."""
+    _pin_reclaim_env(monkeypatch, delegations=True)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server, "_sessions", {"ui": _dead_lane_record(lease, last_active=old, created_at=old)}
+    )
+
+    try:
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+def test_reclaim_preserves_young_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recently active lane is not idle past the reclaim floor."""
+    _pin_reclaim_env(monkeypatch, floor=300.0)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    now = time.time()
+    monkeypatch.setattr(
+        server, "_sessions", {"ui": _dead_lane_record(lease, last_active=now, created_at=now)}
+    )
+
+    try:
+        assert server._own_live_lease_ids() == {lease.lease_id}
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+def test_reclaim_preserves_record_without_activity_clocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an idle floor set, a record without activity clocks keeps its lease.
+
+    Idleness is unprovable without ``created_at``/``last_active``: fail closed and keep
+    vouching (an operator-set floor of 0 opts into transport-death alone). See #104691.
+    """
+    _pin_reclaim_env(monkeypatch, floor=300.0)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    monkeypatch.setattr(
+        server, "_sessions", {"ui": _dead_lane_record(lease, last_active=0.0, created_at=0.0)}
+    )
+
+    try:
+        server._reclaim_orphaned_leases()
+        assert [e["session_id"] for e in active_session_registry_snapshot()] == [
+            "zombie-session"
+        ]
+    finally:
+        lease.release()
+
+
+@pytest.mark.live_system_guard_bypass
+def test_reclaim_never_drops_foreign_pid_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reclaim only ever drops this process's leases; a live sibling keeps its own."""
+    hermes_home = Path(os.environ["HERMES_HOME"])
+    worker_home = hermes_home / "profiles" / "worker"
+    ready_file = tmp_path / "foreign-ready"
+    release_file = tmp_path / "foreign-release"
+    child = _spawn_lease_holder(
+        home=worker_home,
+        session_id="foreign-session",
+        ready_file=ready_file,
+        release_file=release_file,
+    )
+    try:
+        _wait_for_child_file(child, ready_file, label="foreign lease holder")
+        _pin_reclaim_env(monkeypatch)
+        lease = _acquire_root_lease("zombie-session", "runtime-a")
+        old = time.time() - 7200.0
+        monkeypatch.setattr(
+            server,
+            "_sessions",
+            {"ui": _dead_lane_record(lease, last_active=old, created_at=old)},
+        )
+
+        server._reclaim_orphaned_leases()
+
+        assert active_session_registry_snapshot() == []
+        remaining = active_session_registry_snapshot(registry_home=worker_home)
+        assert [e["session_id"] for e in remaining] == ["foreign-session"]
+    finally:
+        release_file.write_text("release", encoding="utf-8")
+        if child.poll() is None:
+            child.terminate()
+        try:
+            child.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+
+
+def test_reclaim_race_with_concurrent_submit_leaves_consistent_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep and submit serialize on the registry lock; no lost updates, no crash."""
+    _pin_reclaim_env(monkeypatch)
+    lease = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server, "_sessions", {"ui": _dead_lane_record(lease, last_active=old, created_at=old)}
+    )
+    errors: list[Exception] = []
+
+    def _sweep() -> None:
+        try:
+            for _ in range(10):
+                server._reclaim_orphaned_leases()
+        except Exception as exc:  # pragma: no cover - fails the test below
+            errors.append(exc)
+
+    def _churn() -> None:
+        try:
+            for _ in range(10):
+                churn_lease, _message = try_acquire_active_session(
+                    session_id="churn-session",
+                    surface="desktop",
+                    config={},
+                    metadata={"live_session_id": "churn-runtime"},
+                    track_liveness=True,
+                )
+                if churn_lease is not None:
+                    churn_lease.release()
+        except Exception as exc:  # pragma: no cover - fails the test below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=_sweep), threading.Thread(target=_churn)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=120)
+
+    assert errors == []
+    assert active_session_registry_snapshot() == []

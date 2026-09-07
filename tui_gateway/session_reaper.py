@@ -187,8 +187,42 @@ def _reclaim_orphaned_leases() -> None:
         from hermes_cli.active_sessions import release_orphaned_leases
         if dropped := release_orphaned_leases(_own_live_lease_ids()):
             logger.info("Reclaimed %d orphaned active-session lease(s)", dropped)
+            _detach_reclaimed_leases()
     except Exception:
         logger.debug("orphaned lease reclaim failed", exc_info=True)
+
+
+def _detach_reclaimed_leases() -> None:
+    """Pop dead lease objects off records the sweep just stopped vouching for.
+
+    The registry row is already gone; leaving the stale object attached would let the
+    next submit short-circuit ``_ensure_active_session_slot`` and run lease-less,
+    silently dropping the per-session fence. Detaching forces the next submit to claim
+    a fresh fenced lease. Reclaimability is re-evaluated per record under
+    ``_sessions_lock`` (never from a pre-lock snapshot: a submit racing the sweep
+    could otherwise lose a freshly claimed lease). Detached leases are marked released
+    so lifecycle guards treat them as such. See #104691.
+    """
+    now = time.time()
+    with _sessions_lock:
+        for sid, session in _sessions.items():
+            if not isinstance(session, dict):
+                continue
+            lease = session.get("active_session_lease")
+            if lease is None:
+                continue
+            try:
+                reclaimable = _lane_is_reclaimable(sid, session, now)
+            except Exception:
+                logger.debug("reclaimed-lease detach failed closed", exc_info=True)
+                continue
+            if not reclaimable:
+                continue
+            if session.get("active_session_lease") is not lease:
+                continue
+            del session["active_session_lease"]
+            with contextlib.suppress(Exception):
+                lease.released = True
 
 
 # Soft LRU cap on in-memory sessions: the TTL reaper only frees sessions idle for hours, so a heavy reconnecting
