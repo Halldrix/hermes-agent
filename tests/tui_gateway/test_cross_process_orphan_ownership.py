@@ -776,3 +776,33 @@ def test_reclaim_race_with_concurrent_submit_leaves_consistent_registry(
 
     assert errors == []
     assert active_session_registry_snapshot() == []
+
+
+def test_submit_after_reclaim_claims_fresh_fenced_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A submit that loses the detach race must not run lease-less.
+
+    The sweep can drop the registry row before the lease object is detached from its
+    record. ``_ensure_active_session_slot`` treats a released-but-still-attached lease
+    as absent and claims a fresh one, so the per-session fence never lapses.
+    """
+    _pin_reclaim_env(monkeypatch)
+    stale = _acquire_root_lease("zombie-session", "runtime-a")
+    old = time.time() - 7200.0
+    stale.released = True  # the sweep already dropped the registry row
+    record = _dead_lane_record(stale, last_active=old, created_at=old)
+    monkeypatch.setattr(server, "_sessions", {"ui": record})
+
+    claims: list[str] = []
+
+    def _fake_claim(session_key, *, live_session_id, surface="tui", profile_home=None):
+        claims.append(live_session_id)
+        return object(), None
+
+    monkeypatch.setattr(server, "_claim_active_session_slot", _fake_claim)
+
+    assert server._ensure_active_session_slot("ui", record) is None
+    assert claims == ["ui"]  # claimed a fresh lease instead of short-circuiting
+    assert record["active_session_lease"] is not stale
+    assert stale.released is True

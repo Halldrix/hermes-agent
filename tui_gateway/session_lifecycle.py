@@ -47,8 +47,15 @@ def _ensure_active_session_slot(sid: str, session: dict) -> str | None:
     """Claim this session's cap slot on its first real turn; None when ok. session.create/resume deliberately
     do NOT claim: tile paints, reconnect-resumes and abandoned drafts would hold invisible slots (no DB row)
     that starve the messaging gateway sharing the cap. Anything holding a slot must be user-visible."""
-    if session.get("active_session_lease") is not None:
+    attached = session.get("active_session_lease")
+    if attached is not None and not getattr(attached, "released", False):
         return None
+    if attached is not None:
+        # A reclaimed-then-detached lease lost its race with this submit: the registry
+        # row is gone but the object is still attached. Pop it so this submit claims a
+        # fresh fenced lease below instead of running lease-less. See #104691.
+        if session.get("active_session_lease") is attached:
+            session.pop("active_session_lease", None)
     lease, limit_message = _claim_active_session_slot(
         str(session.get("session_key") or ""), live_session_id=sid,
         surface=_session_source(session), profile_home=session.get("profile_home"))
