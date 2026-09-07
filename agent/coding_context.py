@@ -516,13 +516,22 @@ def project_facts_for(cwd: Optional[str | Path] = None) -> Optional[dict[str, An
 
 def build_coding_workspace_block(cwd: Optional[str | Path] = None) -> str:
     """Workspace snapshot for the system prompt (empty outside a workspace): git state when
-    in a repo, plus project facts — so marker-only (non-git) projects still get one."""
+    in a repo, plus project facts — so marker-only (non-git) projects still get one.
+
+    Also carries the session's ``Current working directory`` line (moved here from the
+    stable environment-hints block): it varies per worktree while the rest of the stable
+    prefix does not, and on longest-prefix caches anything after the first divergence
+    re-prefills. The cwd always sits at or under the reported root (the root is derived
+    from it), so unlike the linked-worktree primary path it is safe to name.
+    """
+    resolved = _resolve_cwd(cwd)
     git_root, root = _workspace_roots(cwd)
     if root is None:
         return ""
     lines = [
         "Workspace (snapshot at session start — re-check with `git` before acting on it):",
         f"- Root: {root}",
+        f"- Current working directory: {resolved}",
     ]
     if git_root is not None:
         branch, counts = _parse_status(_git(root, "status", "--porcelain=2", "--branch"))

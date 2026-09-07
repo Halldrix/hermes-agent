@@ -931,8 +931,13 @@ def _clear_backend_probe_cache() -> None:
     _BACKEND_PROBE_CACHE.clear()
 
 
-def _local_host_hints() -> list[str]:
-    """Host OS / home / cwd block for a local terminal backend (tools run on this host)."""
+def _local_host_hints(*, include_cwd: bool = True) -> list[str]:
+    """Host OS / home block for a local terminal backend (tools run on this host).
+
+    The cwd line rides along only when the caller keeps it here: sessions with a
+    workspace snapshot carry it in that block instead (context tier), so the
+    stable prefix stays byte-identical across worktrees of one project.
+    """
     import platform
 
     host = (
@@ -942,10 +947,11 @@ def _local_host_hints() -> list[str]:
         else f"{platform.system()} ({platform.release()})"
     )
     host_lines = [f"Host: {host}", f"User home directory: {os.path.expanduser('~')}"]
-    try:
-        host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
-    except OSError:
-        pass
+    if include_cwd:
+        try:
+            host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
+        except OSError:
+            pass
     if not (sys.platform == "win32" and not is_wsl()):
         return ["\n".join(host_lines)]
     host_lines.append(
@@ -995,13 +1001,14 @@ def _embedder_environment_hint() -> str:
         (_config_readonly("agent.environment_hint").get("agent", {}) or {}).get("environment_hint", "")).strip()
 
 
-def build_environment_hints() -> str:
-    """Execution-environment block: local backends get host OS/home/cwd; remote/sandbox
+def build_environment_hints(*, include_cwd: bool = True) -> str:
+    """Execution-environment block: local backends get host OS/home (plus the cwd
+    line unless the caller moved it into the workspace snapshot block); remote/sandbox
     backends get ONLY the backend's own state (the agent's tools cannot touch the host).
     WSL and embedder hints are appended."""
     backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
     is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
-    hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints()
+    hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints(include_cwd=include_cwd)
     hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
     return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 

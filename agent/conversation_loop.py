@@ -775,6 +775,21 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
                         return candidate[len(prefix):].strip()
         return ""
 
+    def workspace_value(label: str) -> str:
+        """Read a field from the workspace snapshot block (which carries the cwd
+        line since #104610 moved it out of the host-info block), anchored on the
+        block header so user project text cannot shadow it. Old-shape stored
+        prompts (cwd after ``User home directory:``) keep parsing via
+        ``host_info_value`` above; this covers the new shape."""
+        prefix = f"{label}:"
+        for idx, line in enumerate(lines):
+            if line.startswith("Workspace (snapshot"):
+                for candidate in lines[idx + 1: idx + 7]:
+                    text = candidate[2:].strip() if candidate.startswith("- ") else candidate.strip()
+                    if text.startswith(prefix):
+                        return text[len(prefix):].strip()
+        return ""
+
     # Model/provider identity, then cwd drift, then runtime-surface drift (reusing a
     # desktop-built prompt on a terminal session would inject the wrong runtime hints).
     for label, attr in (("Model", "model"), ("Provider", "provider")):
@@ -784,7 +799,7 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
             return False
     # Compare against resolve_agent_cwd() — the SAME resolver used to build the
     # prompt — so TERMINAL_CWD sessions are not falsely rejected.
-    stored_cwd = host_info_value("Current working directory")
+    stored_cwd = host_info_value("Current working directory") or workspace_value("Current working directory")
     if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
         return False
     stored_platform = line_value("Platform")

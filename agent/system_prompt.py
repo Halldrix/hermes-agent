@@ -624,11 +624,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
     stable_parts.extend(_alibaba_identity_part(agent))
-    stable_parts.append(_pb.build_environment_hints())
     # Coding posture: operating brief stays in the stable prefix; the live
     # git/workspace snapshot sits behind its own cache boundary, and the blocks
-    # below it must keep their historical post-snapshot position.
+    # below it must keep their historical post-snapshot position. The snapshot
+    # also carries the session's cwd line (per-worktree), so the environment
+    # hints drop it exactly when a snapshot follows — otherwise the stable
+    # prefix would diverge at the cwd line on every worktree session and the
+    # identical context files behind it would re-prefill (#104610). With no
+    # snapshot the hints keep the line, leaving non-workspace prompts byte-identical.
     coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = _coding_parts(agent)
+    stable_parts.append(_pb.build_environment_hints(include_cwd=not coding_workspace_parts))
     stable_parts.extend(coding_prefix_parts)
     post_workspace_parts = _post_workspace_parts(agent)
     # ── Context tier (cwd-dependent, may change between sessions) ─
