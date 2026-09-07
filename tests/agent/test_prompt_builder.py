@@ -801,6 +801,28 @@ class TestEnvironmentHints:
         _pb._BACKEND_PROBE_CACHE.clear()
         assert f"Current working directory: {tmp_path}" in _pb.build_environment_hints()
 
+    def test_build_environment_hints_include_cwd_false_drops_only_that_line(
+        self, monkeypatch, tmp_path
+    ):
+        """Sessions with a workspace snapshot carry the cwd line in that block
+        (#104610), so the stable environment hints must drop exactly that line
+        and keep host/home byte-identical."""
+        import agent.prompt_builder as _pb
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        monkeypatch.chdir(tmp_path)
+        _pb._BACKEND_PROBE_CACHE.clear()
+        with_cwd = _pb.build_environment_hints()
+        without_cwd = _pb.build_environment_hints(include_cwd=False)
+        assert f"Current working directory: {tmp_path}" in with_cwd
+        assert "Current working directory:" not in without_cwd
+        assert without_cwd == with_cwd.replace(
+            f"\nCurrent working directory: {tmp_path}", ""
+        )
+        assert "Host:" in without_cwd
+        assert "User home directory:" in without_cwd
+
 
     def test_probe_remote_backend_imports_real_factory(self, monkeypatch):
         """Regression for #53667: the probe imported a nonexistent

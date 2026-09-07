@@ -499,6 +499,98 @@ class TestStoredPromptCwdDrift:
                 "drift in the host-info block"
             )
 
+    @staticmethod
+    def _workspace_block(cwd: str) -> str:
+        """A stored prompt fragment shaped like the post-#104610 workspace
+        snapshot, which carries the cwd line the host-info block no longer has.
+        """
+        return (
+            "Workspace (snapshot at session start — re-check with `git` before acting on it):\n"
+            "- Root: /project\n"
+            f"- Current working directory: {cwd}\n"
+            "- Branch: main\n"
+            "- Status: clean\n"
+        )
+
+    @staticmethod
+    def _homeless_host_block() -> str:
+        """Host-info block as newly built with a workspace snapshot: home stays,
+        the cwd line moved out."""
+        return "Host: Linux (6.16.0)\nUser home directory: /home/tester\n"
+
+    def test_workspace_block_cwd_drift_forces_rebuild(self):
+        """A new-shape prompt whose snapshot names another worktree is stale."""
+        from unittest.mock import patch
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+
+        agent = self._make_agent()
+        stored_prompt = (
+            self._homeless_host_block()
+            + self._workspace_block("/project/wt-old")
+            + "Model: test/model\n"
+            "Provider: openrouter\n"
+        )
+
+        with patch("os.getcwd", return_value="/project/wt-new"):
+            assert _stored_prompt_matches_runtime(agent, stored_prompt) is False, (
+                "Expected False when the workspace-block cwd differs from current cwd"
+            )
+
+    def test_workspace_block_cwd_match_allows_reuse(self):
+        """A new-shape prompt whose snapshot names the current cwd is fresh."""
+        from unittest.mock import patch
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+
+        agent = self._make_agent()
+        current_cwd = "/project/wt-current"
+        stored_prompt = (
+            self._homeless_host_block()
+            + self._workspace_block(current_cwd)
+            + "Model: test/model\n"
+            "Provider: openrouter\n"
+        )
+
+        with patch("os.getcwd", return_value=current_cwd):
+            assert _stored_prompt_matches_runtime(agent, stored_prompt) is True, (
+                "Expected True when the workspace-block cwd matches current cwd"
+            )
+
+    def test_project_context_cannot_shadow_workspace_cwd(self):
+        """AGENTS.md prose naming another cwd must neither force a rebuild nor
+        mask real drift once the line lives in the snapshot block: the scan is
+        anchored on the block header, not a whole-prompt match."""
+        from unittest.mock import patch
+        from agent.conversation_loop import _stored_prompt_matches_runtime
+
+        agent = self._make_agent()
+        current_cwd = "/project/wt-current"
+        fresh_prompt = (
+            self._homeless_host_block()
+            + self._workspace_block(current_cwd)
+            + "\n# AGENTS.md\n\n"
+            "Our deploy convention:\n\n"
+            "- Current working directory: /srv/decoy\n\n"
+            "Always run make before pushing.\n\n"
+            "Model: test/model\n"
+            "Provider: openrouter\n"
+        )
+        stale_prompt = (
+            self._homeless_host_block()
+            + self._workspace_block("/project/wt-old")
+            + "\n# AGENTS.md\n\n"
+            f"- Current working directory: {current_cwd}\n\n"
+            "Model: test/model\n"
+            "Provider: openrouter\n"
+        )
+
+        with patch("os.getcwd", return_value=current_cwd):
+            assert _stored_prompt_matches_runtime(agent, fresh_prompt) is True, (
+                "Project prose must not invalidate a prompt whose snapshot cwd matches"
+            )
+            assert _stored_prompt_matches_runtime(agent, stale_prompt) is False, (
+                "Project prose naming the new cwd must not mask snapshot drift"
+            )
+
 
 
 

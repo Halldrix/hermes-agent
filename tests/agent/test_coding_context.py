@@ -112,6 +112,24 @@ class TestWorkspaceBlock:
         assert "untracked" in block
         assert "clean" not in block.split("Status:")[1].splitlines()[0]
 
+    def test_carries_session_cwd_line(self, tmp_path):
+        # #104610: the workspace snapshot carries the session's cwd line (moved
+        # out of the stable environment-hints block), so longest-prefix caches
+        # stay warm across worktrees of one project.
+        _git_init(tmp_path)
+        block = cc.build_coding_workspace_block(tmp_path)
+        assert f"- Current working directory: {tmp_path}" in block.splitlines()
+
+    def test_cwd_line_names_subdir_session(self, tmp_path):
+        # A session started in a subdirectory reports both the project root and
+        # its own cwd — the root alone would misdirect it.
+        _git_init(tmp_path)
+        subdir = tmp_path / "packages" / "app"
+        subdir.mkdir(parents=True)
+        block = cc.build_coding_workspace_block(subdir)
+        assert f"Root: {tmp_path.resolve()}" in block or "Root:" in block
+        assert f"- Current working directory: {subdir}" in block.splitlines()
+
 
 # ── project facts (verify-loop detection) ───────────────────────────────────
 

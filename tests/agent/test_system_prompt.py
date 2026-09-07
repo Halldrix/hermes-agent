@@ -163,6 +163,98 @@ class TestCodingContextBlock:
         assert "coding agent" not in _stable_prompt(agent)
 
 
+class TestWorktreeStablePrefix:
+    """#104610: the stable tier must be byte-identical across worktrees of one
+    project. The per-worktree cwd line rides in the workspace snapshot block
+    (context tier) instead of the stable environment hints, so a fleet running
+    one session per worktree keeps the whole stable + context-files prefix warm
+    on longest-prefix caches."""
+
+    _AGENTS_MD = "# AGENTS.md\n\nAlways run make before pushing.\n"
+
+    @staticmethod
+    def _git(*args, path, env):
+        import shutil
+        import subprocess
+        git_bin = shutil.which("git")
+        assert git_bin, "git is required for the worktree fixture"
+        subprocess.run(
+            [git_bin, "-C", str(path), *args],
+            check=True, env=env, capture_output=True,
+        )
+
+    def _worktree_pair(self, tmp_path):
+        import os
+        main = tmp_path / "main"
+        main.mkdir()
+        (main / "main.py").write_text("print('hi')\n")
+        env = {
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        self._git("init", "-q", "-b", "main", path=main, env=env)
+        self._git("add", "-A", path=main, env=env)
+        self._git("commit", "-q", "-m", "init commit", path=main, env=env)
+        wt = tmp_path / "wt"
+        self._git("worktree", "add", "--detach", str(wt), "HEAD", path=main, env=env)
+        return main, wt
+
+    def _parts_for(self, cwd, monkeypatch):
+        monkeypatch.setenv("TERMINAL_CWD", str(cwd))
+        agent = _make_agent(valid_tool_names=["read_file"], platform="cli")
+        with (
+            patch("agent.prompt_builder.load_soul_md", return_value=""),
+            patch(
+                "agent.prompt_builder.build_context_files_prompt",
+                return_value=self._AGENTS_MD,
+            ),
+        ):
+            return build_system_prompt_parts(agent)
+
+    def test_stable_tier_identical_across_worktrees(self, monkeypatch, tmp_path):
+        _, wt = self._worktree_pair(tmp_path)
+        main = tmp_path / "main"
+        parts_main = self._parts_for(main, monkeypatch)
+        parts_wt = self._parts_for(wt, monkeypatch)
+        # The regression: pre-fix the stable tier carried
+        # "Current working directory: <worktree>", diverging here.
+        assert "Current working directory:" not in parts_main["stable"]
+        assert "Current working directory:" not in parts_wt["stable"]
+        assert parts_main["stable"] == parts_wt["stable"]
+
+    def test_cwd_line_lives_in_workspace_block_per_side(self, monkeypatch, tmp_path):
+        main, wt = self._worktree_pair(tmp_path)
+        parts_main = self._parts_for(main, monkeypatch)
+        parts_wt = self._parts_for(wt, monkeypatch)
+        assert f"- Current working directory: {main}" in parts_main["context"].splitlines()
+        assert f"- Current working directory: {wt}" in parts_wt["context"].splitlines()
+        # Neither side leaks the other's worktree path anywhere.
+        full_main = "\n\n".join(parts_main.values())
+        full_wt = "\n\n".join(parts_wt.values())
+        assert str(wt) not in full_main
+        assert str(main) not in full_wt
+
+    def test_context_files_identical_after_divergence(self, monkeypatch, tmp_path):
+        main, wt = self._worktree_pair(tmp_path)
+        parts_main = self._parts_for(main, monkeypatch)
+        parts_wt = self._parts_for(wt, monkeypatch)
+        # NOTE: _join_tier strips each part, so match the stripped form.
+        agents_md = self._AGENTS_MD.strip()
+        assert parts_main["context"].count(agents_md) == 1
+        assert parts_wt["context"].count(agents_md) == 1
+
+    def test_no_workspace_keeps_cwd_in_stable_hints(self, monkeypatch, tmp_path):
+        # Sessions outside any workspace have no snapshot block to carry the
+        # line: the prompt must read exactly as before the move.
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        parts = self._parts_for(plain, monkeypatch)
+        assert "Workspace (snapshot" not in parts["context"]
+        assert f"Current working directory: {plain}" in parts["stable"]
+
+
 class TestExecutionGuidanceInjection:
     """Injection gate for OPENAI_MODEL_EXECUTION_GUIDANCE via
     ``agent.execution_guidance`` (auto/true/false/list).
