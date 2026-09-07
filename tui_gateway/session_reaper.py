@@ -184,17 +184,21 @@ def _reap_idle_sessions() -> None:
 def _reclaim_orphaned_leases() -> None:
     """Hand the registry the lease ids we still own so it can drop the rest.
 
-    The whole reclaim (vouch snapshot, registry mutation, detach) runs under
-    ``_session_resume_lock`` + ``_sessions_lock`` — the established order (resume
-    outer, sessions inner), with the registry ``FileLock`` innermost. No path in the
-    tree nests a registry lock under either session lock, so this cannot deadlock;
-    and every reconnect/rebind path takes ``_session_resume_lock``, so a same-``sid``
-    resurrection cannot slip between the snapshot and the mutation. See #104691.
+    Two lock windows, no sustained hold: the vouch snapshot runs under
+    ``_session_resume_lock`` + ``_sessions_lock`` (the established order), then the
+    locks are RELEASED for the multi-home registry I/O (a serial file sweep across
+    profile homes must never stall every submit/reconnect), and re-taken for the
+    detach. Re-entry safety comes from the detach's own re-validation: object
+    identity + receipt match + release-marking converge a same-``sid`` reconnect to a
+    fresh fenced lease instead of leaving an unfenced one. No path in the tree nests
+    a registry lock under either session lock, so no deadlock. See #104691.
     """
     try:
         from hermes_cli.active_sessions import release_orphaned_leases_receipt
         with _session_resume_lock, _sessions_lock:
-            receipt = release_orphaned_leases_receipt(_own_live_lease_ids())
+            live_lease_ids = _own_live_lease_ids()
+        receipt = release_orphaned_leases_receipt(live_lease_ids)
+        with _session_resume_lock, _sessions_lock:
             if receipt:
                 _detach_reclaimed_leases(receipt)
         if dropped := sum(len(ids) for ids in receipt.values()):
@@ -204,15 +208,17 @@ def _reclaim_orphaned_leases() -> None:
 
 
 def _detach_reclaimed_leases(receipt: dict) -> None:
-    """Pop exactly the lease objects the sweep provably deleted, by ``(home, lease_id)``.
+    """Pop exactly the lease objects the sweep provably deleted, keyed by state-path.
 
-    The receipt is the settlement proof: a record is detached only when its own home's
-    sweep reports its ``lease_id`` dropped AND the record still holds that exact lease
-    object. Records in failed/indeterminate homes, grace-preserved rows, foreign leases,
-    and races that already replaced the object stay attached and vouched. Detached
-    leases are marked released so the next submit claims a fresh fenced lease instead
-    of running lease-less. Caller holds ``_session_resume_lock`` + ``_sessions_lock``.
-    See #104691.
+    The receipt keys are the registry state-paths the sweep itself used, and each
+    lease pins its own ``state_path`` — the two sides are the SAME string from the
+    SAME writer, so no home-spelling divergence can split them. A record is detached
+    only when its lease's pinned state-path reports its ``lease_id`` dropped AND the
+    record still holds that exact object; a same-``sid`` reconnect racing the two
+    windows still converges: the released-marked object forces the next submit to
+    claim a fresh fenced lease. Records in failed/indeterminate homes and
+    grace-preserved rows stay attached and vouched. Caller holds
+    ``_session_resume_lock`` + ``_sessions_lock``. See #104691.
     """
     for sid, session in _sessions.items():
         if not isinstance(session, dict):
@@ -220,10 +226,12 @@ def _detach_reclaimed_leases(receipt: dict) -> None:
         lease = session.get("active_session_lease")
         if lease is None:
             continue
+        from hermes_cli.active_sessions import registry_state_key
         try:
             state_path = getattr(lease, "state_path", None)
-            home = str(state_path.parent.parent) if state_path is not None else ""
-            dropped_ids = receipt.get(home, set()) if home else set()
+            if state_path is None:
+                continue
+            dropped_ids = receipt.get(registry_state_key(state_path), set())
             if str(getattr(lease, "lease_id", "")) not in dropped_ids:
                 continue
             if session.get("active_session_lease") is not lease:

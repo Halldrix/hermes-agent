@@ -353,7 +353,9 @@ _SESSION_TTL_S = max(0.0, env_float("HERMES_TUI_SESSION_TTL_S", float(6 * 3600))
 # record vouches for its lease until its lane is provably gone AND idle past this floor.
 # Minutes-scale, not TTL-scale: the WS-orphan reaper already ends orderly disconnects in
 # seconds; the reclaim sweep only catches lanes that slipped it. See #104691.
-_LEASE_RECLAIM_IDLE_S = max(0.0, env_float("HERMES_TUI_LEASE_RECLAIM_IDLE_S", 300.0))
+# Config: dashboard.lease_reclaim_idle_s (config.yaml); the env var is the internal
+# override bridge, matching the sibling reaper knobs.
+_LEASE_RECLAIM_IDLE_S = _ws_orphan_setting("HERMES_TUI_LEASE_RECLAIM_IDLE_S", "lease_reclaim_idle_s", 300.0)
 _REAPER_SCAN_S = 300.0
 # Flush-on-kill budget + periodic incremental flush (piggybacks the reaper scan): a SIGTERM/SIGKILL
 # mid-update loses at most one flush interval of session state.

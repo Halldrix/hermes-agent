@@ -924,3 +924,53 @@ def test_reclaim_partial_home_failure_stays_attached(
     remaining = active_session_registry_snapshot(registry_home=worker_home)
     assert [e["session_id"] for e in remaining] == ["worker-session"]
     worker_lease.release()
+
+
+def test_reclaim_matches_by_state_path_not_home_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A home-spelling divergence must not split the settlement (#104710 review).
+
+    The receipt keys and each lease's pinned ``state_path`` come from the same writer,
+    so a symlinked/otherwise respelled profile home still settles: the dropped lease
+    is detached even when ``Path(lease.state_path).parent.parent`` spells the home
+    differently from ``get_default_hermes_root()``'s iteration.
+    """
+    real_root = active_sessions.get_default_hermes_root()
+    _pin_reclaim_env(monkeypatch)
+    if str(real_root.resolve()) != str(real_root):
+        respelled_root = real_root
+    else:
+        # A lease acquired against an OUT-OF-TREE alias of the real root (symlink,
+        # junction, client-supplied spelling) pins a state_path the sweep never
+        # enumerates. The receipt must still settle it via the real home's sweep —
+        # same registry file, same writer.
+        alias_parent = tmp_path / "aliases"
+        alias_parent.mkdir()
+        respelled_root = alias_parent / "respelled-home"
+        respelled_root.symlink_to(real_root, target_is_directory=True)
+    lease, message = try_acquire_active_session(
+        session_id="respelled-session",
+        surface="desktop",
+        config={},
+        metadata={"live_session_id": "runtime-r"},
+        track_liveness=True,
+        registry_home=respelled_root,
+    )
+    assert lease is not None and message is None
+    assert lease.state_path is not None
+    old = time.time() - 7200.0
+    monkeypatch.setattr(
+        server,
+        "_sessions",
+        {"ui": {**_dead_lane_record(lease, last_active=old, created_at=old),
+                "session_key": "respelled-session"}},
+    )
+
+    server._reclaim_orphaned_leases()
+
+    # Same registry file, same writer: the out-of-tree alias's lease settles via the
+    # real home's sweep — dropped row, detached object, released marker.
+    assert active_session_registry_snapshot(registry_home=respelled_root) == []
+    assert server._sessions["ui"].get("active_session_lease") is None
+    assert lease.released is True

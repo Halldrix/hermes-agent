@@ -636,12 +636,29 @@ def _release_orphaned_leases_in_home(registry_home: Path, live_lease_ids: set[st
         return dropped
 
 
-def release_orphaned_leases_receipt(live_lease_ids: set[str]) -> dict[str, set[str]]:
-    """Sweep every registry home; return the exact drops as ``{home: {lease_id}}``.
+def registry_state_key(state_path: str | Path) -> str:
+    """Canonical receipt key for a registry state-path: resolved + case-normalized.
 
-    Homes that fail (``OSError``) or are unreadable contribute NOTHING to the receipt:
-    their rows are indeterminate, not deleted, and callers must keep vouching for any
-    record homed there. An aggregate count cannot express that — see #104691.
+    Both the sweep (``_state_path(home)``) and each lease (pinned ``state_path``) can
+    spell the SAME registry file differently — a symlink, junction, or
+    client-supplied home alias. Resolving both sides through the filesystem makes
+    them converge; ``normcase`` folds Windows case/slash differences. See #104691.
+    """
+    try:
+        return os.path.normcase(str(Path(state_path).resolve()))
+    except OSError:
+        return os.path.normcase(str(state_path))
+
+
+def release_orphaned_leases_receipt(live_lease_ids: set[str]) -> dict[str, set[str]]:
+    """Sweep every registry home; return the exact drops as ``{state_key: {lease_id}}``.
+
+    Keys are ``registry_state_key(state_path)`` — the canonical (resolved,
+    case-normalized) registry file — so home-spelling mismatches (symlinks, case,
+    client-supplied profile homes) cannot split the settlement: both sides key the
+    same physical file. Homes that fail (``OSError``) or are unreadable contribute
+    NOTHING: their rows are indeterminate, not deleted, and callers must keep vouching
+    for any record homed there. An aggregate count cannot express that — see #104691.
     """
     root = get_default_hermes_root()
     homes = [root]
@@ -655,7 +672,7 @@ def release_orphaned_leases_receipt(live_lease_ids: set[str]) -> dict[str, set[s
     for home in homes:
         try:
             if dropped := _release_orphaned_leases_in_home(home, live_lease_ids):
-                receipt[str(home)] = dropped
+                receipt[registry_state_key(_state_path(home))] = dropped
         except OSError as exc:
             logger.debug("orphaned-lease sweep failed for %s: %s", home, exc)
     return receipt
