@@ -278,6 +278,9 @@ def _refence_resurrected_lane(sid: str, session: dict) -> None:
     detached so the next submit re-fences instead of running rowless. See #104691.
     """
     try:
+        # The session's own home spelling — the same value this lease was acquired
+        # with — so alias spellings resolve to the swept file at the OS level; an
+        # unresolvable spelling fails closed below and stays detached. See #104691.
         fresh, limit_message = _claim_active_session_slot(
             str(session.get("session_key") or sid), live_session_id=sid,
             surface=_session_source(session), profile_home=session.get("profile_home"))
