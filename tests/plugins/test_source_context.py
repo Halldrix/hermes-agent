@@ -62,6 +62,9 @@ def _clean_leaks():
             clear_execution(_LEAKS.pop())
         except Exception:
             pass
+    # Belt-and-suspenders: drop any lease a failing test left in the
+    # module-level table (tracked tokens already ran clear_execution above).
+    sc._LEASES.clear()
 
 
 def _bind(text="hello\nworld", frags=None, **kw):
@@ -249,109 +252,480 @@ class _Event:
 def test_clear_does_not_touch_process_environ(bound):
     import os
 
-    # P1-4 regression: turn-local clear must not mutate process-global
-    # session authority.  os.environ may hold a legacy/CLI fallback; the
-    # gateway moved to task-local ContextVars — a turn finishing must not
-    # delete a sibling turn's mirror or the process fallback.
-    os.environ["HERMES_SESSION_ID"] = "stale-from-prior-turn"
-    token = _LEAKS[-1]
+    # P1-4 regression: turn-local cleanup must not mutate process-global
+    # session authority. Two overlapping turn contexts A/B are created the
+    # way production creates them (task-local ContextVars via the gateway
+    # funnels); clearing A's execution must leave B's session identity and
+    # B's live source lease fully intact, and never touch os.environ.
+    from contextvars import copy_context
+    from datetime import datetime
+    import types
+
+    from gateway.config import GatewayConfig, Platform
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionEntry, SessionSource, build_session_context
+    from gateway.session_context import get_session_env
+    from plugins.source_context import bind_execution_for_event
+    from tools.registry import ToolRegistry
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.adapters = {}
+    source_b = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-b", user_id="user-b")
+    entry_b = SessionEntry(
+        session_key="sess-b", session_id="sess-b",
+        created_at=datetime.now(), updated_at=datetime.now(),
+    )
+
+    # A holds the fixture's lease from THIS test's context; a foreign context
+    # holding a copied binding must survive A's cleanup untouched.
+    token_a = _LEAKS[-1]
+
+    # os.environ may hold a legacy/CLI fallback; a turn finishing must not
+    # delete it or a sibling's mirror.
+    os.environ["HERMES_SESSION_ID"] = "legacy-cli-fallback"
     assert "HERMES_SESSION_ID" in os.environ
-    # simulate sibling turn B establishing the same mirror concurrently:
-    # A clearing must not wipe it.  We hold B's value in a second var.
-    os.environ["HERMES_SESSION_ID"] = "from-sibling-turn-B"
-    _LEAKS.remove(token)
-    clear_execution(token)
-    # process env must be untouched — only ContextVar + lease revocation
-    assert os.environ.get("HERMES_SESSION_ID") == "from-sibling-turn-B"
-    # cleanup the proc env this test dirtied
+
+    # Turn B: bind its session identity + source lease in a SEPARATE context,
+    # the way a concurrent turn's task context is isolated in production.
+    def _run_turn_b():
+        context_b = build_session_context(source_b, runner.config, entry_b)
+        tokens_b = runner._set_session_env(context_b)
+        token_b, exec_b = bind_execution_for_event(
+            event=types.SimpleNamespace(text="hello b", internal=False, source_fragments=(_frag(0, 7),)),
+            session_key="sess-b", run_generation=23,
+        )
+        return context_b, tokens_b, token_b, exec_b
+
+    context_b_out = copy_context()
+    _, tokens_b, token_b, exec_b = context_b_out.run(_run_turn_b)
+
+    def _probe_b(args, **kw):
+        saw_b["ctx"] = get_tool_source_context()
+        # Session identity as the production funnel writes it (HERMES_SESSION_KEY
+        # from context.session_key, HERMES_SESSION_CHAT_ID from the source).
+        saw_b["session_key"] = get_session_env("HERMES_SESSION_KEY")
+        saw_b["chat_id"] = get_session_env("HERMES_SESSION_CHAT_ID")
+        return "ok"
+
+    saw_b: dict = {}
+    registry = ToolRegistry()
+    registry.register("probe-b", "test", {"type": "object", "properties": {}}, _probe_b)
+
+    # Turn A finishes: clear A's execution through the production funnel.
+    _LEAKS.remove(token_a)
+    clear_execution(token_a)
+
+    # In B's context, B's source authority and session identity must be intact.
+    context_b_out.run(lambda: registry.dispatch("probe-b", {}))
+    assert saw_b["ctx"] is not None
+    assert saw_b["ctx"].execution_id == exec_b
+    assert saw_b["ctx"].complete is True
+    assert saw_b["session_key"] == "sess-b"
+    assert saw_b["chat_id"] == "chat-b"
+    # A's cleanup did not touch B's lease table entry
+    assert sc._lease_generation(exec_b) == 23
+
+    # Process env still holds the legacy fallback — no turn mutated it.
+    assert os.environ.get("HERMES_SESSION_ID") == "legacy-cli-fallback"
     os.environ.pop("HERMES_SESSION_ID", None)
+
+    # Cleanup B through the production funnel too (session vars + lease).
+    def _clear_b():
+        runner._clear_session_env(tokens_b + [("hermes_tool_source_context", token_b)])
+        return get_session_env("HERMES_SESSION_ID")
+
+    after = context_b_out.run(_clear_b)
+    assert after == ""  # cleared ("" not _UNSET) per clear_session_vars contract
+    assert sc._lease_generation(exec_b) is None  # B's lease released
+    assert os.environ.get("HERMES_SESSION_ID") is None
 
 
 def test_partial_coalescer_provenance_must_not_authorize():
-    # P1-1: hello without provenance + world with provenance -> no mutation auth
-    hello_text, world_text = "hello", "world"
-    hello_frags = ()  # text-bearing side with no provenance
-    world_frags = (_frag(0, 5, message_id="m2"),)
-    # simulate the coalescer rebase (hello + "\n" + world) without provenance flag
-    from dataclasses import replace
+    # P1-1 production path: real coalescer → bind → Registry.dispatch denial
+    from gateway.platforms.base import merge_pending_message_event
+    from gateway.platforms.event import MessageEvent, MessageType
+    from plugins.source_context import get_tool_source_context, source_context_allows_mutation
+    from tools.registry import ToolRegistry
 
-    world_event = _Event(world_text)
-    world_event.source_fragments = world_frags
-    hello_event = _Event(hello_text)
-    hello_event.source_fragments = hello_frags
-    # use the helper that propagates incomplete: rebase keeps span but marks incomplete
-    from plugins.source_context import rebase_event_fragments
+    hello = MessageEvent(text="hello", message_type=MessageType.TEXT)
+    # hello intentionally without note_single_source → missing provenance
+    world = MessageEvent(text="world", message_type=MessageType.TEXT)
+    note_single_source(world, namespace="weixin", message_id="m2", reference="r2")
+    pending: dict = {}
+    merge_pending_message_event(pending, "key", hello)
+    merge_pending_message_event(pending, "key", world, merge_text=True)
+    merged = pending["key"]
+    assert merged.text == "hello\nworld"
+    # real turn bind on the coalesced event
+    from plugins.source_context import bind_execution_for_event
 
-    hello_event.text = world_text  # start as second only for helper test
-    hello_event.text = hello_text
-    hello_event.source_fragments = hello_frags
-    merged_frags, merge_complete = __import__("plugins.source_context", fromlist=["merge_append_fragments"]).merge_append_fragments(
-        hello_text, hello_frags, world_text, world_frags, hello_text + "\n" + world_text,
+    token, _ = bind_execution_for_event(
+        event=merged, session_key="sess-partial", run_generation=11
     )
-    assert merge_complete is False
-    # bind the merged presentation — must stay non-authorizing
-    text = hello_text + "\n" + world_text
-    merged = tuple(replace(f, complete=False) for f in merged_frags) if merged_frags else ()
-    token, _ = _bind(text, merged)
     try:
-        with scoped_tool_call():
+        registry = ToolRegistry()
+
+        saw: dict = {}
+
+        def _probe(args, **kw):
             ctx = get_tool_source_context()
-            assert ctx is not None
-            assert ctx.complete is False
-            assert source_context_allows_mutation(ctx) is False
-            assert source_context_allows_mutation(ctx, text=text) is False
+            saw["ctx"] = ctx
+            return "ok" if source_context_allows_mutation(ctx, text=merged.text) else "deny"
+
+        registry.register("probe-partial", "test", {"type": "object", "properties": {}}, _probe)
+        with __import__("plugins.source_context", fromlist=["scoped_tool_call"]).scoped_tool_call():
+            out = registry.dispatch("probe-partial", {})
+            # dispatch result is normalized; handler returned "deny"
+            assert out == "deny" or "deny" in str(out)
+            ctx = saw.get("ctx")
+            assert ctx is not None and ctx.complete is False
     finally:
-        if token in _LEAKS:
-            _LEAKS.remove(token)
-        clear_execution(token)
+        if token is not None:
+            try:
+                clear_execution(token)
+            except Exception:
+                pass
 
 
 def test_pre_gateway_dispatch_rewrite_must_invalidate():
-    # P1-2: dataclasses.replace(event, text=rewritten) + invalidate
-    import dataclasses
-
+    # P1-2 production path: real _hm_pre_gateway_dispatch_hook → bind →
+    # Registry.dispatch denies mutation from inside the handler. The rewrite
+    # payload is longer than the original so stale spans would stay in bounds
+    # if the production invalidation were removed.
     from gateway.platforms.event import MessageEvent, MessageType
+    from tools.registry import ToolRegistry
 
     event = MessageEvent(text="hello", message_type=MessageType.TEXT)
     note_single_source(event, namespace="wecom", message_id="m1", reference="r1")
-    rewritten = dataclasses.replace(event, text="REWRITTEN PAYLOAD THAT IS LONG ENOUGH")
-    invalidate_source_fragments(rewritten)
-    token, _ = _bind(rewritten.text, tuple(rewritten.source_fragments), session_key="sess-1", run_generation=7)
+    from gateway.run_inbound import GatewayInboundMixin
+
+    mixin = object.__new__(GatewayInboundMixin)
+    mixin.session_store = None
+    import types
+
+    source = types.SimpleNamespace(
+        platform=types.SimpleNamespace(value="telegram"), chat_id="c1"
+    )
+    # hook returns rewrite with long payload
+    import hermes_cli.lifecycle as lc
+
+    real_invoke = getattr(lc, "invoke_hook", None)
     try:
-        with scoped_tool_call():
-            ctx = get_tool_source_context()
-            assert ctx is not None
-            assert ctx.complete is False
-            assert source_context_allows_mutation(ctx) is False
+        lc.invoke_hook = lambda name, **kw: [
+            {"action": "rewrite", "text": "REWRITTEN PAYLOAD THAT IS LONG ENOUGH FOR SPAN"}
+        ] if name == "pre_gateway_dispatch" else []
+        rewritten = mixin._hm_pre_gateway_dispatch_hook(event, source)
     finally:
-        if token in _LEAKS:
-            _LEAKS.remove(token)
+        if real_invoke is not None:
+            lc.invoke_hook = real_invoke
+        else:
+            try:
+                delattr(lc, "invoke_hook")
+            except Exception:
+                pass
+    assert rewritten is not None
+    assert rewritten.text.startswith("REWRITTEN")
+    from plugins.source_context import bind_execution_for_event
+
+    token, _ = bind_execution_for_event(
+        event=rewritten, session_key="sess-hook", run_generation=7
+    )
+    try:
+        registry = ToolRegistry()
+        saw: dict = {}
+
+        def _probe(args, **kw):
+            saw["ctx"] = get_tool_source_context()
+            saw["mutation"] = source_context_allows_mutation(saw["ctx"], text=rewritten.text)
+            return "probe-done"
+
+        registry.register("probe-hook-rewrite", "test", {"type": "object", "properties": {}}, _probe)
+        out = registry.dispatch("probe-hook-rewrite", {})
+        assert out == "probe-done" or "probe-done" in str(out)
+        # dispatch installs the scope itself; the handler observed the record
+        assert saw["ctx"] is not None and saw["ctx"].complete is False
+        assert saw["mutation"] is False
+    finally:
         clear_execution(token)
 
 
 def test_auto_skill_prefix_shift_exposes_post_shift_context():
-    # P1-3: shift (prefix injection) must be visible through the bound context
-    from gateway.platforms.event import MessageEvent, MessageType
-    from plugins.source_context import shift_event_fragments
+    # P1-3 production path: a real new-session auto-skill turn driven through
+    # the real GatewayRunner._hmwa_prepare_turn; the source context bound by
+    # production must already describe the post-shift presented text, and
+    # Registry.dispatch must observe it live. Non-provenance I/O neighbors
+    # (history load, hygiene, inbound normalization) are stubbed; the
+    # auto-skill rewrite and the bind stay the production code under test.
+    import asyncio
+    import types
+    from datetime import datetime
 
-    event = MessageEvent(text="user hello", message_type=MessageType.TEXT)
+    from gateway.config import GatewayConfig, Platform
+    from gateway.platforms.event import MessageEvent, MessageType
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionEntry, SessionSource
+    from tools.registry import ToolRegistry
+
+    event = MessageEvent(text="user hello", message_type=MessageType.TEXT, auto_skill="my-skill")
     note_single_source(event, namespace="wecom", message_id="m1", reference="r1")
-    prefix = "[skill: my-skill] payload\n\n"
-    pre = event.text or ""
-    event.text = prefix + pre
-    shift_event_fragments(event, len(event.text) - len(pre))
-    token, _ = _bind(event.text, tuple(event.source_fragments), session_key="sess-1", run_generation=9)
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.adapters = {}
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="c1", user_id="u1")
+
+    import agent.skill_commands as scm
+
+    real_load, real_build = getattr(scm, "_load_skill_payload", None), getattr(scm, "_build_skill_message", None)
+
+    # Force the new-session branch without store I/O (event provenance is not read here).
+    async def _fake_open_session(session_entry, session_key, src):
+        return False, True
+
+    runner._hmwa_open_session = _fake_open_session
+    runner._pinned_session_context_prompt = lambda context, redact_pii, session_key: ""
+    # Turn lease: no-op registry avoids real lock I/O (serialization is not provenance).
+    async def _fake_acquire_turn_lease(_quick_key, _run_generation, _session_entry, _session_env_tokens):
+        return None
+
+    async def _fake_mark_durable(*a, **kw):
+        return None
+
+    runner._hmwa_acquire_turn_lease = _fake_acquire_turn_lease
+    runner._mark_durable_active_turn = _fake_mark_durable
+
+    # Transcript + hygiene + inbound normalization: non-provenance I/O neighbors.
+    async def _fake_hygiene(event, source, session_entry, session_key, history, _quick_key, _run_generation):
+        return history
+
+    async def _fake_first_contact(source, history, notes):
+        return None
+
+    async def _fake_prepare_text(event, source, history, session_key):
+        return event.text
+
+    async def _fake_load_transcript(session_id):
+        return [{"role": "user", "content": "earlier"}]
+
+    entry = SessionEntry(
+        session_key="sess-9", session_id="sess-9",
+        created_at=datetime.now(), updated_at=datetime.now(),
+    )
+    runner.session_store = object()  # identity anchor for the async facade check
+    runner._async_session_store = types.SimpleNamespace(
+        _store=runner.session_store, load_transcript=_fake_load_transcript
+    )
+    runner._hmwa_run_session_hygiene = _fake_hygiene
+    runner._hmwa_first_contact_notes = _fake_first_contact
+    runner._voice_channel_sidecar_note = lambda event, source, session_key: None
+    runner._prepare_profile_scoped_inbound_message_text = _fake_prepare_text
+    runner._set_pending_turn_sidecar_notes = lambda session_key, notes: None
+    runner._bind_adapter_run_generation = lambda *a, **kw: None
+    runner._adapter_for_source = lambda source: None
+
     try:
-        with scoped_tool_call():
-            ctx = get_tool_source_context()
-            assert ctx is not None
-            assert ctx.complete is True
-            assert ctx.text_hash != ""
-            assert ctx.fragments[0].start == len(prefix)
+        def _fake_load(name, task_id=None):
+            return ({"name": name}, "/fake/dir", name)
+
+        def _fake_build(skill, skill_dir, header):
+            return f"[skill: {skill['name']}] payload"
+
+        scm._load_skill_payload = _fake_load
+        scm._build_skill_message = _fake_build
+
+        # One turn = one task context (production topology): prepare binds
+        # the session-level ContextVar and the later dispatch in the SAME
+        # task reads it live.
+        registry = ToolRegistry()
+        seen: dict = {}
+
+        def _probe(args, **kw):
+            seen["ctx"] = get_tool_source_context()
+            return "ok"
+
+        registry.register("probe-skill", "test", {"type": "object", "properties": {}}, _probe)
+
+        async def _turn():
+            # Production topology: prepare → dispatch; the surrounding turn
+            # releases the lease on exit even when assertions fail below.
+            tokens = None
+            try:
+                prepared, tokens = await runner._hmwa_prepare_turn(
+                    event, source, entry, "sess-9", "quick-9", 9
+                )
+                out = registry.dispatch("probe-skill", {})
+                return prepared, tokens, out
+            finally:
+                if tokens is not None:
+                    runner._clear_session_env(tokens)
+
+        prepared, tokens, out = asyncio.run(_turn())
     finally:
-        if token in _LEAKS:
-            _LEAKS.remove(token)
-        clear_execution(token)
+        if real_load is not None:
+            scm._load_skill_payload = real_load
+        else:
+            try:
+                delattr(scm, "_load_skill_payload")
+            except Exception:
+                pass
+        if real_build is not None:
+            scm._build_skill_message = real_build
+        else:
+            try:
+                delattr(scm, "_build_skill_message")
+            except Exception:
+                pass
+
+    assert prepared is not None and not isinstance(prepared, str)
+    assert prepared.message_text.endswith("user hello")
+    # hash/spans describe the presented text AFTER the trusted skill prefix
+    ctx = seen.get("ctx")
+    assert ctx is not None
+    prefix_len = len("[skill: my-skill] payload\n\n")
+    assert ctx.text_hash != ""
+    assert ctx.text_hash != sc._hash_text("user hello")
+    assert ctx.text_hash == sc._hash_text(event.text)
+    assert ctx.complete is True
+    assert ctx.fragments[0].start == prefix_len
+    assert event.text[prefix_len:] == "user hello"
+    assert out == "ok" or "ok" in str(out)
+
+
+def test_auto_skill_multi_prefix_shift_exposes_post_shift_context():
+    # P1-3 production path, multi-skill variant: adapters bind auto_skill as a
+    # list in production (e.g. Slack/Discord), so the combined prefix is the
+    # concatenation of every payload. The shifted fragment start must be the
+    # sum of both skill prefixes, over the real _hmwa_prepare_turn.
+    import asyncio
+    import types
+    from datetime import datetime
+
+    from gateway.config import GatewayConfig, Platform
+    from gateway.platforms.event import MessageEvent, MessageType
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionEntry, SessionSource
+    from tools.registry import ToolRegistry
+
+    event = MessageEvent(
+        text="user hello", message_type=MessageType.TEXT,
+        auto_skill=["skill-a", "skill-b"],
+    )
+    note_single_source(event, namespace="wecom", message_id="m1", reference="r1")
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.adapters = {}
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="c1", user_id="u1")
+
+    import agent.skill_commands as scm
+
+    real_load, real_build = getattr(scm, "_load_skill_payload", None), getattr(scm, "_build_skill_message", None)
+
+    async def _fake_open_session(session_entry, session_key, src):
+        return False, True
+
+    runner._hmwa_open_session = _fake_open_session
+    runner._pinned_session_context_prompt = lambda context, redact_pii, session_key: ""
+
+    async def _fake_acquire_turn_lease(_quick_key, _run_generation, _session_entry, _session_env_tokens):
+        return None
+
+    async def _fake_mark_durable(*a, **kw):
+        return None
+
+    runner._hmwa_acquire_turn_lease = _fake_acquire_turn_lease
+    runner._mark_durable_active_turn = _fake_mark_durable
+
+    async def _fake_hygiene(event, source, session_entry, session_key, history, _quick_key, _run_generation):
+        return history
+
+    async def _fake_first_contact(source, history, notes):
+        return None
+
+    async def _fake_prepare_text(event, source, history, session_key):
+        return event.text
+
+    async def _fake_load_transcript(session_id):
+        return []
+
+    entry = SessionEntry(
+        session_key="sess-m", session_id="sess-m",
+        created_at=datetime.now(), updated_at=datetime.now(),
+    )
+    # Anchor identity for the async_session_store facade check (the property
+    # rebuilds the facade unless _store matches runner.session_store).
+    runner.session_store = object()
+    runner._async_session_store = types.SimpleNamespace(
+        _store=runner.session_store, load_transcript=_fake_load_transcript
+    )
+    runner._hmwa_run_session_hygiene = _fake_hygiene
+    runner._hmwa_first_contact_notes = _fake_first_contact
+    runner._voice_channel_sidecar_note = lambda event, source, session_key: None
+    runner._prepare_profile_scoped_inbound_message_text = _fake_prepare_text
+    runner._set_pending_turn_sidecar_notes = lambda session_key, notes: None
+    runner._bind_adapter_run_generation = lambda *a, **kw: None
+    runner._adapter_for_source = lambda source: None
+
+    try:
+        def _fake_load(name, task_id=None):
+            return ({"name": name}, "/fake/dir", name)
+
+        def _fake_build(skill, skill_dir, header):
+            return f"[skill: {skill['name']}] payload"
+
+        scm._load_skill_payload = _fake_load
+        scm._build_skill_message = _fake_build
+
+        registry = ToolRegistry()
+        seen: dict = {}
+
+        def _probe(args, **kw):
+            seen["ctx"] = get_tool_source_context()
+            return "ok"
+
+        registry.register("probe-multi-skill", "test", {"type": "object", "properties": {}}, _probe)
+
+        async def _turn():
+            tokens = None
+            try:
+                prepared, tokens = await runner._hmwa_prepare_turn(
+                    event, source, entry, "sess-m", "quick-m", 4
+                )
+                out = registry.dispatch("probe-multi-skill", {})
+                return prepared, tokens, out
+            finally:
+                if tokens is not None:
+                    runner._clear_session_env(tokens)
+
+        prepared, tokens, out = asyncio.run(_turn())
+    finally:
+        if real_load is not None:
+            scm._load_skill_payload = real_load
+        else:
+            try:
+                delattr(scm, "_load_skill_payload")
+            except Exception:
+                pass
+        if real_build is not None:
+            scm._build_skill_message = real_build
+        else:
+            try:
+                delattr(scm, "_build_skill_message")
+            except Exception:
+                pass
+
+    assert prepared is not None and not isinstance(prepared, str)
+    ctx = seen.get("ctx")
+    assert ctx is not None
+    # Combined prefix = both payloads joined before the user text; the shift
+    # must cover the whole combined prefix, not just the first payload.
+    prefix_len = len("[skill: skill-a] payload\n\n[skill: skill-b] payload\n\n")
+    assert ctx.text_hash == sc._hash_text(event.text)
+    assert ctx.complete is True
+    assert ctx.fragments[0].start == prefix_len
+    assert event.text[prefix_len:] == "user hello"
+    assert out == "ok" or "ok" in str(out)
 
 
 def test_abort_event_set_on_clear():
