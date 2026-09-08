@@ -188,15 +188,31 @@ def _reclaim_orphaned_leases() -> None:
     ``_session_resume_lock`` + ``_sessions_lock`` (the established order), then the
     locks are RELEASED for the multi-home registry I/O (a serial file sweep across
     profile homes must never stall every submit/reconnect), and re-taken for the
-    detach. Re-entry safety comes from the detach's own re-validation: object
-    identity + receipt match + release-marking converge a same-``sid`` reconnect to a
-    fresh fenced lease instead of leaving an unfenced one. No path in the tree nests
-    a registry lock under either session lock, so no deadlock. See #104691.
+    detach. Idle ticks (no reclaimable attached lease) skip the sweep entirely, so
+    the common case performs zero registry I/O. Re-entry safety comes from the
+    detach's own re-validation plus immediate re-fencing: a record that turned live
+    between the snapshot and the mutation is detached from its deleted row and
+    re-claims a fresh fenced lease in the same critical section, so a foreign
+    backend stays refused. Residual window: a foreign acquire landing exactly
+    between the sweep's file-lock release and the repair acquire still wins —
+    then the repair refuses to attach and the record stays detached (fail-closed;
+    the next submit re-fences instead of running rowless). No path nests a sweep
+    file lock under either session lock; only the single targeted repair acquire
+    runs with the session locks held (FileLock innermost, the established order).
+    See #104691.
     """
     try:
         from hermes_cli.active_sessions import release_orphaned_leases_receipt
         with _session_resume_lock, _sessions_lock:
             live_lease_ids = _own_live_lease_ids()
+            has_candidate = any(
+                isinstance(session, dict)
+                and (lease := session.get("active_session_lease")) is not None
+                and str(getattr(lease, "lease_id", "")) not in live_lease_ids
+                for session in _sessions.values()
+            )
+            if not has_candidate:
+                return
         receipt = release_orphaned_leases_receipt(live_lease_ids)
         with _session_resume_lock, _sessions_lock:
             if receipt:
@@ -214,10 +230,14 @@ def _detach_reclaimed_leases(receipt: dict) -> None:
     lease pins its own ``state_path`` — the two sides are the SAME string from the
     SAME writer, so no home-spelling divergence can split them. A record is detached
     only when its lease's pinned state-path reports its ``lease_id`` dropped AND the
-    record still holds that exact object; a same-``sid`` reconnect racing the two
-    windows still converges: the released-marked object forces the next submit to
-    claim a fresh fenced lease. Records in failed/indeterminate homes and
-    grace-preserved rows stay attached and vouched. Caller holds
+    record still holds that exact object. A record that turned live between the
+    snapshot and the mutation (same-``sid`` reconnect, turn admitted on the old
+    attached lease) is immediately re-fenced in this same critical section: the
+    stale object is detached + released and a fresh fenced lease is claimed and
+    attached, so a foreign backend stays refused. When the repair acquire fails
+    (a foreign row landed first) the record stays detached and fail-closed — the
+    next submit re-fences instead of running rowless. Records in failed/indeterminate
+    homes and grace-preserved rows stay attached and vouched. Caller holds
     ``_session_resume_lock`` + ``_sessions_lock``. See #104691.
     """
     for sid, session in _sessions.items():
@@ -239,9 +259,36 @@ def _detach_reclaimed_leases(receipt: dict) -> None:
             del session["active_session_lease"]
             with contextlib.suppress(Exception):
                 lease.released = True
+            try:
+                if not _lane_is_reclaimable(sid, session, time.time()):
+                    _refence_resurrected_lane(sid, session)
+            except Exception:
+                logger.debug("reclaimed-lease refence failed closed", exc_info=True)
         except Exception:
             logger.debug("reclaimed-lease detach failed closed", exc_info=True)
             continue
+
+
+def _refence_resurrected_lane(sid: str, session: dict) -> None:
+    """Claim a fresh fenced lease for a record that turned live mid-reclaim.
+
+    Caller holds ``_session_resume_lock`` + ``_sessions_lock``; the single
+    targeted acquire nests its registry ``FileLock`` innermost (the established
+    order — never the multi-home sweep). On refusal or error the record stays
+    detached so the next submit re-fences instead of running rowless. See #104691.
+    """
+    try:
+        fresh, limit_message = _claim_active_session_slot(
+            str(session.get("session_key") or sid), live_session_id=sid,
+            surface=_session_source(session), profile_home=session.get("profile_home"))
+    except Exception as exc:
+        logger.warning("Re-fencing resurrected lane %s failed; staying detached: %s", sid, exc)
+        return
+    if fresh is None:
+        logger.warning(
+            "Re-fencing resurrected lane %s refused (%s); staying detached", sid, limit_message)
+        return
+    session["active_session_lease"] = fresh
 
 
 # Soft LRU cap on in-memory sessions: the TTL reaper only frees sessions idle for hours, so a heavy reconnecting

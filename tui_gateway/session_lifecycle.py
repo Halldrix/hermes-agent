@@ -114,9 +114,15 @@ def _lane_is_reclaimable(sid: str, session: dict, now: float) -> bool:
             active = session.get("last_active") or 0.0
             if not created or not active:
                 return False
-            if now - float(active) <= _LEASE_RECLAIM_IDLE_S:
+            try:
+                active_f = float(active)
+                created_f = float(created)
+            except (TypeError, ValueError):
+                logger.debug("lease-reclaim lane clock unparsable; keeping vouch")
                 return False
-            if now - float(created) <= _LEASE_RECLAIM_IDLE_S:
+            if now - active_f <= _LEASE_RECLAIM_IDLE_S:
+                return False
+            if now - created_f <= _LEASE_RECLAIM_IDLE_S:
                 return False
         ready = session.get("agent_ready")
         if ready is not None and not ready.is_set() and not session.get("lazy"):
@@ -127,18 +133,21 @@ def _lane_is_reclaimable(sid: str, session: dict, now: float) -> bool:
         return False
 
 
-def _own_live_lease_ids(*, exclude=None) -> set[str]:
+def _own_live_lease_ids(*, exclude=None, include_dead_lanes: bool = False) -> set[str]:
     """Snapshot leases still backed by this process's live session records.
 
     Records whose lane is gone (see :func:`_lane_is_reclaimable`) do not vouch: the
     orphan-lease sweep treats their leases as unowned instead of deadlocking against
-    a zombie-but-resident record. See #104691.
+    a zombie-but-resident record. Pass ``include_dead_lanes=True`` for the old
+    all-records vouch — the finalize-time liveness guards must preserve sibling
+    rows (they settle no receipt and detach nothing), so only the reaper sweep
+    reclaims. See #104691.
     """
     now = time.time()
     with _sessions_lock:
         return {str(lease.lease_id) for sid, session in _sessions.items()
                 if (lease := session.get("active_session_lease")) is not None and lease is not exclude
-                and not _lane_is_reclaimable(sid, session, now)}
+                and (include_dead_lanes or not _lane_is_reclaimable(sid, session, now))}
 
 
 @contextlib.contextmanager
@@ -154,7 +163,10 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
         return
     stack = contextlib.ExitStack()
     active: list = []
-    own_live_lease_ids = _own_live_lease_ids(exclude=lease)
+    # All-records vouch: finalizing A must never delete a dead-lane sibling B's
+    # row — this path settles no receipt and detaches nothing, so B would keep a
+    # rowless attached lease. Only the reaper sweep reclaims (receipt + detach).
+    own_live_lease_ids = _own_live_lease_ids(exclude=lease, include_dead_lanes=True)
 
     def _enter() -> None:
         stack.close()  # drop anything a half-failed previous attempt left behind
