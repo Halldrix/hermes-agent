@@ -1,7 +1,9 @@
 """Orphan callbacks own only their detachment, never a later reconnect."""
 
-from contextlib import nullcontext
+import contextlib
 import threading
+import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -206,3 +208,82 @@ def test_reconnect_cannot_cross_orphan_interrupt_claim(monkeypatch, path, claim)
     assert session["transport"] is server._detached_ws_transport
     assert sid in server._pending_ws_reaps
     assert session["queued_prompt"] is None
+
+
+class _ClosedTransport:
+    _closed = True
+
+
+def _lease_record(lease, transport):
+    old = time.time() - 7200.0
+    return {
+        "active_session_lease": lease,
+        "transport": transport,
+        "running": False,
+        "last_active": old,
+        "created_at": old,
+        "agent": None,
+        "agent_ready": None,
+        "history": [],
+        "history_lock": threading.Lock(),
+        "profile_home": None,
+        "session_key": "zombie-session",
+        "slash_worker": None,
+        "source": "desktop",
+    }
+
+
+@pytest.mark.parametrize("shape", ["detached_sentinel", "closed_transport"])
+def test_canonical_repair_recovers_dead_lane_lease(monkeypatch, shape):
+    """A dead lane whose transport is provably gone must converge to submittable (#104691).
+
+    `_repair_missing_ws_orphan_reaps()` (the #104704 slice preserved by #104857)
+    re-arms the canonical WS-orphan reap for both dead-transport shapes — the
+    detached sentinel with a missing timer and a resident real transport whose
+    `_closed` state is true — so the session is reaped, its lease released, and
+    the session id becomes acquirable again instead of refusing forever with
+    `SESSION_NOT_OWNED`.
+    """
+    from hermes_cli.active_sessions import (
+        active_session_registry_snapshot,
+        try_acquire_active_session,
+    )
+
+    lease, message = try_acquire_active_session(
+        session_id="zombie-session",
+        surface="desktop",
+        config={},
+        metadata={"live_session_id": "runtime-a"},
+        track_liveness=True,
+    )
+    assert lease is not None and message is None
+    transport = (
+        server._detached_ws_transport if shape == "detached_sentinel" else _ClosedTransport()
+    )
+    record = _lease_record(lease, transport)
+    monkeypatch.setattr(server, "_sessions", {"ui": record})
+    monkeypatch.setattr(server, "_pending_ws_reaps", {})
+
+    try:
+        server._repair_missing_ws_orphan_reaps()
+        timer = server._pending_ws_reaps.get("ui")
+        assert timer is not None
+        timer.cancel()
+        timer.function()
+        assert getattr(lease, "released", False) is True
+        assert "ui" not in server._sessions
+        assert active_session_registry_snapshot() == []
+        fresh, refusal = try_acquire_active_session(
+            session_id="zombie-session",
+            surface="desktop",
+            config={},
+            metadata={"live_session_id": "runtime-b"},
+            track_liveness=True,
+        )
+        assert fresh is not None and refusal is None
+        fresh.release()
+    finally:
+        with contextlib.suppress(Exception):
+            lease.release()
+        server._sessions.pop("ui", None)
+        server._pending_ws_reaps.pop("ui", None)
