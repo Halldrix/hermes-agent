@@ -253,10 +253,11 @@ def test_clear_does_not_touch_process_environ(bound):
     import os
 
     # P1-4 regression: turn-local cleanup must not mutate process-global
-    # session authority. Two overlapping turn contexts A/B are created the
-    # way production creates them (task-local ContextVars via the gateway
-    # funnels); clearing A's execution must leave B's session identity and
-    # B's live source lease fully intact, and never touch os.environ.
+    # session authority. Turns A and B are created the way production creates
+    # them — each in its own task context, binding session identity through
+    # the real _set_session_env funnel and a source lease with the token
+    # piggybacked onto the session-env tokens — and A is cleared by running
+    # the real _clear_session_env funnel IN A's context while B stays live.
     from contextvars import copy_context
     from datetime import datetime
     import types
@@ -271,34 +272,48 @@ def test_clear_does_not_touch_process_environ(bound):
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig()
     runner.adapters = {}
-    source_b = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-b", user_id="user-b")
-    entry_b = SessionEntry(
-        session_key="sess-b", session_id="sess-b",
-        created_at=datetime.now(), updated_at=datetime.now(),
-    )
 
-    # A holds the fixture's lease from THIS test's context; a foreign context
-    # holding a copied binding must survive A's cleanup untouched.
-    token_a = _LEAKS[-1]
+    def _make_turn(session_key, chat_id, user_id, text, generation):
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id=chat_id, user_id=user_id)
+        entry = SessionEntry(
+            session_key=session_key, session_id=session_key,
+            created_at=datetime.now(), updated_at=datetime.now(),
+        )
+
+        def _run():
+            # Production funnel: session identity via _set_session_env, then
+            # the source-context bind with its token piggybacked so the turn
+            # exit funnel releases both together.
+            context = build_session_context(source, runner.config, entry)
+            tokens = runner._set_session_env(context)
+            token, exec_id = bind_execution_for_event(
+                event=types.SimpleNamespace(text=text, internal=False, source_fragments=(_frag(0, len(text)),)),
+                session_key=session_key, run_generation=generation,
+            )
+            tokens.append(("hermes_tool_source_context", token))
+            return context, tokens, token, exec_id
+
+        return _run
+
+    # Turn A (fixture already holds A's raw bind token; this rebuild gives A
+    # the same production shape B has, in A's own context).
+    _run_a = _make_turn("sess-a", "chat-a", "user-a", "hello a", 7)
+    context_a = copy_context()
+    _, tokens_a, token_a, exec_a = context_a.run(_run_a)
+    _LEAKS.append(token_a)
+
+    # Turn B, overlapping and isolated in its own task context.
+    _run_b = _make_turn("sess-b", "chat-b", "user-b", "hello b", 23)
+    context_b = copy_context()
+    _, tokens_b, token_b, exec_b = context_b.run(_run_b)
+    _LEAKS.append(token_b)
 
     # os.environ may hold a legacy/CLI fallback; a turn finishing must not
     # delete it or a sibling's mirror.
     os.environ["HERMES_SESSION_ID"] = "legacy-cli-fallback"
     assert "HERMES_SESSION_ID" in os.environ
 
-    # Turn B: bind its session identity + source lease in a SEPARATE context,
-    # the way a concurrent turn's task context is isolated in production.
-    def _run_turn_b():
-        context_b = build_session_context(source_b, runner.config, entry_b)
-        tokens_b = runner._set_session_env(context_b)
-        token_b, exec_b = bind_execution_for_event(
-            event=types.SimpleNamespace(text="hello b", internal=False, source_fragments=(_frag(0, 7),)),
-            session_key="sess-b", run_generation=23,
-        )
-        return context_b, tokens_b, token_b, exec_b
-
-    context_b_out = copy_context()
-    _, tokens_b, token_b, exec_b = context_b_out.run(_run_turn_b)
+    saw_b: dict = {}
 
     def _probe_b(args, **kw):
         saw_b["ctx"] = get_tool_source_context()
@@ -308,16 +323,21 @@ def test_clear_does_not_touch_process_environ(bound):
         saw_b["chat_id"] = get_session_env("HERMES_SESSION_CHAT_ID")
         return "ok"
 
-    saw_b: dict = {}
     registry = ToolRegistry()
     registry.register("probe-b", "test", {"type": "object", "properties": {}}, _probe_b)
 
-    # Turn A finishes: clear A's execution through the production funnel.
+    # Turn A finishes: clear A through the production funnel, IN A's context,
+    # while B remains live — exactly the overlapping-turn lifecycle seam.
     _LEAKS.remove(token_a)
-    clear_execution(token_a)
+    def _clear_a():
+        runner._clear_session_env(tokens_a)
+        return get_session_env("HERMES_SESSION_KEY")
+    after_a = context_a.run(_clear_a)
+    assert after_a == ""  # A's own session identity cleared by the funnel
+    assert sc._lease_generation(exec_a) is None  # A's lease released by the funnel
 
     # In B's context, B's source authority and session identity must be intact.
-    context_b_out.run(lambda: registry.dispatch("probe-b", {}))
+    context_b.run(lambda: registry.dispatch("probe-b", {}))
     assert saw_b["ctx"] is not None
     assert saw_b["ctx"].execution_id == exec_b
     assert saw_b["ctx"].complete is True
@@ -332,10 +352,11 @@ def test_clear_does_not_touch_process_environ(bound):
 
     # Cleanup B through the production funnel too (session vars + lease).
     def _clear_b():
-        runner._clear_session_env(tokens_b + [("hermes_tool_source_context", token_b)])
+        runner._clear_session_env(tokens_b)
         return get_session_env("HERMES_SESSION_ID")
 
-    after = context_b_out.run(_clear_b)
+    _LEAKS.remove(token_b)
+    after = context_b.run(_clear_b)
     assert after == ""  # cleared ("" not _UNSET) per clear_session_vars contract
     assert sc._lease_generation(exec_b) is None  # B's lease released
     assert os.environ.get("HERMES_SESSION_ID") is None
@@ -374,12 +395,14 @@ def test_partial_coalescer_provenance_must_not_authorize():
             return "ok" if source_context_allows_mutation(ctx, text=merged.text) else "deny"
 
         registry.register("probe-partial", "test", {"type": "object", "properties": {}}, _probe)
-        with __import__("plugins.source_context", fromlist=["scoped_tool_call"]).scoped_tool_call():
-            out = registry.dispatch("probe-partial", {})
-            # dispatch result is normalized; handler returned "deny"
-            assert out == "deny" or "deny" in str(out)
-            ctx = saw.get("ctx")
-            assert ctx is not None and ctx.complete is False
+        # No outer scope here: Registry.dispatch installs the production
+        # scoped_tool_call itself, and this regression must fail if that
+        # wrapper is ever removed (the handler would observe no live record).
+        out = registry.dispatch("probe-partial", {})
+        # dispatch result is normalized; handler returned "deny"
+        assert out == "deny" or "deny" in str(out)
+        ctx = saw.get("ctx")
+        assert ctx is not None and ctx.complete is False
     finally:
         if token is not None:
             try:
