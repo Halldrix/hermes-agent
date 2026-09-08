@@ -91,7 +91,12 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
     // drive the pane's history. Dynamic import keeps the injected engine off
     // the boot path. Active session only: a background turn must never reach
     // into the page the user is working in (desktop AGENTS.md: offer, don't
-    // hijack).
+    // hijack). Background surfaces stay SILENT instead of refusing: every
+    // window sharing the session's transport receives this request and the
+    // gateway keeps the first answer, so a synchronous refusal would always
+    // beat the owner's async success (engine import) and veto it (#104435).
+    // Silence lets the owning window's answer land; with no owner the tool
+    // falls through to its honest timeout ("no GUI window answered").
     const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
 
     if (requestId) {
@@ -101,30 +106,27 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           text: result ? JSON.stringify(result) : ''
         })
 
-      if (isActiveEvent) {
-        void loadPreviewEngine()
-          .then(run =>
-            run({
-              amount: payload?.amount,
-              key: payload?.key,
-              kind: payload?.action ?? '',
-              max: payload?.max,
-              ref: payload?.ref,
-              selector: payload?.selector,
-              submit: payload?.submit,
-              text: payload?.text,
-              to: payload?.to as PreviewActAction['to']
-            })
-          )
-          .then(answer, error =>
-            answer({ error: error instanceof Error ? error.message : String(error), success: false })
-          )
-      } else {
-        void answer({
-          error: 'The in-app browser only takes actions in the session the user is looking at.',
-          success: false
-        })
+      if (!isActiveEvent) {
+        return true
       }
+
+      void loadPreviewEngine()
+        .then(run =>
+          run({
+            amount: payload?.amount,
+            key: payload?.key,
+            kind: payload?.action ?? '',
+            max: payload?.max,
+            ref: payload?.ref,
+            selector: payload?.selector,
+            submit: payload?.submit,
+            text: payload?.text,
+            to: payload?.to as PreviewActAction['to']
+          })
+        )
+        .then(answer, error =>
+          answer({ error: error instanceof Error ? error.message : String(error), success: false })
+        )
     }
 
     return true
@@ -185,12 +187,19 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           text: result ? JSON.stringify(result) : ''
         })
 
+      // Background stays silent whether tours are on or off: only the owning
+      // window answers a scoped blocking request, so its answer — success,
+      // run error, or tours-off — is the one the gateway keeps (#104435).
+      if (!isActiveEvent) {
+        return true
+      }
+
       if (!$toursEnabled.get()) {
         // Refused in words, not silently dropped: the agent asked for a
         // walkthrough it isn't getting, and a no-op would leave it narrating
         // a spotlight the user can't see.
         void answer({ error: 'The user has turned guided tours off.', success: false })
-      } else if (isActiveEvent) {
+      } else {
         void import('@/lib/tour')
           .then(({ runTour }) =>
             runTour(
@@ -209,11 +218,6 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           .then(answer, error =>
             answer({ error: error instanceof Error ? error.message : String(error), success: false })
           )
-      } else {
-        void answer({
-          error: 'Tours only run in the session the user is looking at.',
-          success: false
-        })
       }
     }
 
