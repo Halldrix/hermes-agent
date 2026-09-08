@@ -1033,6 +1033,31 @@ def _tool_calls_by_id(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
     return out
 
 
+def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
+    """First assistant index whose tool call has no later tool result (not yet executed).
+
+    A pending call has never reached the provider as history; shrinking its
+    arguments saves no re-sent tokens, it corrupts an action that has not
+    happened yet (#105574). Calls without an id cannot be matched to a result
+    and count as pending. Returns ``len(messages)`` when nothing is pending.
+    """
+    seen_results: set = set()
+    pending = len(messages)
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool" and msg.get("tool_call_id"):
+            seen_results.add(msg.get("tool_call_id"))
+        elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg.get("tool_calls") or []:
+                cid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if not cid or cid not in seen_results:
+                    pending = i
+                    break
+    return pending
+
+
 def _collect_path_mentions(text: str, relevant_files: list[str], *, limit: int = 12) -> None:
     for match in _PATH_MENTION_RE.findall(text):
         _dedupe_append(relevant_files, match.rstrip(".,:;"), limit=limit)
@@ -2671,10 +2696,13 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
     ) -> int:
         """Pass 4: demote inside the protected tail when it alone exceeds the soft budget (#61932).
         Keeps a short recent floor verbatim; overrides the skill guard (else the dead-end recurs).
+        Pending tool calls (no later tool result) are exempt from argument truncation:
+        shrinking them corrupts an unsent action instead of saving re-sent history (#105574).
         Returns the number of tool results demoted (arg truncations are logged but not counted)."""
         soft_ceiling = int(protect_tail_tokens * 1.5)
         demote_end = len(result) - min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))
         start = max(0, prune_boundary)
+        pending_start = _first_pending_tool_call_index(result)
 
         def _protected_region_tokens() -> int:
             return sum(_estimate_msg_budget_tokens(result[i]) for i in range(start, len(result)))
@@ -2687,8 +2715,29 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars):
                 demoted += 1
                 pressure_hits += 1
+            if i >= pending_start:
+                return
+            before = {
+                (_tc_get(tc, "id") or ""): (
+                    str(_tc_get(_tc_get(tc, "function", {}), "name", "unknown")),
+                    len(str(_tc_get(_tc_get(tc, "function", {}), "arguments", "") or "")),
+                )
+                for tc in (result[i].get("tool_calls") or [])
+                if isinstance(tc, dict)
+            }
             if self._truncate_tool_call_args_at(result, i):
                 pressure_hits += 1
+                for tc in result[i].get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    name, old_len = before.get(_tc_get(tc, "id") or "", ("unknown", 0))
+                    new_len = len(str(_tc_get(_tc_get(tc, "function", {}), "arguments", "") or ""))
+                    if old_len > new_len:
+                        logger.warning(
+                            "Pass-4 pressure demotion truncated tool-call args in the protected tail "
+                            "(message %d, tool %s: %d -> %d chars)",
+                            i, name, old_len, new_len,
+                        )
 
         if demote_end <= prune_boundary or _protected_region_tokens() <= soft_ceiling:
             return 0
