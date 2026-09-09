@@ -1038,9 +1038,15 @@ def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
 
     A pending call has never reached the provider as history; shrinking its
     arguments saves no re-sent tokens, it corrupts an action that has not
-    happened yet (#105574). Calls without an id cannot be matched to a result
-    and count as pending. Returns ``len(messages)`` when nothing is pending.
+    happened yet (#105574). Matching reuses the canonical alias policy
+    (``id`` / ``call_id`` / ``response_item_id`` / composite ``call|item``),
+    so a completed Responses call answered under a sibling spelling still
+    counts as executed. Calls without any id variant cannot be matched to a
+    result and count as pending. Returns ``len(messages)`` when nothing is
+    pending.
     """
+    from agent.message_sanitization import tool_call_id_variants, tool_result_id_variants
+
     seen_results: set = set()
     pending = len(messages)
     for i in range(len(messages) - 1, -1, -1):
@@ -1048,11 +1054,11 @@ def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
         if not isinstance(msg, dict):
             continue
         if msg.get("role") == "tool" and msg.get("tool_call_id"):
-            seen_results.add(msg.get("tool_call_id"))
+            seen_results |= set(tool_result_id_variants(msg.get("tool_call_id")))
         elif msg.get("role") == "assistant" and msg.get("tool_calls"):
             for tc in msg.get("tool_calls") or []:
-                cid = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                if not cid or cid not in seen_results:
+                variants = set(tool_call_id_variants(tc))
+                if not variants or variants.isdisjoint(seen_results):
                     pending = i
                     break
     return pending

@@ -46,6 +46,23 @@ def _tool_result(call_id, size):
     }
 
 
+def _responses_call(call_id, item_id, goal_chars):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": call_id,
+            "call_id": call_id,
+            "response_item_id": item_id,
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": json.dumps({"goal": "G" * goal_chars}),
+            },
+        }],
+    }
+
+
 def _goal_of(msg):
     args = msg["tool_calls"][0]["function"]["arguments"]
     return json.loads(args)["goal"]
@@ -93,3 +110,17 @@ class TestPendingArgsExemptFromPressure:
             and "delegate_task" in r.getMessage()
         ]
         assert warnings, "expected a warning naming delegate_task and the shrink"
+
+    def test_responses_call_answered_by_item_id_is_not_pending(self):
+        c = _make_compressor()
+        msgs = [
+            {"role": "user", "content": "start " + "x" * 200},
+            _responses_call("call_old", "fc_old", 2000),
+            _tool_result("fc_old", 20000),
+            {"role": "user", "content": "active ask"},
+        ]
+        result, _ = c._prune_old_tool_results(
+            msgs, protect_tail_count=4, protect_tail_tokens=100
+        )
+        args = result[1]["tool_calls"][0]["function"]["arguments"]
+        assert "...[truncated]" in args
