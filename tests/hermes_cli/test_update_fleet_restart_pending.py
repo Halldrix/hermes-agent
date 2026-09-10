@@ -652,6 +652,7 @@ def test_pending_restart_catchup_normalizes_user_bus(monkeypatch, capsys):
     assert update_cmd._run_pending_fleet_restart() is True
     assert "Pending fleet restart completed" in capsys.readouterr().out
     assert os.environ["XDG_RUNTIME_DIR"] == runtime_dir
+    assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == f"unix:path={runtime_dir}/bus"
 
 
 @pytest.mark.linux_only
