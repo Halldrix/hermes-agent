@@ -898,9 +898,10 @@ export function newSessionInProfile(name: string): void {
 
   // A profile reached only through the per-profile "+" moves the live gateway
   // onto its backend, so it is the last-used profile: persist it for the next
-  // Desktop launch once activation succeeds (#107528 follow-up). Same gate as
-  // the rail path — window-primary activations of local profiles only, never
-  // registry-source picks or remote overrides.
+  // Desktop launch once activation succeeds (#107528 follow-up). Gate mirrors
+  // the rail path's #102507 shape (isActivePrimary + local-mode check), so a
+  // registry-backed primary inherits #102507's semantics verbatim — any change
+  // to that edge belongs there, not here.
   const shouldRememberStartupProfile = isActivePrimary()
     ? isLocalDesktopProfile(target)
     : Promise.resolve(false)
