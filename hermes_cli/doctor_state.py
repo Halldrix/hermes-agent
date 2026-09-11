@@ -243,10 +243,35 @@ def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
             check_warn(f"WAL file is large ({size // (1024*1024)} MB)", "(may indicate missed checkpoints)")
             if not should_fix:
                 return f.issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
-            import sqlite3
-            conn = sqlite3.connect(str(state_db_path))
-            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            conn.close()
+            # Checkpoint-lock premise (#40177): a bare connect runs WAL recovery and the checkpoint joins the
+            # live WAL — under a running gateway that second-writer handling corrupts state.db. Skip instead.
+            from hermes_state_holders import live_writer_holds_db
+            from hermes_state_repair import _connect_repair_durable, _exclusive_repair_db_guard
+
+            def _skip_unquiet() -> None:
+                # Honest disjunction: a refusal here means "held OR
+                # unprovable" — the DatabaseError lane fires when SQLite
+                # cannot open the file at all, with nobody holding it. Never
+                # assert a live writer as fact.
+                check_warn("WAL checkpoint skipped: cannot prove state.db is quiet",
+                           "(a live writer holds it, or it is unreadable — stop the profile's gateway "
+                           "and re-run 'hermes doctor --fix')")
+                f.issues.append("Large WAL file — cannot prove state.db is quiet (stop the profile's "
+                                "gateway first, then re-run 'hermes doctor --fix' to checkpoint)")
+
+            if live_writer_holds_db(state_db_path, connect_repair_durable=_connect_repair_durable):
+                _skip_unquiet()
+                return
+            # Lifetime: the preflight above is check-then-act by itself — a
+            # writer entering between it and the checkpoint would still race.
+            # Run the checkpoint ON the exclusive-guard connection so
+            # authority is held across the operation, not just probed before
+            # it (same contract as repair surgery).
+            with _exclusive_repair_db_guard(state_db_path) as (guard, _guard_error):
+                if guard is None:
+                    _skip_unquiet()
+                    return
+                guard.execute("PRAGMA wal_checkpoint(PASSIVE)")
             check_ok(f"WAL checkpoint performed ({size // 1024}K → {wal_size() // 1024}K)")
             f.fixed += 1
         elif size > 10 * 1024 * 1024:  # 10 MB

@@ -399,3 +399,40 @@ def test_repair_proceeds_once_the_database_is_quiescent(tmp_path):
     report = repair_state_db_schema(db, backup=False)
 
     assert "live writer" not in (report["error"] or "").lower()
+
+
+@pytest.mark.parametrize(
+    "probe_error",
+    [
+        sqlite3.DatabaseError("file is not a database"),
+        sqlite3.OperationalError("unable to open database file"),
+        sqlite3.OperationalError("disk I/O error"),
+    ],
+)
+def test_repair_refuses_when_guard_cannot_open(tmp_path, monkeypatch, probe_error):
+    """Surgery never runs when exclusion cannot be proven (#103339).
+
+    The preflight probe answers quiet on this database, but the
+    exclusive guard fails on the same fault and repair degrades to an
+    honest skip — never surgery under an unseen holder.
+    """
+    db = _make_wal_db(tmp_path)
+    # Real damage (not a stubbed probe): drop a canonical table so the
+    # healthy fast-path (already_healthy) cannot fire and the flow must
+    # reach the exclusive guard.
+    damaged = sqlite3.connect(str(db))
+    try:
+        damaged.execute("DROP TABLE sessions")
+        damaged.commit()
+    finally:
+        damaged.close()
+
+    def _raise_guard_error(*_args, **_kwargs):
+        raise probe_error
+
+    monkeypatch.setattr(hermes_state_repair, "_open_exclusive", _raise_guard_error)
+
+    report = repair_state_db_schema(db, backup=False)
+
+    assert report["repaired"] is False
+    assert "exclusive" in (report["error"] or "").lower()
