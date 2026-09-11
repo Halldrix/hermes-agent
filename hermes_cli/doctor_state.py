@@ -154,7 +154,11 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
 
 def _session_count(state_db_path: Path):
     import sqlite3
-    conn = sqlite3.connect(str(state_db_path))
+    # Read-only: doctor routinely runs against a live gateway's WAL store, and a
+    # second read-write connection is the #103339 corruption class. mode=ro also
+    # stops doctor from creating an empty state.db as a side effect when none exists.
+    # as_uri() (not string interpolation): Windows paths need file:///C:/... form.
+    conn = sqlite3.connect(f"{state_db_path.absolute().as_uri()}?mode=ro", uri=True)
     try:
         return conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     finally:

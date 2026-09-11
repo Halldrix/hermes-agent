@@ -607,6 +607,26 @@ def _note_pinned_skipped(db, filters, action):
           f"(pin is a keep flag). {optin}")
 
 
+def _refuse_prune_under_live_writer() -> bool:
+    """True when bulk prune must not run: a live writer holds the db (Refs #103339).
+
+    Runs BEFORE SessionDB() is opened: the probe trips on any open handle, so
+    probing after opening would refuse every run on its own handle. Same probe
+    the repair path and `doctor --fix` use (`_live_writer_holds_db`):
+    fail-closed only on a positive busy/locked signal. Read-only flows
+    (`--dry-run`, previews) never reach here.
+    """
+    from hermes_state import _default_db_path
+    from hermes_state_repair import _live_writer_holds_db
+    db_path = _default_db_path()
+    if not _live_writer_holds_db(db_path):
+        return False
+    print(f"Refused: a live writer (gateway or another Hermes process) still holds {db_path}; "
+          "stop the profile's gateway first (`hermes gateway stop`) and retry. Nothing was deleted. "
+          "`--dry-run` previews against a live gateway.")
+    return True
+
+
 def _cmd_prune_or_archive(db, args, action):
     prune = action == "prune"
     if prune and getattr(args, "never_active", False):
@@ -952,6 +972,9 @@ def cmd_sessions(args, sessions_parser=None):
     pre = _PRE_DB_HANDLERS.get(action)
     if pre is not None:
         return pre(args)
+    if action == "prune" and not getattr(args, "dry_run", False):
+        if _refuse_prune_under_live_writer():
+            return 1
     try:
         from hermes_state import SessionDB
         db = SessionDB()

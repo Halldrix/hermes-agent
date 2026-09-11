@@ -102,7 +102,8 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     add_yes_flag(sessions_delete, "Skip confirmation")
 
     sessions_prune = sessions_subparsers.add_parser(
-        "prune", help="Delete old sessions (filterable by time window, source, title, ...)")
+        "prune", help="Delete old sessions (filterable by time window, source, title, ...). "
+        "Stop the profile's gateway first — pruning under a live gateway is refused")
     _add_session_filter_args(
         sessions_prune, "Delete sessions older than AGE — days if bare number, or a duration "
         "like '5h'/'2d'/'1w', or an ISO timestamp (bare prune with no filters "
