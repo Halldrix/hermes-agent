@@ -1014,32 +1014,100 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         if _respawn_cwd:
             _popen_kwargs["cwd"] = _respawn_cwd
         _base_env = {{**os.environ, **_respawn_env_overlay}}
-        try:
-            if sys.platform == "win32":
+        # First choice on Windows: trigger the gateway's Scheduled Task via the
+        # Task Scheduler service, which runs the gateway OUTSIDE any job that
+        # contains this watcher. subprocess.Popen + CREATE_BREAKAWAY_FROM_JOB
+        # is silently accepted by CreateProcess even when the job denies
+        # breakaway (#84185) — the spawned gateway then dies with the job. The
+        # Scheduled-Task route has no such failure mode. The poll checks for a
+        # NEW gateway pid (not one already running) so a pre-update gateway
+        # draining in the background does not satisfy the check on its own.
+        # POSIX never takes this branch (``_started_via_task`` stays False).
+        _started_via_task = False
+        # The watcher may relaunch a DIFFERENT profile than its own
+        # (run_argv leads the profile gateway command), so the task name must
+        # come from run_argv, never from the watcher process's own home —
+        # otherwise a multi-profile fleet triggers the wrong task.
+        _task_name = ""
+        _task_home = ""
+        if sys.platform == "win32":
+            try:
+                from pathlib import Path as _Path
+                import re as _re
+                from hermes_cli.config import get_hermes_home as _get_home
+                _cmd = list(cmd)
+                _profile = ""
+                for _i, _part in enumerate(_cmd):
+                    if _part == "--profile" and _i + 1 < len(_cmd):
+                        _profile = _cmd[_i + 1]
+                        break
+                    _m = _re.match(r"--profile=(.+)", _part)
+                    if _m:
+                        _profile = _m.group(1)
+                        break
+                if _profile:
+                    try:
+                        from hermes_constants import get_default_hermes_root as _get_root
+                        _task_home = str((_get_root() / "profiles" / _profile).resolve())
+                    except Exception:
+                        _task_home = _profile
+                else:
+                    _task_home = str(_Path(_get_home()).resolve())
+                # Derive the task name for the relaunched profile (never the
+                # watcher process's own home — otherwise a multi-profile fleet
+                # triggers the wrong task).
+                from hermes_cli.gateway_windows import get_task_name as _get_tn
+                _task_name = _get_tn(home=_task_home)
+                # Prefer the shared helper (snapshot -> /Run -> poll + profile-aware PID check).
+                from hermes_cli import gateway_windows as _gw  # type: ignore
+                if _gw.is_task_registered(task_name=_task_name):
+                    _started_via_task = _gw._spawn_via_scheduled_task(
+                        task_name=_task_name, hermes_home=_task_home
+                    )
+            except Exception as _e:
                 try:
-                    _popen_kwargs["creationflags"] = windows_detach_flags()
-                    # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
-                    # respawned gateway's exit-diag / lifecycle records show whether it escaped the
-                    # parent Job Object (a job-teardown kill is otherwise indistinguishable).
-                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
-                    subprocess.Popen(cmd, **_popen_kwargs)
-                except OSError:
-                    # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
-                    # job object refuses breakaway; retry without it (mirrors _spawn_detached).
-                    _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
-                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
-                    subprocess.Popen(cmd, **_popen_kwargs)
-            else:
-                if _respawn_env_overlay:
-                    _popen_kwargs["env"] = _base_env
-                _popen_kwargs["start_new_session"] = True
-                subprocess.Popen(cmd, **_popen_kwargs)
-        finally:
+                    if _stdio_fh is not None:
+                        _stdio_fh.write(("[watcher] task route failed: " + str(_e) + "\\n").encode("utf-8", "replace"))
+                except Exception:
+                    pass
+                _started_via_task = False
+        # The Scheduled Task spawned the gateway; skip the direct Popen below
+        # (which would race with the task-spawned process and re-enter the
+        # parent-job trap). Close the stdio sidecar we opened earlier, then
+        # let the watcher script end.
+        if _started_via_task:
             if _stdio_fh is not None:
                 try:
                     _stdio_fh.close()
                 except OSError:
                     pass
+        else:
+            try:
+                if sys.platform == "win32":
+                    try:
+                        _popen_kwargs["creationflags"] = windows_detach_flags()
+                        # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
+                        # respawned gateway's exit-diag / lifecycle records show whether it escaped the
+                        # parent Job Object (a job-teardown kill is otherwise indistinguishable).
+                        _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
+                        subprocess.Popen(cmd, **_popen_kwargs)
+                    except OSError:
+                        # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
+                        # job object refuses breakaway; retry without it (mirrors _spawn_detached).
+                        _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
+                        _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
+                        subprocess.Popen(cmd, **_popen_kwargs)
+                else:
+                    if _respawn_env_overlay:
+                        _popen_kwargs["env"] = _base_env
+                    _popen_kwargs["start_new_session"] = True
+                    subprocess.Popen(cmd, **_popen_kwargs)
+            finally:
+                if _stdio_fh is not None:
+                    try:
+                        _stdio_fh.close()
+                    except OSError:
+                        pass
         """
     ).strip().format(respawn_cwd_literal=json.dumps(respawn_cwd), respawn_env_literal=json.dumps(respawn_env_overlay))
 
@@ -1948,7 +2016,7 @@ def _profile_name_from_home(home: Path, default: Path) -> str | None:
     return None
 
 
-def _profile_suffix() -> str:
+def _profile_suffix(home: str | Path | None = None) -> str:
     """Service-name suffix for HERMES_HOME: "" for the platform-native default home (``~/.hermes``), the
     profile name for ``<root>/profiles/<name>``, else a short hash of the path.
 
@@ -1956,14 +2024,18 @@ def _profile_suffix() -> str:
     treats any HERMES_HOME outside ``~/.hermes`` (Docker ``/opt/data``, a temp dir) as "the root itself",
     which let a temp-home harness resolve to the default profile's ``hermes-gateway`` unit and uninstall
     the production gateway. Service names are host-wide identities; only the real default home owns the
-    bare one."""
+    bare one.
+
+    *home* resolves another profile's suffix without reading the calling process's ``HERMES_HOME`` —
+    e.g. the update restart-watcher, which relaunches the profile in ``run_argv``, not its own.
+    """
     import hashlib
     from hermes_constants import _get_platform_default_hermes_home, get_default_hermes_root
-    home = get_hermes_home().resolve()
-    if home == _get_platform_default_hermes_home().resolve():
+    h = Path(home).resolve() if home else get_hermes_home().resolve()
+    if h == _get_platform_default_hermes_home().resolve():
         return ""
-    name = _profile_name_from_home(home, get_default_hermes_root().resolve())
-    return name or hashlib.sha256(str(home).encode()).hexdigest()[:8]
+    name = _profile_name_from_home(h, get_default_hermes_root().resolve())
+    return name or hashlib.sha256(str(h).encode()).hexdigest()[:8]
 
 
 def _current_profile_name() -> str:
