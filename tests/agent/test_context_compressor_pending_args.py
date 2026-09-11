@@ -1,10 +1,10 @@
-"""Pending tool-call args survive the Pass-4 pressure pass (#105574)."""
+"""Pending tool-call args survive Pass-3/4 truncation; stale orphans exempt nothing (#105574, #105598)."""
 
 import json
 import logging
 from unittest.mock import patch
 
-from agent.context_compressor import ContextCompressor
+from agent.context_compressor import ContextCompressor, _first_pending_tool_call_index
 
 
 def _make_compressor(**overrides):
@@ -70,6 +70,7 @@ def _goal_of(msg):
 
 class TestPendingArgsExemptFromPressure:
     def test_pending_call_survives_while_executed_call_shrinks(self):
+        """Trailing pending dispatch (true pre-send shape) survives; executed history shrinks."""
         c = _make_compressor()
         old_args_len = len(json.dumps({"goal": "G" * 2000, "tasks": ["t1"]}))
         assert old_args_len > 500
@@ -77,17 +78,17 @@ class TestPendingArgsExemptFromPressure:
             {"role": "user", "content": "start " + "x" * 200},
             _delegate_call("call_old", 2000),
             _tool_result("call_old", 20000),
-            _delegate_call("call_pending", 2000),
             {"role": "user", "content": "active ask"},
+            _delegate_call("call_pending", 2000),
         ]
-        pending_before = _goal_of(msgs[3])
+        pending_before = _goal_of(msgs[4])
         result, _ = c._prune_old_tool_results(
             msgs, protect_tail_count=4, protect_tail_tokens=100
         )
-        pending_after = _goal_of(result[3])
+        pending_after = _goal_of(result[4])
         assert pending_after == pending_before
         assert len(pending_after) == 2000
-        assert "...[truncated]" not in result[3]["tool_calls"][0]["function"]["arguments"]
+        assert "...[truncated]" not in result[4]["tool_calls"][0]["function"]["arguments"]
         old_after = _goal_of(result[1])
         assert len(old_after) < 2000
         assert "...[truncated]" in result[1]["tool_calls"][0]["function"]["arguments"]
@@ -149,3 +150,20 @@ class TestPendingArgsExemptFromPressure:
         args9 = result[1]["tool_calls"][8]["function"]["arguments"]
         assert "...[truncated]" not in args9
         assert json.loads(args9)["goal"] == "G" * 2000
+
+    def test_stale_orphan_does_not_exempt_later_completed_call(self):
+        """A settled historical orphan must not disable reclamation downstream (#105598)."""
+        c = _make_compressor()
+        msgs = [
+            {"role": "user", "content": "start"},
+            _delegate_call("call_orphan", 2000),
+            _delegate_call("call_done", 2000),
+            _tool_result("call_done", 20000),
+            {"role": "user", "content": "later turn"},
+        ]
+        assert _first_pending_tool_call_index(msgs) == len(msgs)
+        result, _ = c._prune_old_tool_results(
+            msgs, protect_tail_count=4, protect_tail_tokens=100
+        )
+        args = result[2]["tool_calls"][0]["function"]["arguments"]
+        assert "...[truncated]" in args

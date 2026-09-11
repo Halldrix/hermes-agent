@@ -1033,35 +1033,62 @@ def _tool_calls_by_id(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
     return out
 
 
-def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
-    """First assistant index whose tool call has no later tool result (not yet executed).
+def _trailing_assistant_batch_index(messages: List[Dict[str, Any]]) -> int:
+    """Index of the trailing live assistant batch: last non-tool message, if assistant.
 
-    A pending call has never reached the provider as history; shrinking its
-    arguments saves no re-sent tokens, it corrupts an action that has not
-    happened yet (#105574). Matching reuses the canonical alias policy
-    (``id`` / ``call_id`` / ``response_item_id`` / composite ``call|item``),
-    so a completed Responses call answered under a sibling spelling still
-    counts as executed. Calls without any id variant cannot be matched to a
-    result and count as pending. Returns ``len(messages)`` when nothing is
-    pending.
+    Shared definition of "possibly in flight" with ``_sanitize_tool_pairs``
+    (#79278): a multi-call batch between result appends is still live, while
+    older unmatched calls are settled orphans. Single source of truth so the
+    prune passes and the sanitizer never disagree on what is pending.
+    Returns ``-1`` when the trailing message is not an assistant turn.
+    """
+    idx = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[i], dict) and messages[i].get("role") != "tool"
+        ),
+        -1,
+    )
+    if idx >= 0 and messages[idx].get("role") == "assistant" and messages[idx].get("tool_calls"):
+        return idx
+    return -1
+
+
+def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
+    """Index of the trailing assistant batch when it holds a not-yet-executed call.
+
+    Only the trailing live batch (see ``_trailing_assistant_batch_index``) can
+    be pending: a settled historical orphan must not exempt later completed
+    calls from argument reclamation, or every later call keeps its full args
+    and the pressure pass can never reclaim the tail (#105598). Matching
+    reuses the canonical alias policy (``id`` / ``call_id`` /
+    ``response_item_id`` / composite ``call|item``), so a completed Responses
+    call answered under a sibling spelling still counts as executed. Calls
+    without any id variant cannot be matched to a result and count as
+    pending. Returns ``len(messages)`` when nothing is pending.
     """
     from agent.message_sanitization import tool_call_id_variants, tool_result_id_variants
 
+    batch_idx = _trailing_assistant_batch_index(messages)
+    if batch_idx < 0:
+        return len(messages)
     seen_results: set = set()
-    pending = len(messages)
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") == "tool" and msg.get("tool_call_id"):
+    for j in range(batch_idx + 1, len(messages)):
+        msg = messages[j]
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") == "tool"
+            and msg.get("tool_call_id")
+        ):
             seen_results |= set(tool_result_id_variants(msg.get("tool_call_id")))
-        elif msg.get("role") == "assistant" and msg.get("tool_calls"):
-            for tc in msg.get("tool_calls") or []:
-                variants = set(tool_call_id_variants(tc))
-                if not variants or variants.isdisjoint(seen_results):
-                    pending = i
-                    break
-    return pending
+    for tc in messages[batch_idx].get("tool_calls") or []:
+        if not isinstance(tc, dict):
+            continue
+        variants = set(tool_call_id_variants(tc))
+        if not variants or variants.isdisjoint(seen_results):
+            return batch_idx
+    return len(messages)
 
 
 def _collect_path_mentions(text: str, relevant_files: list[str], *, limit: int = 12) -> None:
@@ -3903,8 +3930,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         # In-flight protection: compression can fire before the executor appends the result, so the last non-tool
         # assistant's calls are presumed pending and kept verbatim (skip trailing tool results first: a multi-call
         # batch between appends is still in flight). Unanswered survivors are stubbed pre-API by sanitize_api_messages.
-        idx = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") != "tool"), -1)
-        trailing_inflight = messages[idx] if idx >= 0 and messages[idx].get("role") == "assistant" else None
+        # The trailing batch is the shared "possibly in flight" definition (see _trailing_assistant_batch_index).
+        trailing_idx = _trailing_assistant_batch_index(messages)
+        trailing_inflight = messages[trailing_idx] if trailing_idx >= 0 else None
         stripped_count = 0
         for msg in messages:
             tcs = msg.get("tool_calls")
