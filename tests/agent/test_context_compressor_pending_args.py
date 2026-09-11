@@ -124,3 +124,28 @@ class TestPendingArgsExemptFromPressure:
         )
         args = result[1]["tool_calls"][0]["function"]["arguments"]
         assert "...[truncated]" in args
+
+    def test_pending_call_in_large_batch_survives_pass3(self):
+        """Pass 3 must not truncate a pending call that fell out of the tail floor (#105598)."""
+        c = _make_compressor()
+        tcs = [
+            {
+                "id": f"call_{k}",
+                "type": "function",
+                "function": {
+                    "name": "mytool",
+                    "arguments": json.dumps({"goal": "G" * 2000, "i": k}),
+                },
+            }
+            for k in range(1, 10)
+        ]
+        msgs: list = [{"role": "user", "content": "start"}]
+        msgs.append({"role": "assistant", "content": "", "tool_calls": tcs})
+        for k in range(1, 9):
+            msgs.append(_tool_result(f"call_{k}", 20000))
+        result, _ = c._prune_old_tool_results(
+            msgs, protect_tail_count=20, protect_tail_tokens=100
+        )
+        args9 = result[1]["tool_calls"][8]["function"]["arguments"]
+        assert "...[truncated]" not in args9
+        assert json.loads(args9)["goal"] == "G" * 2000
