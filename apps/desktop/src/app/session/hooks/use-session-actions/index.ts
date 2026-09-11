@@ -156,6 +156,7 @@ import {
   dedupeInflightUserAgainstTranscript,
   dropListedSession,
   findListedSession,
+  findUnlistedSessionOwner,
   goneSessionVerdict,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
@@ -168,6 +169,7 @@ import {
   resolveSessionProfile,
   resolveStoredSession,
   restoreListedSession,
+  restoreUnlistedSessionOwner,
   selectBranchMessages,
   sessionMatchesStoredId,
   sessionShouldHaveTranscript,
@@ -771,6 +773,12 @@ export function useSessionActions({
 
         const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
 
+        // Freeze the ambient owner BEFORE any await: desktopSessionCreateParams
+        // fixes params.profile pre-await, but the row/stub below stamps
+        // post-await ambient. A profile switch during the seconds-long
+        // session.create round-trip would otherwise stamp the wrong owner.
+        const capturedAmbientProfile = normalizeProfileKey($newChatProfile.get() || $activeGatewayProfile.get())
+
         const cwd =
           options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
 
@@ -837,9 +845,9 @@ export function useSessionActions({
         // immediate session.resume fails closed on multi-profile installs
         // (#102792).
         if (listed) {
-          upsertOptimisticSession(created, stored, null, null, null, undefined, capturedRoute)
+          upsertOptimisticSession(created, stored, null, null, null, undefined, capturedRoute, capturedAmbientProfile)
         } else {
-          upsertUnlistedSessionOwner(created, stored, capturedRoute)
+          upsertUnlistedSessionOwner(created, stored, capturedRoute, capturedAmbientProfile)
         }
 
         // A tile lives in its OWN worktree, so it must not run the full
@@ -2430,6 +2438,11 @@ export function useSessionActions({
       const removed =
         listed?.session ?? $archivedSessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
 
+      // An unsent draft lives ONLY in the unlisted stub atom: snapshot it
+      // before the optimistic drop so a failed DELETE can restore the tile's
+      // sole owner record alongside the listed row.
+      const unlistedStub = findUnlistedSessionOwner(storedSessionId)
+
       // Messaging/cron rows frequently arrive without an inline profile; fall
       // back to the stored-session ownership lookup so their DELETE routes to
       // the owning profile instead of the ambient one.
@@ -2523,6 +2536,10 @@ export function useSessionActions({
           restoreListedSession(listed.session, listed.slice)
         }
 
+        if (unlistedStub) {
+          restoreUnlistedSessionOwner(unlistedStub)
+        }
+
         // Restore the archived-view row too (no-op when it wasn't archived).
         $archivedSessions.set(previousArchived)
 
@@ -2577,6 +2594,10 @@ export function useSessionActions({
       const stampedProfile = archived?.profile?.trim()
       const profile = stampedProfile || (await resolveSessionProfile(storedSessionId))
 
+      // Same snapshot as removeSession: an unsent draft's sole owner record
+      // lives in the stub atom, so a failed archive must restore it.
+      const unlistedStub = findUnlistedSessionOwner(storedSessionId)
+
       if (
         listed &&
         !stampedProfile &&
@@ -2624,6 +2645,10 @@ export function useSessionActions({
       } catch (err) {
         if (archived) {
           restoreListedSession(archived, listed?.slice)
+        }
+
+        if (unlistedStub) {
+          restoreUnlistedSessionOwner(unlistedStub)
         }
 
         untombstoneSessions(archivedIds)

@@ -4296,6 +4296,70 @@ describe('openNewSessionTile unlisted owner (#102792)', () => {
     // ... and the draft stays out of the sidebar.
     expect($sessions.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(false)
   })
+
+  it('freezes the ambient owner from before the create round-trip (profile switch mid-create)', async () => {
+    // The backend mints the session with params.profile, fixed pre-await to
+    // 'omar'. The user switching to 'default' while session.create is in
+    // flight must not re-stamp the stub.
+    const switchingGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        $activeGatewayProfile.set('default')
+        return {
+          info: { cwd: '', model: 'test-model', skills: {}, tools: {} },
+          session_id: RUNTIME_SESSION_ID,
+          stored_session_id: STORED_UNLISTED
+        } as never
+      }
+
+      return {} as never
+    })
+    const handle = await readyHandle(switchingGateway)
+
+    await act(async () => {
+      await handle.openNewSessionTile('center', { listed: false, route: null })
+    })
+
+    expect(knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)).toBe('omar')
+    expect($sessions.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(false)
+  })
+
+  it('restores the stub when delete of an unlisted draft fails', async () => {
+    const handle = await readyHandle(createRequestGateway())
+
+    await act(async () => {
+      await handle.openNewSessionTile('center', { listed: false, route: null })
+    })
+
+    expect($unlistedSessionOwnerRows.get()).toHaveLength(1)
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    vi.mocked(deleteSession).mockRejectedValueOnce(new Error('backend down'))
+
+    await act(async () => {
+      await handle.removeSession(STORED_UNLISTED)
+    })
+
+    expect($unlistedSessionOwnerRows.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(true)
+    expect(knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)).toBe('omar')
+  })
+
+  it('restores the stub when archive of an unlisted draft fails', async () => {
+    const handle = await readyHandle(createRequestGateway())
+
+    await act(async () => {
+      await handle.openNewSessionTile('center', { listed: false, route: null })
+    })
+
+    expect($unlistedSessionOwnerRows.get()).toHaveLength(1)
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    vi.mocked(setSessionArchived).mockRejectedValueOnce(new Error('archive failed'))
+
+    await act(async () => {
+      await handle.archiveSession(STORED_UNLISTED)
+    })
+
+    expect($unlistedSessionOwnerRows.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(true)
+    expect(knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)).toBe('omar')
+  })
 })
 describe('selectSidebarItem', () => {
   it('fronts the workspace pane when navigating to a sidebar route (issue #72602)', async () => {
