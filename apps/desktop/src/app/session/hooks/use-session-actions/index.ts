@@ -2629,6 +2629,16 @@ export function useSessionActions({
       // lives in the stub atom, so a failed archive must restore it.
       const unlistedStub = findUnlistedSessionOwner(storedSessionId)
 
+      // Route the PATCH at the exact owner, like removeSession: a connection-
+      // tagged row (or stub) names its backend, so a same-named profile on
+      // the active source can't swallow the archive.
+      const archivedOwner: SessionOwnerScope = archived?.connection_id
+        ? {
+            connectionId: archived.connection_id,
+            profile: archived.profile || 'default'
+          }
+        : (sessionOwnerRouteFromRow(unlistedStub) ?? (unlistedStub?.profile?.trim() || undefined) ?? profile)
+
       if (
         listed &&
         !stampedProfile &&
@@ -2658,7 +2668,7 @@ export function useSessionActions({
       }
 
       try {
-        await setSessionArchived(storedSessionId, true, profile)
+        await setSessionArchived(storedSessionId, true, archivedOwner)
         // Archived rows never reach the sidebar, so their persisted unread can
         // only rot. Dropped after the RPC so a failed archive keeps it.
         forgetSessionUnread(archivedIds, profile)

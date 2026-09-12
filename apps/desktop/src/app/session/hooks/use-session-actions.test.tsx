@@ -4593,6 +4593,25 @@ describe('removeSession / archiveSession profile routing (#78836)', () => {
     expect($messagingSessions.get()).toEqual([])
   })
 
+  it('archives a connection-tagged row against its exact connection scope', async () => {
+    // A promoted routed draft says {connectionId: source-a, profile: work}
+    // while source-b is active exposing the same profile name: the PATCH must
+    // ride source-a, never the ambient source.
+    mockSetSessionArchived.mockResolvedValue({ ok: true })
+    setSessions([storedSession({ id: 'desk-routed', connection_id: 'source-a', profile: 'work', source: 'desktop' })])
+
+    const handle = await readyActions()
+    await act(async () => {
+      await handle.archiveSession('desk-routed')
+    })
+
+    expect(mockSetSessionArchived).toHaveBeenCalledWith('desk-routed', true, {
+      connectionId: 'source-a',
+      profile: 'work'
+    })
+    expect($sessions.get()).toEqual([])
+  })
+
   it('restores a failed archive to the messaging slice', async () => {
     setMessagingSessions([storedSession({ id: 'tg-arch-fail', profile: 'winefox', source: 'telegram' })])
     mockSetSessionArchived.mockRejectedValue(new Error('archive failed'))
