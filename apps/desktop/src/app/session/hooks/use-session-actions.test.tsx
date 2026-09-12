@@ -4197,6 +4197,7 @@ describe('openNewSessionTile unlisted owner (#102792)', () => {
     _resetSessionOwnerHintsForTests()
     $profiles.set([])
     $activeGatewayProfile.set('default')
+    $newChatProfile.set(null)
     $sessionTiles.set([])
     vi.restoreAllMocks()
   })
@@ -4389,6 +4390,56 @@ describe('openNewSessionTile unlisted owner (#102792)', () => {
 
     expect($unlistedSessionOwnerRows.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(true)
     expect(knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)).toBe('omar')
+  })
+
+  it('prefers the explicit profile over new-chat/active ambient for params and stamp', async () => {
+    // Profile-group drag passes profile:'omar' with a null legacy route while
+    // everything ambient says default: both the create RPC and the stub must
+    // carry omar.
+    $activeGatewayProfile.set('default')
+    $newChatProfile.set('default')
+    let createParams: Record<string, unknown> | undefined
+    const gateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create') {
+        createParams = params
+
+        return {
+          info: { cwd: '', model: 'test-model', skills: {}, tools: {} },
+          session_id: RUNTIME_SESSION_ID,
+          stored_session_id: STORED_UNLISTED
+        } as never
+      }
+
+      return {} as never
+    })
+    const handle = await readyHandle(gateway)
+
+    await act(async () => {
+      await handle.openNewSessionTile('center', { listed: false, profile: 'omar', route: null })
+    })
+
+    expect(createParams?.profile).toBe('omar')
+    expect(knownSessionOwner(ownerLookupSessionRows(), STORED_UNLISTED)).toBe('omar')
+  })
+
+  it('routes delete of an unlisted draft from its stub when probes miss', async () => {
+    const handle = await readyHandle(createRequestGateway())
+
+    await act(async () => {
+      await handle.openNewSessionTile('center', { listed: false, route: null })
+    })
+
+    // Active profile moved on; the draft was never persisted, so every
+    // by-id probe 404s and only the stub names the owner.
+    $activeGatewayProfile.set('default')
+    vi.mocked(getSession).mockRejectedValue(new Error('404: Session not found'))
+    vi.mocked(deleteSession).mockResolvedValue({ ok: true })
+
+    await act(async () => {
+      await handle.removeSession(STORED_UNLISTED)
+    })
+
+    expect(vi.mocked(deleteSession)).toHaveBeenCalledWith(STORED_UNLISTED, 'omar')
   })
 })
 describe('selectSidebarItem', () => {

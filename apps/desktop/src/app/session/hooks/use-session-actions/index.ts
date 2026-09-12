@@ -294,7 +294,8 @@ function reconcileAuthoritativeMessages(
 // value is a mirror of Settings → Model and must not pin the new chat.
 async function desktopSessionCreateParams(
   cwd: string,
-  capturedRoute = resolveNewChatOwnerRoute()
+  capturedRoute = resolveNewChatOwnerRoute(),
+  uncapturedProfile?: string
 ): Promise<Record<string, unknown>> {
   // Treat Send as the linearization point for the visible selector state. The
   // profile handshake below can yield long enough for background config/model
@@ -313,7 +314,11 @@ async function desktopSessionCreateParams(
     provider: isManualSelection ? $currentProvider.get().trim() : ''
   }
 
-  const profile = capturedRoute?.profile || $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
+  const profile =
+    capturedRoute?.profile ||
+    uncapturedProfile ||
+    $newChatProfile.get() ||
+    normalizeProfileKey($activeGatewayProfile.get())
 
   if (capturedRoute) {
     await ensureGatewayAgent(capturedRoute.connectionId, profile)
@@ -792,13 +797,19 @@ export function useSessionActions({
         // fixes params.profile pre-await, but the row/stub below stamps
         // post-await ambient. A profile switch during the seconds-long
         // session.create round-trip would otherwise stamp the wrong owner.
-        const capturedAmbientProfile = normalizeProfileKey($newChatProfile.get() || $activeGatewayProfile.get())
+        // One effective profile for an unrouted create: the caller's explicit
+        // profile (profile-group drag) wins over the new-chat/active ambient,
+        // and it feeds BOTH the create params and the owner stamp.
+        const uncapturedProfile = options?.profile?.trim() || undefined
+        const capturedAmbientProfile = normalizeProfileKey(
+          uncapturedProfile || $newChatProfile.get() || $activeGatewayProfile.get()
+        )
 
         const cwd =
           options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
 
         const params = {
-          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
+          ...(await desktopSessionCreateParams(cwd, capturedRoute, uncapturedProfile)),
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
         }
 
@@ -2491,7 +2502,12 @@ export function useSessionActions({
             connectionId: removed.connection_id,
             profile: removed.profile || 'default'
           }
-        : profile
+        : // An unsent draft has no listed row for cachedSessionRow to find, so
+          // resolveSessionProfile above misses it. Route the DELETE from its
+          // stub (exact connection route when present, else bare profile) —
+          // an unscoped delete hits the wrong backend, fakes already_absent
+          // success, and orphans the live runtime.
+          (sessionOwnerRouteFromRow(unlistedStub) ?? (unlistedStub?.profile?.trim() || undefined) ?? profile)
 
       const previousArchived = $archivedSessions.get()
       // Pins are keyed on the durable lineage-root id; the stored id may be the
