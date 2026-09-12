@@ -196,6 +196,19 @@ export function knownSessionOwner(sessions: readonly SessionInfo[], sessionId: n
   const hint = getSessionOwnerHint(sessionId)
 
   if (connectionId) {
+    // A full hint agreeing with the tagged row carries the Desktop route
+    // profile plus its backend alias (targetProfile): prefer it over the
+    // collapsed row, whose profile field may hold the backend alias the
+    // creating socket was never keyed by (socket key is connectionId +
+    // Desktop profile; the alias only rewrites params at RPC time).
+    if (
+      hint &&
+      hint.connectionId.trim() === connectionId &&
+      (hint.profile.trim() === (profile || 'default') || hint.targetProfile?.trim() === (profile || 'default'))
+    ) {
+      return hint
+    }
+
     return { connectionId, profile: profile || 'default' }
   }
 
