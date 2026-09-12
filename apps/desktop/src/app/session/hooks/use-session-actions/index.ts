@@ -575,6 +575,12 @@ export function useSessionActions({
         // reduce the owner to a bare profile name that later RPCs dial on a
         // different socket than the one that minted the runtime.
         const capturedRoute = resolveNewChatOwnerRoute()
+        // Freeze the ambient owner BEFORE any await: params.profile is fixed
+        // pre-await, but the optimistic row below stamps post-await ambient.
+        // A profile switch during the seconds-long session.create round-trip
+        // would otherwise stamp the wrong owner (same guard as
+        // openNewSessionTile for unlisted drafts).
+        const capturedAmbientProfile = normalizeProfileKey($newChatProfile.get() || $activeGatewayProfile.get())
 
         const params = {
           ...(await desktopSessionCreateParams(cwd, capturedRoute)),
@@ -676,7 +682,16 @@ export function useSessionActions({
           // server later returns its own preview/title and supersedes this.
           // The row carries the create route's exact owner (backend profile +
           // connection), never the ambient profile — see upsertOptimisticSession.
-          upsertOptimisticSession(created, stored, null, preview?.trim() || null, null, undefined, capturedRoute)
+          upsertOptimisticSession(
+            created,
+            stored,
+            null,
+            preview?.trim() || null,
+            null,
+            undefined,
+            capturedRoute,
+            capturedAmbientProfile
+          )
           navigate(sessionRoute(stored), { replace: true })
           // Other windows (e.g. the main window when this is the pop-out) can't
           // see this session until they re-pull the shared list.

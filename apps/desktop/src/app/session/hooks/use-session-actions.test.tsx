@@ -4323,6 +4323,36 @@ describe('openNewSessionTile unlisted owner (#102792)', () => {
     expect($sessions.get().some(s => sessionMatchesStoredId(s, STORED_UNLISTED))).toBe(false)
   })
 
+  it('freezes the ambient owner on the send path too (profile switch mid-create)', async () => {
+    // Same guard as the tile path, for createBackendSessionForSend: the first
+    // send mints with params.profile fixed pre-await to 'omar'; a switch to
+    // 'default' in flight must not re-stamp the listed row.
+    const stored = 'stored-send-102792'
+    const switchingGateway = vi.fn(async (method: string) => {
+      if (method === 'session.create') {
+        $activeGatewayProfile.set('default')
+        return {
+          info: { cwd: '', model: 'test-model', skills: {}, tools: {} },
+          session_id: RUNTIME_SESSION_ID,
+          stored_session_id: stored
+        } as never
+      }
+
+      return {} as never
+    })
+    const handle = await readyHandle(switchingGateway)
+
+    let created: null | string = null
+
+    await act(async () => {
+      created = await handle.createBackendSessionForSend('hello')
+    })
+
+    expect(created).toBe(RUNTIME_SESSION_ID)
+    expect($sessions.get().some(s => sessionMatchesStoredId(s, stored))).toBe(true)
+    expect(knownSessionOwner(ownerLookupSessionRows(), stored)).toBe('omar')
+  })
+
   it('restores the stub when delete of an unlisted draft fails', async () => {
     const handle = await readyHandle(createRequestGateway())
 
