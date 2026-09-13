@@ -585,16 +585,36 @@ def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 
 def _session_db():
-    """``with _session_db() as db:`` — SessionDB closed on exit."""
+    """``with _session_db() as db:`` — writable SessionDB closed on exit.
+
+    For mutating commands only (rename, optimize, repair). Observational
+    commands use ``_session_db_readonly`` so a nested inspection never takes
+    writer privileges on a live store."""
     from hermes_state import SessionDB
     return closing(SessionDB())
+
+
+def _session_db_readonly():
+    """``with _session_db_readonly() as db:`` — read-only SessionDB closed on exit.
+
+    Raises ``ConsoleCommandError`` when no database exists yet: a read-only
+    open must never mint a store as a side effect (the writable default
+    scaffolds schema on first open). Path resolves at call time so a runtime
+    ``HERMES_HOME`` redirect is honored.
+    """
+    from hermes_state import SessionDB, _default_db_path
+
+    db_path = _default_db_path()
+    if not db_path.exists():
+        raise ConsoleCommandError(f"No session database at {db_path} yet.")
+    return closing(SessionDB(read_only=True))
 
 
 def _sessions_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
     ns = _parse("sessions list", args, (("--limit",), dict(type=int, default=20)))
     if ns.limit < 1 or ns.limit > 200:
         raise ConsoleCommandError("sessions list --limit must be between 1 and 200")
-    with _session_db() as db:
+    with _session_db_readonly() as db:
         sessions = db.list_sessions_rich(
             exclude_sources=["kanban", "tool"], limit=ns.limit, order_by_last_active=True)
     return _format_sessions(sessions)
@@ -602,7 +622,7 @@ def _sessions_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 def _sessions_stats(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "sessions stats")
-    with _session_db() as db:
+    with _session_db_readonly() as db:
         total = db.session_count()
         listable = db.session_count(exclude_children=True, exclude_sources=["kanban", "tool"])
         lines = [
@@ -663,7 +683,7 @@ def _guard_exports(db, session_ids: list[str]) -> None:
 @_captured
 def _sessions_export(_engine: HermesConsoleEngine, args: list[str]) -> None:
     ns = _parse("sessions export", args, "output", "--source", "--session-id")
-    with _session_db() as db:
+    with _session_db_readonly() as db:
         if ns.session_id:
             resolved_session_id = db.resolve_session_id(ns.session_id)
             if not resolved_session_id:

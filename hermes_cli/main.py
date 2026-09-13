@@ -1155,14 +1155,16 @@ def _resolve_workspace_key() -> Optional[str]:
 
 @contextlib.contextmanager
 def _session_db():
-    """Yield a ``SessionDB`` (lazy import, so test patches on ``hermes_state``
+    """Yield a read-only ``SessionDB`` (lazy import, so test patches on ``hermes_state``
     intercept). Open failures yield None and any error raised by the ``with``
-    body is swallowed — callers fall through to their ``return None``."""
+    body is swallowed — callers fall through to their ``return None``. Read-only
+    on purpose: every caller only queries (MRU search, title/ID resolve, cwd
+    restore), so this handle must never take writer privileges on a live store."""
     db = None
     try:
         from hermes_state import SessionDB
 
-        db = SessionDB()
+        db = SessionDB(read_only=True)
     except Exception:
         pass
     try:
