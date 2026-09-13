@@ -855,10 +855,32 @@ def test_native_smoke_maps_crash_exit_to_unloadable(monkeypatch):
     assert "sentencepiece" in detail
 
 
-def test_build_engine_sherpa_smoke_failure_raises_catchable(monkeypatch):
+def test_engine_init_refuses_after_ensure(monkeypatch):
     """Defense in depth: direct start_listening callers bypass requirements;
-    the build must raise RuntimeError (catchable), never die with the process.
-    """
+    the engine build must raise RuntimeError (catchable), never die with the
+    process. The smoke runs AFTER ensure so fresh installs still reach the
+    lazy installer."""
+    import tools.wake_word_engines as wwe
+
+    order = []
+    monkeypatch.setattr(wwe, "_ensure_dep", lambda feature: order.append("ensure"))
+
+    class _BoomEngine(wwe._Engine):
+        feature, section = "wake.sherpa", "sherpa"
+
+        def _build(self, cfg, sub, ww):
+            order.append("build")
+
     monkeypatch.setattr(ww, "_native_deps_loadable", lambda mods: (False, "boom"))
     with pytest.raises(RuntimeError, match="native"):
-        ww._build_engine(_sherpa_cfg())
+        _BoomEngine({})
+    assert order == ["ensure"]
+
+
+def test_dispatcher_does_not_preempt_lazy_install(monkeypatch):
+    """Fresh-install ordering: with deps missing the dispatcher must still
+    reach the engine constructor (whose ensure() installs) — the smoke owns
+    only the post-install gate, never the pre-install path."""
+    monkeypatch.setattr(ww, "_native_deps_loadable", lambda mods: (False, "boom"))
+    monkeypatch.setattr(ww, "_SherpaKwsEngine", lambda cfg: "sherpa-engine")
+    assert ww._build_engine(_sherpa_cfg()) == "sherpa-engine"
