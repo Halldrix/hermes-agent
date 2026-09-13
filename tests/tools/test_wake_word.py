@@ -782,3 +782,83 @@ def test_feed_audio_rejects_wrong_owner(monkeypatch, tmp_path):
     ww.start_listening(lambda: None, owner=owner, config={}, external_audio=True)
     assert ww.feed_audio(owner=object(), pcm_int16=b"\x00\x00") is False
     assert ww.stop_listening(owner=owner) is True
+
+
+# ── Native-dependency smoke probe (#109982) ───────────────────────────────
+
+
+def _sherpa_cfg(**over):
+    cfg = {"provider": "sherpa", "phrase": "hey hermes"}
+    cfg.update(over)
+    return cfg
+
+
+def _sherpa_env_ready(monkeypatch, *, smoke):
+    """Deps installed, voice loop ready, mic present; smoke verdict pinned."""
+    _voice_loop_ready(monkeypatch)
+    monkeypatch.setattr(ww, "_audio_available", lambda: True)
+    monkeypatch.setattr(ww, "_local_input_device_ready", lambda: True)
+    monkeypatch.setattr("tools.lazy_deps.is_available", lambda f: True)
+    monkeypatch.setattr("tools.lazy_deps._allow_lazy_installs", lambda: False)
+    detail = "ok" if smoke else "sentencepiece failed to load in a clean interpreter (exit -1073741819)"
+    monkeypatch.setattr(ww, "_native_deps_loadable", lambda mods: (smoke, detail))
+
+
+def test_requirements_sherpa_smoke_failure_refuses_with_hint(monkeypatch):
+    """#109982: sentencepiece 0.2.2 dies with an access violation on import —
+    uncatchable in-process. Requirements must report unavailable (with a
+    remediation hint) instead of green-lighting an arm that kills the backend.
+    """
+    _sherpa_env_ready(monkeypatch, smoke=False)
+    r = ww.check_wake_word_requirements(_sherpa_cfg())
+    assert r["available"] is False
+    assert r["native_ok"] is False
+    assert "sentencepiece" in r["hint"]
+
+
+def test_requirements_sherpa_smoke_success_arms(monkeypatch):
+    _sherpa_env_ready(monkeypatch, smoke=True)
+    r = ww.check_wake_word_requirements(_sherpa_cfg())
+    assert r["available"] is True
+    assert r["native_ok"] is True
+
+
+def test_native_smoke_runs_import_out_of_process(monkeypatch):
+    """The probe must never import the module in-process: a crashing wheel
+    would take the status poll down with it."""
+    import subprocess as _sp
+
+    calls = {}
+
+    def _run(cmd, **kw):
+        calls["cmd"] = cmd
+        assert "import sentencepiece" in cmd[-1]
+        return _sp.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(ww.subprocess, "run", _run)
+    ok, detail = ww._native_deps_loadable(("sentencepiece",))
+    assert ok is True
+    assert detail == "ok"
+    assert calls["cmd"][0] == sys.executable
+
+
+def test_native_smoke_maps_crash_exit_to_unloadable(monkeypatch):
+    import subprocess as _sp
+
+    def _run(cmd, **kw):
+        return _sp.CompletedProcess(
+            cmd, -1073741819, stdout="",
+            stderr="Windows fatal exception: access violation")
+    monkeypatch.setattr(ww.subprocess, "run", _run)
+    ok, detail = ww._native_deps_loadable(("sentencepiece",))
+    assert ok is False
+    assert "sentencepiece" in detail
+
+
+def test_build_engine_sherpa_smoke_failure_raises_catchable(monkeypatch):
+    """Defense in depth: direct start_listening callers bypass requirements;
+    the build must raise RuntimeError (catchable), never die with the process.
+    """
+    monkeypatch.setattr(ww, "_native_deps_loadable", lambda mods: (False, "boom"))
+    with pytest.raises(RuntimeError, match="native"):
+        ww._build_engine(_sherpa_cfg())
