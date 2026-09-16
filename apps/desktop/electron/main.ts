@@ -14823,7 +14823,7 @@ function createWindow() {
 
         if (priorSteadyAbortDetected) {
           priorSteadyAbortDetected = false
-          rememberLog('[main] previous run reached a usable window but never quit cleanly (main-process abort, kill, or power loss; cf. #112961)')
+          rememberLog('[main] previous run reached a usable window but never quit cleanly (main-process abort, kill, or power loss)')
         }
       }
     }
