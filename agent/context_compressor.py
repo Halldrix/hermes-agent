@@ -1061,7 +1061,7 @@ def _first_pending_tool_call_index(messages: List[Dict[str, Any]]) -> int:
     Only the trailing live batch (see ``_trailing_assistant_batch_index``) can
     be pending: a settled historical orphan must not exempt later completed
     calls from argument reclamation, or every later call keeps its full args
-    and the pressure pass can never reclaim the tail (#105598). Matching
+    and the pressure pass can never reclaim the tail (#105574). Matching
     reuses the canonical alias policy (``id`` / ``call_id`` /
     ``response_item_id`` / composite ``call|item``), so a completed Responses
     call answered under a sibling spelling still counts as executed. Calls
