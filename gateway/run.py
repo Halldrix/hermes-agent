@@ -390,14 +390,14 @@ _GATEWAY_RATE_LIMIT_RE = re.compile(
 _CONNECTION_ERROR_MARKERS = (
     r"(?:\w+\.)?connection\s*(?:error|timeout)", r"(?:\w+\.)?connect\s*(?:error|timeout)",
     r"connection\s+refused", r"connection\s+reset", r"connection\s+aborted", r"actively\s+refused",
-    r"winerror\s+10061", r"errno\s+111", r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable",
+    r"winerror\s+10061\b", r"errno\s+111\b", r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable",
     r"cannot\s+connect", r"failed\s+to\s+establish", r"could\s+not\s+connect")
 _GATEWAY_CONNECTION_ERROR_RE = re.compile("(" + "|".join(_CONNECTION_ERROR_MARKERS) + ")", re.IGNORECASE)
 
 # An ESTABLISHED connection died mid-transfer. Says nothing about whether the endpoint is up:
 # an earlier call in the same turn may already have been answered by it (#26339).
 _CONNECTION_INTERRUPTED_MARKERS = (
-    r"connection\s+reset", r"connection\s+aborted", r"errno\s+104", r"broken\s+pipe",
+    r"connection\s+reset", r"connection\s+aborted", r"errno\s+104\b", r"broken\s+pipe",
     r"server\s+disconnected", r"peer\s+closed\s+connection", r"connection\s+was\s+closed",
     r"network\s+connection\s+lost", r"unexpected\s+eof", r"incomplete\s+chunked\s+read",
     r"response\s+ended\s+prematurely", r"socket\s+hang\s+up", r"(?:\w+\.)?remoteprotocolerror",
@@ -407,7 +407,7 @@ _GATEWAY_CONNECTION_INTERRUPTED_RE = re.compile(
 
 # Nothing accepted the connection / no path to the host: "the endpoint is not up" IS the diagnosis.
 _ENDPOINT_UNREACHABLE_MARKERS = (
-    r"connection\s+refused", r"actively\s+refused", r"winerror\s+10061", r"errno\s+111",
+    r"connection\s+refused", r"actively\s+refused", r"winerror\s+10061\b", r"errno\s+111\b",
     r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable", r"cannot\s+connect",
     r"failed\s+to\s+establish", r"could\s+not\s+connect")
 _GATEWAY_ENDPOINT_UNREACHABLE_RE = re.compile(
