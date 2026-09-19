@@ -388,11 +388,30 @@ _GATEWAY_RATE_LIMIT_RE = re.compile(
 
 # Connection-failure markers: the first 8 also anchor the provider-failure envelope shape below.
 _CONNECTION_ERROR_MARKERS = (
-    r"(?:\w+\.)?(?:api\s*)?connection\s*(?:error|timeout)", r"(?:\w+\.)?connect\s*(?:error|timeout)",
+    r"(?:\w+\.)?connection\s*(?:error|timeout)", r"(?:\w+\.)?connect\s*(?:error|timeout)",
     r"connection\s+refused", r"connection\s+reset", r"connection\s+aborted", r"actively\s+refused",
     r"winerror\s+10061", r"errno\s+111", r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable",
     r"cannot\s+connect", r"failed\s+to\s+establish", r"could\s+not\s+connect")
 _GATEWAY_CONNECTION_ERROR_RE = re.compile("(" + "|".join(_CONNECTION_ERROR_MARKERS) + ")", re.IGNORECASE)
+
+# An ESTABLISHED connection died mid-transfer. Says nothing about whether the endpoint is up:
+# an earlier call in the same turn may already have been answered by it (#26339).
+_CONNECTION_INTERRUPTED_MARKERS = (
+    r"connection\s+reset", r"connection\s+aborted", r"errno\s+104", r"broken\s+pipe",
+    r"server\s+disconnected", r"peer\s+closed\s+connection", r"connection\s+was\s+closed",
+    r"network\s+connection\s+lost", r"unexpected\s+eof", r"incomplete\s+chunked\s+read",
+    r"response\s+ended\s+prematurely", r"socket\s+hang\s+up", r"(?:\w+\.)?remoteprotocolerror",
+    r"(?:\w+\.)?readerror")
+_GATEWAY_CONNECTION_INTERRUPTED_RE = re.compile(
+    "(" + "|".join(_CONNECTION_INTERRUPTED_MARKERS) + ")", re.IGNORECASE)
+
+# Nothing accepted the connection / no path to the host: "the endpoint is not up" IS the diagnosis.
+_ENDPOINT_UNREACHABLE_MARKERS = (
+    r"connection\s+refused", r"actively\s+refused", r"winerror\s+10061", r"errno\s+111",
+    r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable", r"cannot\s+connect",
+    r"failed\s+to\s+establish", r"could\s+not\s+connect")
+_GATEWAY_ENDPOINT_UNREACHABLE_RE = re.compile(
+    "(" + "|".join(_ENDPOINT_UNREACHABLE_MARKERS) + ")", re.IGNORECASE)
 
 def _ensure_windows_gateway_venv_imports() -> None:
     """Make detached Windows gateway runs see the Hermes venv packages.
@@ -595,9 +614,16 @@ _PROVIDER_ERROR_REPLIES = (
                              "or ask whoever runs this bot to run `hermes doctor` on the host."),
     (_GATEWAY_PROVIDER_POLICY_RE, "⚠️ The AI model service rejected this request. Try rephrasing your "
                                   "message, or use /model to switch models."),
-    (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ The AI model service isn't reachable right now — the configured model "
-                                   "endpoint is not running or is unreachable. Wait a moment and use /retry; "
-                                   "if it persists, run `hermes doctor` on the host."))
+    (_GATEWAY_CONNECTION_INTERRUPTED_RE, "⚠️ The connection to the AI model service was interrupted. "
+                                         "Use /retry to try again; if it keeps happening, run "
+                                         "`hermes doctor` on the host."),
+    (_GATEWAY_ENDPOINT_UNREACHABLE_RE, "⚠️ The AI model service isn't reachable right now — the configured model "
+                                       "endpoint is not running or is unreachable. Wait a moment and use /retry; "
+                                       "if it persists, run `hermes doctor` on the host."),
+    (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ The request to the AI model service couldn't be completed over the "
+                                   "network — either the connection was interrupted or the endpoint isn't "
+                                   "reachable. Use /retry to try again; if it keeps happening, run "
+                                   "`hermes doctor` on the host."))
 
 
 # Shared by the failed-turn normalizer and ``run_turn._hmwa_agent_error_reply``; canonical
