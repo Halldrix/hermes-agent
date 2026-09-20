@@ -71,7 +71,7 @@ def test_catalog_rejects_undeclared_key_before_any_write_or_install(
     monkeypatch.setattr(
         mcp_catalog,
         "install_entry",
-        lambda entry, enable=True: installs.append(entry.name),
+        lambda entry, enable=True, preloaded_env=None: installs.append(entry.name),
     )
 
     response = client.post(
@@ -119,7 +119,7 @@ def test_catalog_cannot_declare_reserved_control_key(
     monkeypatch.setattr(
         mcp_catalog,
         "install_entry",
-        lambda entry, enable=True: installs.append(entry.name),
+        lambda entry, enable=True, preloaded_env=None: installs.append(entry.name),
     )
 
     response = client.post(
@@ -148,7 +148,7 @@ def test_catalog_accepts_declared_credential(
     monkeypatch.setattr(
         mcp_catalog,
         "install_entry",
-        lambda entry, enable=True: installs.append(entry.name),
+        lambda entry, enable=True, preloaded_env=None: installs.append(entry.name),
     )
 
     response = client.post(
@@ -183,13 +183,21 @@ def test_catalog_non_secret_env_never_lands_in_env_file(
             "secret": False,
         }
     )
+    # The transport references the non-secret var; install_entry inlines it.
+    # (HTTP transport so the var lands in the server url.)
+    manifest["transport"] = {"type": "http", "url": "${DEMO_BASE_URL}"}
+    manifest["auth"]["type"] = "api_key"
+    manifest["auth"]["env"] = [
+        {"name": "MCP_DEMO_API_KEY", "prompt": "Demo API key", "secret": True},
+        {"name": "DEMO_BASE_URL", "prompt": "Demo base URL", "secret": False},
+    ]
     manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
-
-    installs: list[str] = []
+    # The real install_entry probes the server after writing config; avoid
+    # launching a nonexistent binary in tests.
     monkeypatch.setattr(
         mcp_catalog,
-        "install_entry",
-        lambda entry, enable=True: installs.append(entry.name),
+        "_probe_tools",
+        lambda name: None,
     )
 
     response = client.post(
@@ -198,18 +206,26 @@ def test_catalog_non_secret_env_never_lands_in_env_file(
         json={
             "name": "demo",
             "env": {
-                "DEMO_API_KEY": "valid-demo-value",
+                "MCP_DEMO_API_KEY": "valid-demo-value",
                 "DEMO_BASE_URL": "https://demo.example.test",
             },
         },
     )
 
     assert response.status_code == 200
-    assert installs == ["demo"]
     env_text = (catalog_env / ".env").read_text(encoding="utf-8")
-    assert "DEMO_API_KEY=valid-demo-value" in env_text
+    assert "MCP_DEMO_API_KEY=valid-demo-value" in env_text
     assert "DEMO_BASE_URL" not in env_text
     assert "https://demo.example.test" not in env_text
+    # The non-secret is inlined into config.yaml (server config carries the
+    # literal; the raw file never stores it and never keeps a ${VAR} ref).
+    from hermes_cli.config import load_config
+
+    server = load_config()["mcp_servers"]["demo"]
+    assert server["url"] == "https://demo.example.test"
+    assert "${DEMO_BASE_URL}" not in (
+        catalog_env / "config.yaml"
+    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

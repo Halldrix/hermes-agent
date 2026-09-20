@@ -454,15 +454,21 @@ def _expand_install_dir(value: str, install_dir: Optional[Path]) -> str:
     return value.replace(_INSTALL_DIR_VAR, str(install_dir))
 
 
-def _prompt_env_vars(specs: List[EnvVarSpec]) -> Dict[str, str]:
+def _prompt_env_vars(specs: List[EnvVarSpec], preloaded: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Prompt for each env spec.
 
     Secrets persist to ~/.hermes/.env. Non-secrets are only collected and
     returned — the caller inlines them into the server config (config.yaml),
-    since .env is secrets-only.
+    since .env is secrets-only. Values already supplied by the caller
+    (``preloaded``, e.g. from a dashboard form) skip the prompt.
     """
+    preloaded = preloaded or {}
     collected: Dict[str, str] = {}
     for spec in specs:
+        pre = preloaded.get(spec.name)
+        if pre is not None:
+            collected[spec.name] = pre
+            continue
         existing = get_env_value(spec.name) if spec.secret else None
         if existing:
             _say(f"  ✓ {spec.name} already set in .env")
@@ -678,12 +684,15 @@ def _apply_tool_selection(
     _say(f"  ✓ {len(chosen_names)}/{len(probed)} tools enabled.")
 
 
-def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
+def install_entry(entry: CatalogEntry, *, enable: bool = True, preloaded_env: Optional[Dict[str, str]] = None) -> None:
     """Install a catalog entry end-to-end.
 
     Order: git clone + bootstrap (if any); credential prompts (``auth.env``) to .env; write
     ``mcp_servers.<name>`` (with the ``auth: oauth`` marker and any pre-registered ``oauth`` block); probe + tool checklist (falling back per
     :func:`_apply_tool_selection`); print post_install notes.
+
+    ``preloaded_env`` carries env values already supplied by the caller (e.g.
+    the dashboard form); they skip the interactive prompt.
     """
     print()
     _say(f"  Installing MCP '{entry.name}'", Colors.CYAN + Colors.BOLD)
@@ -699,7 +708,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     if entry.auth.env:
         print()
         _say("  Configure credentials:", Colors.CYAN)
-        env_values = _prompt_env_vars(entry.auth.env)
+        env_values = _prompt_env_vars(entry.auth.env, preloaded_env or {})
     if entry.auth.type == "oauth" and entry.auth.provider:
         # Provider-mediated OAuth relies on the existing `hermes auth <provider>` flow; surface
         # guidance rather than auto-running it to keep install decoupled from provider-auth lifecycle.
