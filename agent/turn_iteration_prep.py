@@ -480,8 +480,8 @@ def apply_retry_restarts(
         restart_count += 1
         # Each chain entry is a provider this turn is allowed to try and each gets the whole
         # per-call retry budget, so the real bound is max_retries × chain length. A flat
-        # max_retries cap truncated any chain longer than it (a 31-entry chain with 10
-        # retries ended the turn after the 11th entry). Still a backstop: _fallback_index
+        # max_retries cap truncated any chain longer than it (a 5-entry chain with the
+        # default api_max_retries=3 ended the turn after the 4th entry). Still a backstop: _fallback_index
         # only advances, so the chain ends the escalation loop on its own; the cap covers
         # a mid-turn model switch that resets the index.
         _chain_len = len(getattr(agent, "_fallback_chain", None) or [])

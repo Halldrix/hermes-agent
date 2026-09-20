@@ -69,8 +69,8 @@ def test_restart_refunds_are_bounded_per_turn(flag):
 def test_fallback_restart_cap_scales_with_chain_length():
     """The rebuilt cap is ``max_retries`` × fallback-chain length: each chain entry is a
     provider the turn may try and each gets the whole per-call retry budget, so a chain
-    longer than ``max_retries`` is not truncated mid-chain (a 31-entry chain with
-    ``api_max_retries=10`` previously ended after the 11th entry)."""
+    longer than ``max_retries`` is not truncated mid-chain (a 5-entry chain with the
+    default ``api_max_retries=3`` previously ended after the 4th entry)."""
     chain = MAX_RETRIES + 2
     limit = MAX_RETRIES * chain
     agent = _agent()
