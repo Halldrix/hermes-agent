@@ -164,6 +164,54 @@ def test_catalog_accepts_declared_credential(
     ).read_text(encoding="utf-8")
 
 
+def test_catalog_non_secret_env_never_lands_in_env_file(
+    client: TestClient,
+    catalog_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Non-secret declared env vars (e.g. a base URL) are not written to .env:
+    install_entry inlines them into the server config instead."""
+    import hermes_cli.mcp_catalog as mcp_catalog
+
+    catalog_root = Path(os.environ["HERMES_OPTIONAL_MCPS"])
+    manifest_path = catalog_root / "demo" / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["auth"]["env"].append(
+        {
+            "name": "DEMO_BASE_URL",
+            "prompt": "Demo base URL",
+            "secret": False,
+        }
+    )
+    manifest_path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    installs: list[str] = []
+    monkeypatch.setattr(
+        mcp_catalog,
+        "install_entry",
+        lambda entry, enable=True: installs.append(entry.name),
+    )
+
+    response = client.post(
+        "/api/mcp/catalog/install",
+        headers=HEADERS,
+        json={
+            "name": "demo",
+            "env": {
+                "DEMO_API_KEY": "valid-demo-value",
+                "DEMO_BASE_URL": "https://demo.example.test",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert installs == ["demo"]
+    env_text = (catalog_env / ".env").read_text(encoding="utf-8")
+    assert "DEMO_API_KEY=valid-demo-value" in env_text
+    assert "DEMO_BASE_URL" not in env_text
+    assert "https://demo.example.test" not in env_text
+
+
 @pytest.mark.parametrize(
     "protected_key",
     [

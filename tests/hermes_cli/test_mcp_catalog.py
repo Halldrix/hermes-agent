@@ -620,6 +620,11 @@ class TestInstall:
         assert get_env_value("DEMO_CLIENT_SECRET") == "val-for-secret"
         raw = get_config_path().read_text(encoding="utf-8")
         assert "${DEMO_CLIENT_SECRET}" in raw and "val-for-secret" not in raw
+        # Non-secret client id is inlined into config.yaml (not .env, not a ref):
+        # .env stays secrets-only.
+        assert get_env_value("DEMO_CLIENT_ID") is None
+        assert "${DEMO_CLIENT_ID}" not in raw
+        assert "val-for-id" in raw
 
         # A ``${VAR}`` the manifest never declares would reach the token endpoint as a literal
         # placeholder (invalid_client): rejected at parse time, like the api_key header contract.
