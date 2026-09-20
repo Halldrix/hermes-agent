@@ -466,7 +466,7 @@ def _prompt_env_vars(specs: List[EnvVarSpec], preloaded: Optional[Dict[str, str]
     collected: Dict[str, str] = {}
     for spec in specs:
         pre = preloaded.get(spec.name)
-        if pre is not None:
+        if pre:
             collected[spec.name] = pre
             continue
         existing = get_env_value(spec.name) if spec.secret else None
