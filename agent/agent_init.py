@@ -890,6 +890,9 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Optional[
             _refused_entries.append((_fb_provider, "no usable credentials"))
             continue
         agent._fallback_activated = True
+        # Only the automatic fallback path arms the route gate; a deliberate /model switch
+        # must never be restricted (#117495). Reached only past the refusal branch above.
+        agent._provider_fallback_active = True
         if _fb_provider.strip().lower() == "moa":
             # The chokepoint handed back the preset's aggregator client, which only proves the
             # preset resolves and its aggregator has credentials. A MoA entry means the preset
