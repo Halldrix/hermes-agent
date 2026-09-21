@@ -128,7 +128,7 @@ def test_deliberate_model_switch_is_never_restricted(dispatch_mode):
     messages = []
     with patch(
         "hermes_cli.config.load_config_readonly",
-        return_value={"halt_on_side_effecting_tools": True},
+        return_value={"fallback": {"halt_on_side_effecting_tools": True}},
     ):
         executed, _ = _run_batch(
             agent, dispatch_mode,
