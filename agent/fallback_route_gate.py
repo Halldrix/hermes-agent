@@ -6,7 +6,8 @@ route check (issue #117495). Tools with irreversible external effects (git push,
 service restarts, DB writes, sent messages) can execute on a route the caller never
 selected — and no post-hoc result invalidation can undo them.
 
-``halt_on_side_effecting_tools`` (top-level config key, default ``False``) closes this:
+``halt_on_side_effecting_tools`` (config key under the ``fallback:`` block, default
+``False``) closes this:
 while an automatic provider fallback is the acting route AND that key is set, tools
 that may have side effects are refused *before* dispatch; read-only tools keep
 working. The fallback model can keep reading, summarizing, and answering; it just
@@ -42,7 +43,7 @@ def fallback_route_block_reason(agent: Any, tool_name: str, provider: Any, model
 
     Called at the tool-dispatch chokepoints right before execution. ``provider``/``model``
     are the route the agent is actually serving on at dispatch time. Opt-in via the
-    top-level ``halt_on_side_effecting_tools`` config key (default ``False`` keeps the
+    ``fallback.halt_on_side_effecting_tools`` config key (default ``False`` keeps the
     legacy unrestricted behavior).
     """
     from agent.tool_result_classification import tool_may_have_side_effect
