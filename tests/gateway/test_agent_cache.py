@@ -852,7 +852,13 @@ class TestRehydrateSessionModelOverrideHealsBareCustom:
             "provider": "custom",
             "base_url": "https://bedrock.example/v1",
         }
-        runner = self._runner_with_store(SimpleNamespace(get_model_override=lambda key: persisted))
+        sets = []
+        store = SimpleNamespace(
+            get_model_override=lambda key: persisted,
+            set_model_override=lambda key, override: sets.append((key, dict(override))))
+        runner = self._runner_with_store(store)
+        runner._session_state = lambda key: SimpleNamespace(
+            conversation=SimpleNamespace(model_override=None))
 
         # _peek_session_state: no in-memory override -> rehydrate path runs.
         monkeypatch.setattr(
@@ -862,9 +868,13 @@ class TestRehydrateSessionModelOverrideHealsBareCustom:
         resolved = {}
         monkeypatch.setattr(
             "gateway.run._resolve_runtime_agent_kwargs_for_provider",
-            lambda provider, target_model=None: resolved.setdefault("provider", provider) or {
-                "api_key": "sk-custom", "api_mode": "chat_completions",
-                "base_url": "https://bedrock.example/v1" if provider == "custom:sigv4-bedrock" else None})
+            lambda provider, target_model=None: (
+                resolved.setdefault("provider", provider),
+                {
+                    "api_key": "sk-custom", "api_mode": "chat_completions",
+                    "base_url": "https://bedrock.example/v1" if provider == "custom:sigv4-bedrock" else None,
+                    "request_overrides": {}, "capabilities": {},
+                })[1])
 
         # Config with the named entry serving the model.
         monkeypatch.setattr(
@@ -879,11 +889,22 @@ class TestRehydrateSessionModelOverrideHealsBareCustom:
 
         # The healed identity, not the bare class, reaches the resolver.
         assert resolved["provider"] == "custom:sigv4-bedrock"
+        # Review finding 3: the DURABLE override is repaired too — the bare custom is
+        # replaced by the healed identity and the current endpoint on the store.
+        assert sets, "the healed override must be persisted back"
+        assert sets[0][1]["provider"] == "custom:sigv4-bedrock"
+        assert sets[0][1]["base_url"] == "https://bedrock.example/v1"
 
     def test_no_heal_when_identity_not_recoverable(self, monkeypatch):
         from types import SimpleNamespace
         persisted = {"model": "some-model", "provider": "custom", "base_url": ""}
-        runner = self._runner_with_store(SimpleNamespace(get_model_override=lambda key: persisted))
+        sets = []
+        store = SimpleNamespace(
+            get_model_override=lambda key: persisted,
+            set_model_override=lambda key, override: sets.append((key, dict(override))))
+        runner = self._runner_with_store(store)
+        runner._session_state = lambda key: SimpleNamespace(
+            conversation=SimpleNamespace(model_override=None))
 
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._peek_session_state",
@@ -896,4 +917,5 @@ class TestRehydrateSessionModelOverrideHealsBareCustom:
 
         runner._rehydrate_session_model_override("telegram:1")
         assert resolved["provider"] == "custom"
-
+        # Unrecoverable: no repair written back.
+        assert sets == []
