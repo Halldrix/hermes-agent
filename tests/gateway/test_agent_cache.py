@@ -829,3 +829,71 @@ class TestAgentCacheMessageCountRebaseline:
         assert self._guard_would_reuse(runner, "telegram:s1", "s1") is True
         with runner._agent_cache_lock:
             assert runner._agent_cache["telegram:s1"][0] is agent
+
+
+class TestRehydrateSessionModelOverrideHealsBareCustom:
+    """Regression for #117710: a persisted /model switch that ran a named
+    custom:<name> entry may keep only the resolved billing class "custom"
+    (older builds). _rehydrate_session_model_override must recover the entry
+    identity from the persisted endpoint before resolving credentials."""
+
+    def _runner_with_store(self, store):
+        from gateway.run import GatewayRunner
+        runner = GatewayRunner.__new__(GatewayRunner)
+        runner._agent_cache = {}
+        runner._agent_cache_lock = threading.Lock()
+        runner.session_store = store
+        return runner
+
+    def test_bare_custom_heals_to_named_entry_before_resolution(self, monkeypatch):
+        from types import SimpleNamespace
+        persisted = {
+            "model": "custom-model-1",
+            "provider": "custom",
+            "base_url": "https://bedrock.example/v1",
+        }
+        runner = self._runner_with_store(SimpleNamespace(get_model_override=lambda key: persisted))
+
+        # _peek_session_state: no in-memory override -> rehydrate path runs.
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._peek_session_state",
+            lambda self, key: SimpleNamespace(conversation=SimpleNamespace(model_override=None)))
+
+        resolved = {}
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+            lambda provider, target_model=None: resolved.setdefault("provider", provider) or {
+                "api_key": "sk-custom", "api_mode": "chat_completions",
+                "base_url": "https://bedrock.example/v1" if provider == "custom:sigv4-bedrock" else None})
+
+        # Config with the named entry serving the model.
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"model": {"default": "custom-model-1"},
+                     "custom_providers": [{"name": "sigv4-bedrock",
+                                           "base_url": "https://bedrock.example/v1",
+                                           "api_key": "sk-custom",
+                                           "model": "custom-model-1"}]})
+
+        runner._rehydrate_session_model_override("telegram:1")
+
+        # The healed identity, not the bare class, reaches the resolver.
+        assert resolved["provider"] == "custom:sigv4-bedrock"
+
+    def test_no_heal_when_identity_not_recoverable(self, monkeypatch):
+        from types import SimpleNamespace
+        persisted = {"model": "some-model", "provider": "custom", "base_url": ""}
+        runner = self._runner_with_store(SimpleNamespace(get_model_override=lambda key: persisted))
+
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._peek_session_state",
+            lambda self, key: SimpleNamespace(conversation=SimpleNamespace(model_override=None)))
+        resolved = {}
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+            lambda provider, target_model=None: resolved.setdefault("provider", provider) or {})
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+
+        runner._rehydrate_session_model_override("telegram:1")
+        assert resolved["provider"] == "custom"
+

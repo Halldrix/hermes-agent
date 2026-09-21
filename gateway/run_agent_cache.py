@@ -164,6 +164,17 @@ class GatewayAgentCacheMixin:
         if is_foreign_provider_endpoint(provider, override.get("base_url")):
             override["base_url"] = None  # left over from a switch that kept the previous provider's URL
         if provider:
+            # A persisted /model switch that ran a named custom:<name> entry may keep only the
+            # resolved billing class "custom" (older builds; #117710) — recover the entry identity
+            # before resolving, or credentials resolve against nothing.
+            try:
+                if (provider or "").strip().lower() == "custom":
+                    from hermes_cli.runtime_provider import canonical_custom_identity
+                    provider = canonical_custom_identity(
+                        base_url=persisted.get("base_url") or None,
+                        model=persisted.get("model") or None) or provider
+            except Exception:
+                logger.debug("session model override: custom provider identity heal failed", exc_info=True)
             # Re-resolve credentials for the persisted provider. On failure (e.g. credentials removed
             # since the switch) keep the credential-less override — _resolve_session_agent_runtime
             # retries the resolution for that provider on each turn (default route + notice meanwhile).
