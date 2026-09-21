@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { group } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import type { ChatMessage } from '@/lib/chat-messages'
+import { createClientSessionState } from '@/lib/chat-runtime'
 import {
   $activeSessionStoredIdRotation,
   $currentFastMode,
@@ -205,6 +206,27 @@ describe('useSessionStateCache — stored-id rotation provenance', () => {
   })
 })
 
+function TranscriptHarness({
+  activeSessionId,
+  onReady,
+  selectedStoredSessionId
+}: HarnessProps) {
+  const busyRef: MutableRefObject<boolean> = { current: false }
+
+  const cache = useSessionStateCache({
+    activeSessionId,
+    busyRef,
+    selectedStoredSessionId,
+    setAwaitingResponse: () => undefined,
+    setBusy: () => undefined,
+    setMessages: messages => $messages.set(messages)
+  })
+
+  onReady(cache)
+
+  return null
+}
+
 function Harness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessProps) {
   const busyRef: MutableRefObject<boolean> = { current: false }
 
@@ -221,6 +243,67 @@ function Harness({ activeSessionId, onReady, selectedStoredSessionId }: HarnessP
 
   return null
 }
+
+describe('useSessionStateCache — warm-resume transcript gate (#117867)', () => {
+  beforeEach(() => {
+    // Make the view-sync flush synchronous, like the turn-timer describe does.
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+      cb(0)
+
+      return null as unknown as number
+    })
+  })
+
+  it('does not publish an empty transcript over a non-empty view for the same session', () => {
+    let cache!: Cache
+
+    setActiveSessionId('runtime-A')
+    setSelectedStoredSessionId('stored-A')
+
+    render(
+      <TranscriptHarness
+        activeSessionId="runtime-A"
+        onReady={value => (cache = value)}
+        selectedStoredSessionId="stored-A"
+      />
+    )
+
+    // Seed the view THE WAY PRODUCTION DOES: a streamed turn staged through
+    // syncSessionStateToView (which pins viewSessionIdRef), not a direct atom
+    // write — the gate guard keys off that pin.
+    const transcript = [
+      { id: 'user-1', role: 'user', hidden: false, parts: [{ type: 'text', text: 'hello' }] },
+      { id: 'asst-1', role: 'assistant', hidden: false, parts: [{ type: 'text', text: 'hi there' }] }
+    ] as ChatMessage[]
+
+    act(() => {
+      cache.syncSessionStateToView('runtime-A', {
+        ...createClientSessionState('stored-A'),
+        busy: true,
+        messages: transcript
+      })
+    })
+
+    expect($messages.get()).toHaveLength(2)
+
+    const release = cache.holdSessionTranscriptView('runtime-A')
+
+    act(() => {
+      // `message.complete` — the completion flush lands while the warm-resume
+      // gate is still held. The cached state's messages are suppressed, so the
+      // pending view state carries an empty transcript for the LIVE session.
+      cache.syncSessionStateToView('runtime-A', {
+        ...createClientSessionState('stored-A'),
+        busy: false,
+        messages: transcript
+      })
+    })
+
+    release()
+
+    expect($messages.get()).toHaveLength(2)
+  })
+})
 
 describe('useSessionStateCache — per-session turn timer', () => {
   beforeEach(() => {

@@ -296,7 +296,18 @@ export function useSessionStateCache({
         return
       }
 
-      const viewState = suppressTranscriptForView(state, transcriptViewGateByRuntimeIdRef.current.has(sessionId))
+      // The warm-resume gate is a HOLD, not a clear (#117867): while it is
+      // held, `suppressTranscriptForView` empties the state's messages so the
+      // cached (unproven) transcript cannot paint before REST authority lands.
+      // That suppression must never publish over the LIVE transcript already
+      // on screen for the same session — including mid-turn flushes (`busy`
+      // heartbeats and the completion transition), which would drop the newest
+      // turn the moment it ends. Only a genuine session switch (a different
+      // `viewSessionIdRef`) may clear the view.
+      const gateHeld = transcriptViewGateByRuntimeIdRef.current.has(sessionId)
+      const viewAlreadyLive = $messages.get().length > 0 && viewSessionIdRef.current === sessionId
+      const suppressedEmpty = gateHeld && state.messages.length > 0 && viewAlreadyLive
+      const viewState = suppressedEmpty ? state : suppressTranscriptForView(state, gateHeld)
 
       syncRuntimeMetadataToView(viewState)
       pendingViewStateRef.current = { sessionId, state: viewState }
