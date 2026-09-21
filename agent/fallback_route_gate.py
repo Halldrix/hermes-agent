@@ -70,5 +70,7 @@ def _gate_enabled() -> bool:
 
         fallback_cfg = load_config_readonly().get("fallback", {})
         return bool(isinstance(fallback_cfg, dict) and fallback_cfg.get("halt_on_side_effecting_tools", False))
-    except Exception:
+    except Exception as _cfg_err:
+        # Fail-open on a broken config read (legacy behavior): log so the failure is observable.
+        logger.debug("fallback gate config read failed; gate disabled: %s", _cfg_err)
         return False
