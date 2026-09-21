@@ -2284,8 +2284,18 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         elif session_row_model and not confirmed_runtime_lock:
             # A session-persisted raw model (no route alias) is a standing selection that pins
             # this session's turns ahead of per-request body values.
+            row_provider = current_provider
+            if (row_provider or "").strip().lower() == "custom":
+                # Bare "custom" is the resolved billing class, not a routable identity: the row's
+                # model was persisted by a turn that ran a named ``custom:<name>`` entry, whose
+                # identity only survives in config (#117710). Resolve it back the same way every
+                # other restore path does, or the pinned model runs on the credential-less
+                # OpenRouter fallback and the turn dies with "No LLM provider configured".
+                with suppress(Exception):
+                    from hermes_cli.runtime_provider import canonical_custom_identity
+                    row_provider = canonical_custom_identity(model=session_row_model) or row_provider
             self._apply_provider_runtime(
-                runtime_kwargs, current_provider, target_model=session_row_model)
+                runtime_kwargs, row_provider, target_model=session_row_model)
             model = resolve_effective_model(None, session_row_model, model)
             if request_model or request_provider:
                 logger.debug(

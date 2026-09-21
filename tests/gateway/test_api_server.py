@@ -2719,6 +2719,90 @@ class TestStoredSessionModelFilter:
         assert adapter._stored_session_model(None) is None
 
 
+class TestSessionRowModelHealsBareCustomProvider:
+    """A session row's raw model must not pin later turns to bare provider
+    ``custom`` (#117710): the first turn of POST /api/sessions/{id}/chat runs a
+    named ``custom:<name>`` entry, whose resolved provider is the billing class
+    "custom" — the entry identity is lost on the row. On the second turn the
+    stored model threads through as ``session_model`` and
+    ``resolve_runtime_provider("custom")`` falls through to the credential-less
+    OpenRouter fallback → "No LLM provider configured" 500 on every turn after
+    the first. The pinned selection must resolve the provider back through
+    ``canonical_custom_identity``, the same invariant every other restore path
+    (TUI/Desktop, CLI resume, fallback) already applies.
+    """
+
+    CUSTOM_CONFIG = {
+        "custom_providers": [
+            {
+                "name": "sigv4-bedrock",
+                "base_url": "https://bedrock.example/v1",
+                "api_key": "sk-custom",
+                "api_mode": "chat_completions",
+                "model": "the-model-the-first-turn-persisted",
+            }
+        ]
+    }
+
+    def _make(self, monkeypatch, captured):
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        _patch_create_agent_runtime(monkeypatch, captured, FakeAgent)
+        # The stubbed global default IS the turn-2 runtime state on this bug: turn 1 resolved the
+        # profile's custom:<name> entry, whose runtime provider is the bare class "custom".
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "custom",
+                "api_key": None,
+                "base_url": None,
+                "api_mode": "chat_completions",
+            },
+        )
+        import hermes_cli.runtime_provider as rp
+
+        monkeypatch.setattr(rp, "load_config", lambda: self.CUSTOM_CONFIG)
+        monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+
+        adapter = _make_routing_adapter({})
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+        monkeypatch.setattr(adapter, "_session_model_override_for", lambda *_: None)
+        return adapter
+
+    def test_second_turn_resolves_named_entry_credentials(self, monkeypatch):
+        captured = {}
+        adapter = self._make(monkeypatch, captured)
+
+        adapter._create_agent(
+            session_id="s1", session_model="the-model-the-first-turn-persisted")
+
+        assert captured["model"] == "the-model-the-first-turn-persisted"
+        assert captured["provider"] == "custom"
+        assert captured["base_url"] == "https://bedrock.example/v1"
+        assert captured["api_key"] == "sk-custom"
+
+    def test_heal_failure_dies_like_today_but_for_the_right_reason(self, monkeypatch):
+        """No configured entry serves the model: healing is best-effort, the bare
+        "custom" runtime stays in place and the failure stays the pre-fix one —
+        but only for genuinely unrecoverable rows, never for a named entry."""
+        captured = {}
+        adapter = self._make(monkeypatch, captured)
+        import hermes_cli.runtime_provider as rp
+
+        monkeypatch.setattr(rp, "load_config", lambda: {})
+
+        adapter._create_agent(
+            session_id="s1", session_model="model-no-entry-serves")
+
+        assert captured["model"] == "model-no-entry-serves"
+        # Unresolved: the ambient bare-custom runtime survives untouched.
+        assert captured["provider"] == "custom"
+        assert captured["api_key"] is None
+
+
 # ---------------------------------------------------------------------------
 # Event-loop offloading for synchronous SessionDB calls (P1)
 # ---------------------------------------------------------------------------
