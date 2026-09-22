@@ -95,6 +95,41 @@ def test_unhydrated_env_reference_is_not_accused_of_being_burned(capsys):
     assert finding.manual_issues == [], finding.manual_issues
 
 
+def test_unreadable_pool_warns_and_reports_issue(capsys, monkeypatch):
+    """A pool store that raises must produce a warn row + issue instead of killing the
+    scan for the remaining providers (one broken provider must not hide the others)."""
+    import agent.credential_pool as cp
+
+    def _boom(_pid):
+        raise RuntimeError("auth.json malformed")
+
+    monkeypatch.setattr(cp, "load_pool", _boom)
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    finding = _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "unreadable: auth.json malformed" in out
+    assert len(finding.manual_issues) >= 1, finding.manual_issues
+    assert "auth.json malformed" in finding.manual_issues[0]
+
+
+def test_mixed_dead_and_exhausted_reports_recovery_time(capsys):
+    """dead + timed-exhausted covering every entry: the pool DOES come back (the exhausted
+    sibling recovers), so the row must show the recovery window, not the no-recovery variant."""
+    _write_openrouter_pool([
+        {**_BASE, "last_status": "dead", "last_status_at": time.time()},
+        {**_BASE, "id": "key-2", "label": "key-2",
+         "last_status": "exhausted", "last_status_at": time.time(), "last_error_code": 402},
+    ])
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    finding = _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "all 2 entries benched, back in ~" in out
+    assert "no recovery time" not in out
+    assert len(finding.manual_issues) == 1, finding.manual_issues
+
+
 def test_check_registered_and_openrouter_coverage():
     """Wiring contract: the check runs from DOCTOR_CHECKS, and openrouter — deliberately absent
     from PROVIDER_REGISTRY (#109397) — is still scanned alongside every api_key registry pool."""
