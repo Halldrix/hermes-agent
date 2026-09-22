@@ -919,3 +919,50 @@ class TestRehydrateSessionModelOverrideHealsBareCustom:
         assert resolved["provider"] == "custom"
         # Unrecoverable: no repair written back.
         assert sets == []
+
+    def test_ambiguous_recovery_is_never_written_back(self, monkeypatch):
+        """Cold-store regression for the #117819 review: the saved endpoint matches no entry
+        and two entries own the model — the name resolution would pick is a config-order
+        guess, so neither the applied provider nor the durable override may change; a fresh
+        SessionStore keeps reading the bare billing class."""
+        from types import SimpleNamespace
+        persisted = {"model": "shared-model", "provider": "custom",
+                     "base_url": "https://stale.example/v1"}
+        sets = []
+        store = SimpleNamespace(
+            get_model_override=lambda key: dict(persisted),
+            set_model_override=lambda key, override: sets.append((key, dict(override))))
+        runner = self._runner_with_store(store)
+        runner._session_state = lambda key: SimpleNamespace(
+            conversation=SimpleNamespace(model_override=None))
+
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._peek_session_state",
+            lambda self, key: SimpleNamespace(conversation=SimpleNamespace(model_override=None)))
+
+        resolved = {}
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs_for_provider",
+            lambda provider, target_model=None: (
+                resolved.setdefault("provider", provider),
+                {
+                    "api_key": "sk-a" if provider == "custom:provider-a" else None,
+                    "api_mode": "chat_completions",
+                    "base_url": "https://a.example/v1" if provider == "custom:provider-a" else None,
+                    "request_overrides": {}, "capabilities": {},
+                })[1])
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"custom_providers": [
+                {"name": "provider-a", "base_url": "https://a.example/v1",
+                 "api_key": "sk-a", "model": "shared-model"},
+                {"name": "provider-b", "base_url": "https://b.example/v1",
+                 "api_key": "sk-b", "model": "shared-model"}]})
+
+        runner._rehydrate_session_model_override("telegram:1")
+
+        # Ambiguous: the bare class stays applied — config order must not pick the provider.
+        assert resolved["provider"] == "custom"
+        # Nothing inferred was written back: a cold reload still reads the bare class.
+        assert sets == []
+        assert store.get_model_override("telegram:1")["provider"] == "custom"

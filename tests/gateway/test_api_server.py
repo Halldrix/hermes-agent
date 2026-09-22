@@ -2846,6 +2846,32 @@ class TestSessionRowModelHealsBareCustomProvider:
         assert captured["provider"] == "custom"
         assert captured["api_key"] is None
 
+    def test_ambiguous_model_recovery_fails_closed(self, monkeypatch):
+        """#117819 review: the row's endpoint matches no entry and two entries own the model —
+        config order must not pick the provider, so the heal stays unset and the turn keeps
+        today's failure shape instead of routing to another entry's endpoint and key."""
+        captured = {}
+        adapter = self._make(monkeypatch, captured)
+        import hermes_cli.runtime_provider as rp
+
+        monkeypatch.setattr(rp, "load_config", lambda: {
+            "custom_providers": [
+                {"name": "provider-a", "base_url": "https://a.example/v1",
+                 "api_key": "sk-a", "model": "shared-model"},
+                {"name": "provider-b", "base_url": "https://b.example/v1",
+                 "api_key": "sk-b", "model": "shared-model"},
+            ]
+        })
+
+        adapter._create_agent(
+            session_id="s1", session_model="shared-model",
+            session_billing_provider="custom",
+            session_billing_base_url="https://stale.example/v1")
+
+        assert captured["provider"] == "custom"
+        assert captured["api_key"] is None
+        assert captured["base_url"] is None
+
 
 # ---------------------------------------------------------------------------
 # Event-loop offloading for synchronous SessionDB calls (P1)
