@@ -1124,6 +1124,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
         # draining in the background does not satisfy the check on its own.
         # POSIX never takes this branch (``_started_via_task`` stays False).
         _started_via_task = False
+        _task_attempted = False
         # The watcher may relaunch a DIFFERENT profile than its own
         # (run_argv leads the profile gateway command), so the task name must
         # come from run_argv, never from the watcher process's own home —
@@ -1161,6 +1162,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
                 # Prefer the shared helper (snapshot -> /Run -> poll + profile-aware PID check).
                 from hermes_cli import gateway_windows as _gw  # type: ignore
                 if _gw.is_task_registered(task_name=_task_name):
+                    _task_attempted = True
                     _started_via_task = _gw._spawn_via_scheduled_task(
                         task_name=_task_name, hermes_home=_task_home
                     )
@@ -1170,6 +1172,12 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
                         _stdio_fh.write(("[watcher] task route failed: " + str(_e) + "\\n").encode("utf-8", "replace"))
                 except Exception:
                     pass
+                if _task_attempted:
+                    # /Run was issued but never confirmed: a direct Popen would
+                    # race the task-spawned gateway and re-enter the parent-job
+                    # trap (#84185). Exit — the start attestation reports a
+                    # gateway that never appears.
+                    sys.exit(1)
                 _started_via_task = False
         # The Scheduled Task spawned the gateway; skip the direct Popen below
         # (which would race with the task-spawned process and re-enter the

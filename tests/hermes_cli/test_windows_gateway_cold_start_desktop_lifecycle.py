@@ -280,6 +280,7 @@ def test_dead_attested_default_is_cold_started_beside_running_beta(monkeypatch, 
 
     spawned = []
     monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda **k: spawned.append(k) or 4242)
+    monkeypatch.setattr(gateway_windows, "_spawn_via_scheduled_task", lambda *a, **k: False)
     update_cmd._resume_windows_gateways_after_update(token)
 
     assert spawned == [{"home": homes["default"]}]
@@ -314,6 +315,7 @@ def test_every_dead_attested_profile_is_cold_started_when_nothing_runs(monkeypat
 
     order = []
     monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda **k: order.append(k.get("home")) or 4242)
+    monkeypatch.setattr(gateway_windows, "_spawn_via_scheduled_task", lambda *a, **k: False)
     monkeypatch.setattr(
         cli_main, "_cold_start_windows_gateway_after_update", lambda token=None: order.append("active") or True)
     token["cold_start_if_installed"] = True  # both owe a spawn

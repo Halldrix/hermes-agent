@@ -1262,12 +1262,13 @@ def _spawn_via_scheduled_task(
     ``schtasks /Run`` is the only spawn path guaranteed to survive the
     parent-job teardown.
 
-    ``task_name`` and ``hermes_home`` default to the calling process's profile
-    (``get_task_name()`` / ``get_hermes_home()``); callers relaunching a
-    *different* profile — e.g. the update restart-watcher whose ``run_argv``
-    carries another profile — MUST pass both explicitly, because the task name
-    and the gateway's ``HERMES_HOME`` are per-profile (a watcher resolving the
-    task name against its own home would trigger the wrong task or none).
+    ``hermes_home`` defaults to the calling process's profile
+    (``get_hermes_home()``) and ``task_name`` derives from the *spawned*
+    profile's home — the task name and the gateway's ``HERMES_HOME`` are
+    per-profile, so resolving the task against the caller's own home would
+    trigger the wrong task or none. Callers relaunching a *different* profile
+    (the update restart-watcher, the attested multi-profile cold-start) pass
+    only ``hermes_home``; an explicit ``task_name`` still wins.
 
     Never writes or re-registers anything: the registered task action points
     at the stable ``.vbs`` path and ``/Run`` executes whatever content is
@@ -1276,19 +1277,24 @@ def _spawn_via_scheduled_task(
     User-customized launchers and user-edited task actions are simply
     triggered as-is.
 
-    Success = the task accepted ``/Run`` AND a gateway PID that was not
-    running before the trigger appeared within ``timeout_s`` — a pre-update
-    gateway still draining does not satisfy the check on its own. ``False``
-    when the task is not registered, the trigger fails, or the poll expires
-    without a new PID.
+    Success = a gateway PID that was not running before the trigger appeared
+    within ``timeout_s`` — a pre-update gateway still draining does not
+    satisfy the check on its own. ``False`` when the task is not registered
+    or the trigger fails with nothing spawned (callers may then fall back to
+    a direct spawn). Raises when ``/Run`` was accepted but no new PID
+    confirms it: the task-spawned gateway may still be starting, and a
+    direct-spawn fallback would race it for the port and re-enter the
+    parent-job trap (#84185).
     """
     _assert_windows()
-    if task_name is None:
-        task_name = get_task_name()
     if hermes_home is None:
         from hermes_cli.config import get_hermes_home
 
         hermes_home = str(Path(get_hermes_home()))
+    if task_name is None:
+        # Derive from the SPAWNED profile's home, never the caller's env:
+        # a mismatch would trigger task A while starting profile B.
+        task_name = get_task_name(home=hermes_home)
     if not is_task_registered(task_name=task_name):
         return False
 
@@ -1303,12 +1309,21 @@ def _spawn_via_scheduled_task(
         pre_pids = set()
 
     code, _, _ = _exec_schtasks(["/Run", "/TN", task_name])
-    if code != 0:
-        return False
-
+    # Wait for a NEW pid even when /Run was rejected: a task already running
+    # from a previous trigger answers the command with an error yet may still
+    # be spawning, and its gateway must not be raced by a fallback Popen.
     ready = _wait_for_gateway_ready(timeout_s=timeout_s, all_profiles=True)
     new_pids = set(ready) - pre_pids
-    return bool(new_pids)
+    if new_pids:
+        return True
+    if code != 0:
+        # Rejected and nothing spawned: no race — callers may fall back.
+        return False
+    raise RuntimeError(
+        f"schtasks /Run accepted but no new gateway PID within {timeout_s}s — refusing the"
+        " direct-spawn fallback (it would race the task-spawned gateway and die with the"
+        " parent job, #84185)"
+    )
 
 
 def _print_next_steps() -> None:
