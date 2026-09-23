@@ -351,10 +351,13 @@ def verify_source_quote(
         return False
     if _hash_text(text or "") != ctx.text_hash:
         return False
-    try:
-        frag = ctx.fragments[int(ordinal) - 1]
-    except (IndexError, TypeError, ValueError):
+    if (
+        not isinstance(ordinal, int)
+        or isinstance(ordinal, bool)
+        or not 1 <= ordinal <= len(ctx.fragments)
+    ):
         return False
+    frag = ctx.fragments[ordinal - 1]
     if _transport_reference(frag) is None:
         return False
     try:
