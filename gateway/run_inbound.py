@@ -1145,6 +1145,12 @@ class GatewayInboundMixin:
             if not bundle_result:
                 return False
             event.text, _loaded, missing = bundle_result
+            try:
+                from plugins.source_context import invalidate_source_fragments
+
+                invalidate_source_fragments(event)
+            except Exception:
+                logger.debug("tool source context invalidate failed", exc_info=True)
             if missing:
                 logger.info("Bundle %s skipped missing skills: %s", bundle_key, ", ".join(missing))
             return True  # Fall through to normal message processing with bundle content
@@ -1237,6 +1243,12 @@ class GatewayInboundMixin:
                 if not stacked_result:
                     return f"Failed to load stacked skills for /{command}."
                 event.text, _loaded, _missing = stacked_result
+                try:
+                    from plugins.source_context import invalidate_source_fragments
+
+                    invalidate_source_fragments(event)
+                except Exception:
+                    logger.debug("tool source context invalidate failed", exc_info=True)
             else:
                 msg = build_skill_invocation_message(cmd_key, user_instruction, task_id=_quick_key)
                 if msg:
