@@ -505,7 +505,14 @@ def rebase_event_fragments(
             tuple(getattr(incoming_event, "source_fragments", None) or ()),
             new_text,
         )
-    except AttributeError:
+    except Exception:
+        # The caller has already joined the presentation text. Do not leave
+        # the old fragments attached when metadata is malformed or shifting
+        # fails: a later bind could otherwise authorize the new presentation.
+        try:
+            existing_event.source_fragments = ()
+        except Exception:
+            pass
         return
     if not merge_complete and merged:
         try:
@@ -514,8 +521,10 @@ def rebase_event_fragments(
             merged = ()
     try:
         existing_event.source_fragments = merged
-    except AttributeError:
-        pass
+    except Exception:
+        # A read-only provenance field cannot be cleared either. Do not let the
+        # old record survive a successful-but-unwritable rebase.
+        return
 
 
 def shift_event_fragments(event: Any, delta: int) -> None:
