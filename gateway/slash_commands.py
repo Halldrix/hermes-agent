@@ -165,9 +165,10 @@ def _systemd_scope_wrap_if_supervised(argv: list) -> tuple[list, dict | None]:
         binary = shutil.which("systemd-run")
         if not binary:
             return argv, None
+        unit = f"hermes-gateway-update-{os.getpid()}-{time.time_ns()}.scope"
         wrapped = [
             binary, "--user", "--scope", "--quiet", "--collect",
-            "--unit", "hermes-gateway-update.scope",
+            "--unit", unit,
             "--", *argv,
         ]
         return wrapped, systemd_user_bus_env()

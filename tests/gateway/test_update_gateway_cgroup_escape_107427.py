@@ -44,6 +44,10 @@ class TestSpawnDetachedUpdateCgroupEscape:
         assert captured["argv"][0] == "/usr/bin/systemd-run"
         assert "--scope" in captured["argv"]
         assert "--collect" in captured["argv"]
+        unit_index = captured["argv"].index("--unit")
+        unit = captured["argv"][unit_index + 1]
+        assert unit.startswith("hermes-gateway-update-")
+        assert unit.endswith(".scope")
         assert captured["env"]["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/fake/bus"
         assert captured["start_new_session"] is True
 
