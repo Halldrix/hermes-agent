@@ -12,6 +12,8 @@ authorized reads available.
 from __future__ import annotations
 
 import copy
+import inspect
+from contextlib import nullcontext
 
 import pytest
 
@@ -888,6 +890,294 @@ def test_auto_skill_multi_prefix_shift_exposes_post_shift_context():
     assert ctx.fragments[0].start == prefix_len
     assert event.text[prefix_len:] == "user hello"
     assert out == "ok" or "ok" in str(out)
+
+
+def _source_prepare_runner(monkeypatch, prepare_text):
+    """Minimal real GatewayRunner preparation harness for source-lifetime tests."""
+    import types
+    from datetime import datetime
+
+    from gateway.config import GatewayConfig, Platform
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionEntry, SessionSource
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.adapters = {}
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="c1", user_id="u1")
+    entry = SessionEntry(
+        session_key="sess-prepare", session_id="sess-prepare",
+        created_at=datetime.now(), updated_at=datetime.now(),
+    )
+
+    async def _fake_open_session(*args):
+        return False, True
+
+    async def _fake_acquire(*args):
+        return None
+
+    async def _fake_mark_durable(*args, **kwargs):
+        return None
+
+    async def _fake_load_transcript(session_id):
+        return []
+
+    async def _fake_hygiene(*args):
+        return args[4]
+
+    async def _fake_first_contact(*args):
+        return None
+
+    async def _prepare(event, source, history, session_key):
+        result = prepare_text(event)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    runner._hmwa_open_session = _fake_open_session
+    runner._pinned_session_context_prompt = lambda *args: ""
+    runner._hmwa_acquire_turn_lease = _fake_acquire
+    runner._mark_durable_active_turn = _fake_mark_durable
+    runner.session_store = object()
+    runner._async_session_store = types.SimpleNamespace(
+        _store=runner.session_store, load_transcript=_fake_load_transcript
+    )
+    runner._hmwa_run_session_hygiene = _fake_hygiene
+    runner._hmwa_first_contact_notes = _fake_first_contact
+    runner._voice_channel_sidecar_note = lambda *args: None
+    runner._prepare_profile_scoped_inbound_message_text = _prepare
+    runner._set_pending_turn_sidecar_notes = lambda *args: None
+    runner._bind_adapter_run_generation = lambda *args, **kwargs: None
+    runner._adapter_for_source = lambda source: None
+    return runner, source, entry
+
+
+def _capture_bound_source(monkeypatch):
+    """Wrap — not replace — production binds and retain their live records."""
+    captured = {}
+    real_event_bind = sc.bind_execution_for_event
+    real_bind = sc.bind_execution
+
+    def _capture(token, execution_id):
+        with sc.scoped_tool_call():
+            captured["ctx"] = copy.copy(get_tool_source_context())
+        captured.update(token=token, execution_id=execution_id)
+        return token, execution_id
+
+    def _bind_event(**kwargs):
+        return _capture(*real_event_bind(**kwargs))
+
+    def _bind(**kwargs):
+        return _capture(*real_bind(**kwargs))
+
+    monkeypatch.setattr(sc, "bind_execution_for_event", _bind_event)
+    monkeypatch.setattr(sc, "bind_execution", _bind)
+    return captured
+
+
+def _assert_record_revoked(record):
+    token = sc._CALL_SCOPE.set(record)
+    try:
+        assert get_tool_source_context() is None
+    finally:
+        sc._CALL_SCOPE.reset(token)
+
+
+def test_prepare_exception_revokes_source_lease(monkeypatch):
+    import asyncio
+
+    from gateway.platforms.event import MessageEvent, MessageType
+
+    def _fail_prepare(event):
+        raise RuntimeError("normalization failed")
+
+    runner, source, entry = _source_prepare_runner(monkeypatch, _fail_prepare)
+    captured = _capture_bound_source(monkeypatch)
+    event = MessageEvent(text="first", message_type=MessageType.TEXT)
+    note_single_source(event, namespace="weixin", message_id="m1", reference="r1")
+
+    with pytest.raises(RuntimeError, match="normalization failed"):
+        asyncio.run(runner._hmwa_prepare_turn(event, source, entry, "sess-prepare", "quick", 41))
+
+    assert "ctx" not in captured
+
+
+def test_prepare_cancellation_revokes_source_lease(monkeypatch):
+    import asyncio
+
+    from gateway.platforms.event import MessageEvent, MessageType
+
+    async def _cancel_prepare(event):
+        asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+        await asyncio.Event().wait()
+
+    runner, source, entry = _source_prepare_runner(monkeypatch, _cancel_prepare)
+    captured = _capture_bound_source(monkeypatch)
+    event = MessageEvent(text="first", message_type=MessageType.TEXT)
+    note_single_source(event, namespace="weixin", message_id="m1", reference="r1")
+
+    async def _prepare_and_cancel():
+        task = asyncio.create_task(
+            runner._hmwa_prepare_turn(event, source, entry, "sess-prepare", "quick", 42)
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_prepare_and_cancel())
+    assert "ctx" not in captured
+
+
+def test_prepare_post_bind_exception_revokes_source_lease(monkeypatch):
+    import asyncio
+
+    from gateway.platforms.event import MessageEvent, MessageType
+
+    runner, source, entry = _source_prepare_runner(monkeypatch, lambda event: event.text)
+    captured = _capture_bound_source(monkeypatch)
+    event = MessageEvent(text="first", message_type=MessageType.TEXT)
+    note_single_source(event, namespace="weixin", message_id="m1", reference="r1")
+
+    def _fail_timestamp(*args):
+        raise RuntimeError("timestamp failed")
+
+    runner._hmwa_apply_message_timestamp = _fail_timestamp
+    with pytest.raises(RuntimeError, match="timestamp failed"):
+        asyncio.run(runner._hmwa_prepare_turn(event, source, entry, "sess-prepare", "quick", 43))
+
+    ctx = captured["ctx"]
+    assert ctx is not None and ctx.execution_id == captured["execution_id"]
+    assert sc._lease_generation(ctx.execution_id) is None
+    assert ctx.abort_cancelled.is_set() is True
+    _assert_record_revoked(ctx)
+
+
+@pytest.mark.parametrize(
+    "followup_kind, expected_authorizes",
+    [("human", True), ("internal", False), ("missing_provenance", False), ("text_only", False)],
+)
+@pytest.mark.parametrize("exit_kind", ["success", "cancel", "exception"])
+def test_queued_followup_uses_its_own_source_context(
+    monkeypatch, followup_kind, expected_authorizes, exit_kind
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from gateway.config import Platform
+    from gateway.platforms.event import MessageEvent, MessageType
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionSource
+    from gateway.turn_context import TurnContext
+    from tools.registry import ToolRegistry
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="c1", user_id="u1")
+    first = MessageEvent(text="first", message_type=MessageType.TEXT, source=source, message_id="m1")
+    note_single_source(first, namespace="weixin", message_id="m1", reference="r1")
+    captured = _capture_bound_source(monkeypatch)
+    first_token, first_eid = sc.bind_execution_for_event(
+        event=first, session_key="sess-queue", run_generation=51
+    )
+    with sc.scoped_tool_call():
+        saved_first = copy.copy(get_tool_source_context())
+    assert saved_first is not None and saved_first.execution_id == first_eid
+
+    if followup_kind == "text_only":
+        pending_event = None
+        pending = "plain follow-up"
+        expected_message_id = None
+    else:
+        pending_event = MessageEvent(
+            text="second", message_type=MessageType.TEXT, source=source, message_id="m2"
+        )
+        if followup_kind == "human":
+            note_single_source(pending_event, namespace="weixin", message_id="m2", reference="r2")
+        elif followup_kind == "internal":
+            pending_event.internal = True
+        pending = pending_event.text
+        expected_message_id = "m2"
+
+    adapter = SimpleNamespace(
+        _active_sessions={},
+        _streaming_tts_completed_turns=set(),
+        _streaming_tts_turn_key=lambda *args: None,
+        send_typing=lambda *args, **kwargs: asyncio.sleep(0),
+    )
+    turn_ctx = TurnContext(
+        source=source, session_id="session-1", session_key="sess-queue", run_generation=51,
+        history=[], result_holder=[None], _status_thread_metadata={},
+    )
+    runner._is_goal_continuation_event = lambda event: False
+    runner._session_key_for_source = lambda source: "sess-queue"
+    async def _prepare_text(**kwargs):
+        return kwargs["event"].text
+
+    async def _refresh_count(*args):
+        return None
+
+    runner._prepare_profile_scoped_inbound_message_text = _prepare_text
+    runner._delivery_adapter_for = lambda source: adapter
+    runner._intake_adapter_for = lambda source: None
+    runner._reply_anchor_for_event = lambda event: getattr(event, "message_id", None)
+    runner._refresh_agent_cache_message_count = _refresh_count
+
+    seen = {}
+    registry = ToolRegistry()
+
+    def _probe(args, **kwargs):
+        ctx = get_tool_source_context()
+        seen["ctx"] = ctx
+        seen["authorizes"] = source_context_allows_mutation(
+            ctx, text=kwargs.get("_expected_text", pending)
+        )
+        return "ok"
+
+    registry.register("probe-followup", "test", {"type": "object", "properties": {}}, _probe)
+
+    async def _model_run(message, *args, **kwargs):
+        seen["message"] = message
+        seen["inbound_message_id"] = kwargs.get("inbound_message_id")
+        if exit_kind == "cancel":
+            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+            await asyncio.Event().wait()
+        if exit_kind == "exception":
+            raise RuntimeError("followup failed")
+        return registry.dispatch("probe-followup", {"_expected_text": message})
+
+    runner._run_agent_inner = _model_run
+    runner._profile_scope_for_source = lambda source: nullcontext()
+    runner._run_agent = type(runner)._run_agent.__get__(runner, type(runner))
+
+    try:
+        if exit_kind == "success":
+            result = asyncio.run(runner._run_agent_queued_followup(
+                turn_ctx, adapter, pending, pending_event, "first response",
+                {"interrupted": True, "messages": []}, None,
+            ))
+        else:
+            expected = asyncio.CancelledError if exit_kind == "cancel" else RuntimeError
+            with pytest.raises(expected):
+                asyncio.run(runner._run_agent_queued_followup(
+                    turn_ctx, adapter, pending, pending_event, "first response",
+                    {"interrupted": True, "messages": []}, None,
+                ))
+            result = None
+        if exit_kind == "success":
+            assert result == "ok" or "ok" in str(result)
+            assert seen["message"] == pending
+            assert seen["inbound_message_id"] == expected_message_id
+            ctx = seen["ctx"]
+            assert ctx is not None
+            if expected_authorizes:
+                assert [fragment.message_id for fragment in ctx.fragments] == ["m2"]
+                assert ctx.execution_id != first_eid
+                assert seen["authorizes"] is True
+            else:
+                assert seen["authorizes"] is False
+    finally:
+        clear_execution(first_token)
+    _assert_record_revoked(saved_first)
+    if exit_kind != "success":
+        _assert_record_revoked(captured["ctx"])
 
 
 def test_abort_event_set_on_clear():
