@@ -381,6 +381,7 @@ class TestSendUpdateNotification:
             "timestamp": (datetime.now() - timedelta(hours=2)).isoformat(),
         }))
         (hermes_home / ".update_exit_code").write_text("0")
+        _finalized(hermes_home)
         # runner.adapters stays empty: no adapter for the target platform, ever.
 
         with patch("gateway.run._hermes_home", hermes_home):
