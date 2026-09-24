@@ -329,7 +329,7 @@ def render_source_fragments(
 
 
 def _transport_reference(frag: SourceFragment) -> Optional[str]:
-    return frag.reference or frag.message_id
+    return str(frag.reference or frag.message_id or "").strip() or None
 
 
 def verify_source_quote(

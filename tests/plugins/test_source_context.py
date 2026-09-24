@@ -234,6 +234,15 @@ def test_verify_quote_rejects_invalid_ordinals(bound):
         assert verify_source_quote(ctx, "hello\nworld", True, "hello") is False
 
 
+def test_verify_quote_rejects_blank_transport_reference():
+    frags = (SourceFragment(namespace="weixin", message_id="", reference="", start=0, end=5),)
+    _bind("hello", frags)
+    with scoped_tool_call():
+        ctx = get_tool_source_context()
+        assert ctx is not None
+        assert verify_source_quote(ctx, "hello", 1, "hello") is False
+
+
 def test_verify_quote_requires_transport_reference():
     frags = (SourceFragment(namespace="weixin", start=0, end=5),)
     _bind("hello", frags)
