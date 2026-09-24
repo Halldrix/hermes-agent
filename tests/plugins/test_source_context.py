@@ -1145,6 +1145,9 @@ def test_queued_followup_uses_its_own_source_context(
     async def _model_run(message, *args, **kwargs):
         seen["message"] = message
         seen["inbound_message_id"] = kwargs.get("inbound_message_id")
+        # Observe the predecessor before the test's finally can revoke it; otherwise
+        # this assertion cannot distinguish production cleanup from fixture cleanup.
+        seen["predecessor_generation"] = sc._lease_generation(saved_first.execution_id)
         if exit_kind == "cancel":
             asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
             await asyncio.Event().wait()
@@ -1182,6 +1185,7 @@ def test_queued_followup_uses_its_own_source_context(
                 assert seen["authorizes"] is True
             else:
                 assert seen["authorizes"] is False
+        assert seen["predecessor_generation"] is None
     finally:
         clear_execution(first_token)
     _assert_record_revoked(saved_first)
