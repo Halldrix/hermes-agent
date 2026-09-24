@@ -446,6 +446,7 @@ def test_recovery_finalizes_persisted_child_sessions(tmp_path, monkeypatch):
                 ("child-done", 100, "parent"),
                 ("child-compressed", 100, "parent"),
                 ("child-after-compression", 110, "child-compressed"),
+                ("child-before-dispatch", 90, "parent"),
                 ("child-foreign", 100, "other-parent"),
             ],
         )
@@ -465,7 +466,8 @@ def test_recovery_finalizes_persisted_child_sessions(tmp_path, monkeypatch):
             "0": "child-live",
             "1": "child-done",
             "2": "child-compressed",
-            "3": "child-foreign",
+            "3": "child-before-dispatch",
+            "4": "child-foreign",
         },
     })
 
@@ -480,6 +482,7 @@ def test_recovery_finalizes_persisted_child_sessions(tmp_path, monkeypatch):
     assert rows["child-done"] == (123, "completed")
     assert rows["child-compressed"] == (123, "compression")
     assert rows["child-after-compression"][1] == "interrupted"
+    assert rows["child-before-dispatch"][1] == "interrupted"
     assert rows["child-foreign"] == (None, None)
 
 

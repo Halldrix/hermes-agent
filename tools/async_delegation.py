@@ -256,8 +256,7 @@ def _owner_liveness() -> Optional[Callable[[Any, Any], bool]]:
 
 
 def recover_abandoned_delegations() -> int:
-    """Classify records whose owning process disappeared as outcome unknown; children a multi-child unit had already
-    recorded (``record_unit_child``) are replayed with their real results."""
+    """Classify abandoned units as ``interrupted``; per-task results with no recorded child outcome remain ``unknown``."""
     alive = _owner_liveness()
     if alive is None:
         return 0
@@ -311,9 +310,8 @@ def recover_abandoned_delegations() -> int:
                         f" UNION ALL SELECT sessions.id FROM sessions JOIN descendants "
                         f"ON sessions.parent_session_id=descendants.id) "
                         f"UPDATE sessions SET ended_at=?, end_reason='interrupted' "
-                        f"WHERE id IN (SELECT id FROM descendants) AND ended_at IS NULL "
-                        f"AND started_at >= ?",
-                        (parent_id, *child_ids, now, dispatched_at or 0),
+                        f"WHERE id IN (SELECT id FROM descendants) AND ended_at IS NULL",
+                        (parent_id, *child_ids, now),
                     )
             conn.execute("""UPDATE async_delegations SET state='interrupted', completed_at=?,
                    updated_at=?, event_json=?, result_json=?, delivery_state='pending'
