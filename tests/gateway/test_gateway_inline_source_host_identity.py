@@ -272,3 +272,71 @@ def test_a_restart_watchers_borrowed_argv_still_never_reads_as_this_homes_gatewa
         )
         is False
     )
+
+
+def test_a_bootstrap_launched_owner_keeps_its_scoped_token_locks(
+    host_home, bootstrap_host, published_launcher_argv, monkeypatch
+):
+    """The same false negative also took the owner's scoped token locks away from it.
+
+    ``_scoped_lock_record_is_stale`` judged a live bootstrap-launched gateway dead on a READABLE
+    command line, so ``acquire_scoped_lock`` treated a token it is actively serving as free and
+    let a second process take it over (a duplicate Telegram bot on one token).
+    """
+    pid, _ = bootstrap_host
+
+    from gateway import status as status_mod
+
+    monkeypatch.setattr(status_mod, "_pid_exists", lambda _p: True)
+    monkeypatch.setattr(status_mod, "_get_process_start_time", lambda _p: 1000)
+    monkeypatch.setattr(status_mod, "_process_is_stopped", lambda _p: False)
+    record = {
+        "pid": pid,
+        "kind": "hermes-gateway",
+        "start_time": 1000,
+        "hermes_home": str(host_home),
+        "scope": "platform:telegram",
+        "identity_hash": "deadbeef",
+    }
+    assert status_mod._scoped_lock_record_is_stale(record, pid) is False
+    # Same record, a PID that is not the recorded host owner: still stale, lock still reclaimable.
+    assert status_mod._scoped_lock_record_is_stale(dict(record, pid=pid + 1), pid + 1) is True
+
+
+def test_the_rescue_protects_the_owner_and_nobody_else(
+    host_home, bootstrap_host, published_launcher_argv, monkeypatch
+):
+    """Over-blocking would be its own defect: the proof keys on the live owner's identity, not argv.
+
+    A foreign live PID carrying the very same inline-source argv must still lose the lock, or a
+    squatter's lock could never be reclaimed.
+    """
+    from gateway import status as status_mod
+
+    real_pid = os.getpid()
+    foreign = os.getppid()
+    monkeypatch.setattr(status_mod, "_pid_exists", lambda _p: True)
+    monkeypatch.setattr(status_mod, "_get_process_start_time", lambda _p: 1000)
+    monkeypatch.setattr(status_mod, "_process_is_stopped", lambda _p: False)
+    monkeypatch.setattr(status_mod, "_read_process_cmdline", lambda _p: published_launcher_argv)
+    monkeypatch.setattr(
+        status_mod,
+        "_host_gateway_serves_home",
+        lambda pid, home: pid == real_pid and str(home) == str(host_home),
+    )
+    record = {"kind": "hermes-gateway", "start_time": 1000, "hermes_home": str(host_home)}
+
+    assert status_mod._scoped_lock_record_is_stale(dict(record, pid=real_pid), real_pid) is False
+    assert status_mod._scoped_lock_record_is_stale(dict(record, pid=foreign), foreign) is True
+    # A record stamped for another home is not the owner's either.
+    assert (
+        status_mod._scoped_lock_record_is_stale(
+            dict(record, pid=real_pid, hermes_home=str(tmp_other_home(host_home))), real_pid
+        )
+        is True
+    )
+
+
+def tmp_other_home(host_home: Path) -> Path:
+    """A sibling home the live owner is provably not the gateway for."""
+    return host_home.parent / "other-installation" / ".hermes"
