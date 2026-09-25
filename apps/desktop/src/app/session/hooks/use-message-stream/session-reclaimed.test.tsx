@@ -152,6 +152,16 @@ describe('session.reclaimed', () => {
     expect($sessionResumeRequest.get()?.sessionId).toBe('stored-1')
   })
 
+  it('resumes the atom-visible durable session when it has no local state slice', () => {
+    mountStream('stale-ref')
+    $activeSessionId.set(ACTIVE_SID)
+
+    reclaim(ACTIVE_SID)
+
+    expect($sessionResumeRequest.get()?.sessionId).toBe('stored-1')
+    expect($sessionStates.get()[ACTIVE_SID]).toBeUndefined()
+  })
+
   it('does not navigate the primary chat when a background runtime is reclaimed', () => {
     mountStream()
     $activeSessionId.set('live-kept')
