@@ -791,14 +791,28 @@ def _host_gateway_serves_home(pid: int, profile_home: Path) -> bool:
     try:
         from gateway import host_rendezvous
 
-        if host_rendezvous.read_record(host_rendezvous.ROLE_GATEWAY) is None:
+        record = host_rendezvous.read_record(host_rendezvous.ROLE_GATEWAY)
+        if record is None:
             return False
         from gateway.host_attach import IDENTIFY_TIMEOUT_S, host_gateway, profile_name_for_home
 
         owner = host_gateway(identify_timeout=IDENTIFY_TIMEOUT_S)
     except Exception:
         return False
-    return owner is not None and owner.pid == pid and owner.serves(profile_name_for_home(profile_home))
+    if owner is None or owner.pid != pid or not owner.serves(profile_name_for_home(profile_home)):
+        return False
+    # The served set is keyed by PROFILE NAME, and a home outside any ``<root>/profiles/`` dir --
+    # a second installation on the same machine -- normalizes to ``default``, the same name the
+    # owner serves. Without the home check, one install's owner would vouch for another's gateway
+    # and keep its token locks unreclaimable. The check is the owner's ROOT, not its launch home:
+    # a served secondary legitimately lives under ``<root>/profiles/<name>``, and the one thing
+    # that must never pass is a different install's root.
+    from hermes_constants import get_default_hermes_root
+
+    root = Path(get_default_hermes_root())
+    return _same_hermes_home(root, profile_home) or _same_hermes_home(
+        root / "profiles" / (profile_name_for_home(profile_home) or ""), profile_home
+    )
 
 
 def _record_matches_live_gateway_pid(
