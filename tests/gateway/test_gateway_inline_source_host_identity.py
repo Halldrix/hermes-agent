@@ -345,6 +345,29 @@ def test_the_rescue_protects_the_owner_and_nobody_else(
     )
 
 
+def test_a_second_install_on_the_host_is_not_vouched_for_by_our_owner(
+    host_home, bootstrap_host, monkeypatch
+):
+    """The served set is keyed by PROFILE NAME, so two installs collide on ``default``.
+
+    A home outside any ``<root>/profiles/`` dir normalizes to ``default`` -- the name this owner
+    serves. Without a home check, one installation's owner would vouch for the OTHER's gateway
+    and hold its token locks unreclaimable. The owner's own root and its served profiles must
+    still pass: the fix cannot cost the multiplexer its secondaries.
+    """
+    owner_pid, _ = bootstrap_host
+    from gateway import status as status_mod
+
+    other_install = host_home.parent / "other-installation" / ".hermes"
+    other_install.mkdir(parents=True, exist_ok=True)
+
+    assert status_mod._host_gateway_serves_home(owner_pid, host_home) is True
+    # A served secondary lives under the owner's own root and must still be served.
+    assert status_mod._host_gateway_serves_home(owner_pid, host_home / "profiles" / "coder") is True
+    # A second install resolves to the same profile name, and must not be vouched for.
+    assert status_mod._host_gateway_serves_home(owner_pid, other_install) is False
+
+
 def test_replace_can_still_reclaim_a_bootstrap_launched_owners_lock(
     host_home, published_launcher_argv, monkeypatch
 ):
