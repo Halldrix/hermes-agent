@@ -1851,8 +1851,16 @@ def clear_takeover_marker(target_home: Optional[Path] = None) -> None:
 def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tuple[int, int, Path]]:
     """Resolve a live scoped-lock owner to a verified ``(pid, start_time, home)``. A lock file is
     only a claim: the record, the target home's PID record, and the live process must agree on
-    PID, start-time, gateway identity, and home. Missing legacy metadata fails closed."""
-    if not isinstance(record, dict) or not _record_looks_like_gateway(record):
+    PID, start-time, gateway identity, and home. Missing legacy metadata fails closed.
+
+    Gateway identity is the same inline-source rescue as :func:`_record_matches_live_gateway_pid`,
+    and it is what keeps ``--replace`` able to reclaim this owner's lock. A bootstrap-launched
+    owner fails both argv checks here (its live cmdline and the ``sys.argv`` it persisted, which
+    for a ``python -c`` process is ``['-c', ...]``), so without the host proof the lock its owner
+    is actively serving could never be taken over by a replace — a wedge, not a safety property.
+    Every other corroboration below is unchanged and still required.
+    """
+    if not isinstance(record, dict):
         return None
     owner_pid = _pid_from_record(record)
     owner_start_time = record.get("start_time")
@@ -1865,16 +1873,26 @@ def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tup
     ):
         return None
     target_home = _canonical_hermes_home(raw_home)
+    if not _record_looks_like_gateway(record) and not _host_gateway_serves_home(
+        owner_pid, target_home
+    ):
+        return None
     if _scoped_lock_owner_state(owner_pid, owner_start_time) != "same":
         return None
     live_cmdline = _read_process_cmdline(owner_pid)
-    if live_cmdline is not None and not looks_like_gateway_runtime_command_line(live_cmdline):
+    if (
+        live_cmdline is not None
+        and not looks_like_gateway_runtime_command_line(live_cmdline)
+        and not _host_gateway_serves_home(owner_pid, target_home)
+    ):
         return None
-    # The target home's own PID record must corroborate the claim.
+    # The target home's own PID record must corroborate the claim. Its argv suffers the same
+    # inline-source blindness (the owner's own ``sys.argv``), so the host proof answers it too.
     pid_record = _read_json_file(target_home / "gateway.pid") or {}
     pid_record_home = pid_record.get("hermes_home")
     if (
-        not _record_looks_like_gateway(pid_record)
+        (not _record_looks_like_gateway(pid_record)
+         and not _host_gateway_serves_home(owner_pid, target_home))
         or _pid_from_record(pid_record) != owner_pid
         or pid_record.get("start_time") != owner_start_time
         or not isinstance(pid_record_home, str)
