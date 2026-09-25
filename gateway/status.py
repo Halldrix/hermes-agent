@@ -780,11 +780,22 @@ def _host_gateway_serves_home(pid: int, profile_home: Path) -> bool:
     while multiplexing every profile, so :func:`_command_line_belongs_to_profile` rejects every
     secondary and the profile reads as "not running" while its messages are being served. The live
     served set is the only proof; the argv rule stays as the fallback when no record exists.
+
+    The record is checked FIRST, without dialing anything, and the dial itself is bounded
+    (:data:`gateway.host_attach.IDENTIFY_TIMEOUT_S`): this runs per candidate on hot poll paths
+    (``get_running_pid`` is polled by ``gateway stop``'s post-kill confirmation and by every
+    status read), and a live-but-wedged owner's socket would otherwise cost the control socket's
+    full 2 s client timeout on every poll. Both only make the answer arrive sooner or be
+    provably False — the served set itself still comes from the owner's own answer.
     """
     try:
-        from gateway.host_attach import host_gateway, profile_name_for_home
+        from gateway import host_rendezvous
 
-        owner = host_gateway()
+        if host_rendezvous.read_record(host_rendezvous.ROLE_GATEWAY) is None:
+            return False
+        from gateway.host_attach import IDENTIFY_TIMEOUT_S, host_gateway, profile_name_for_home
+
+        owner = host_gateway(identify_timeout=IDENTIFY_TIMEOUT_S)
     except Exception:
         return False
     return owner is not None and owner.pid == pid and owner.serves(profile_name_for_home(profile_home))

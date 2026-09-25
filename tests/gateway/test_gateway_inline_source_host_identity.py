@@ -153,9 +153,10 @@ def bootstrap_host(host_home, published_launcher_argv, monkeypatch):
         status_mod, "_read_process_cmdline", lambda _pid: published_launcher_argv
     )
     # The WIRE only: the owner's control socket answer. Everything that reads it is real.
+    # The signature matches ``identify_gateway`` so the probe's real ``timeout=`` reaches it.
     monkeypatch.setattr(
         "gateway.control_socket.identify_gateway",
-        lambda home: {
+        lambda home, timeout=None: {
             "pid": pid,
             "hermes_home": str(host_home),
             "served_profiles": served,
@@ -372,7 +373,7 @@ def test_replace_can_still_reclaim_a_bootstrap_launched_owners_lock(
     )
     hr.ensure_host_state_dir()
     hr.atomic_json_write(hr.record_path(hr.ROLE_GATEWAY), record.to_json(), mode=0o600)
-    monkeypatch.setattr("gateway.control_socket.identify_gateway", lambda home: {
+    monkeypatch.setattr("gateway.control_socket.identify_gateway", lambda home, timeout=None: {
         "pid": owner_pid, "hermes_home": str(host_home), "served_profiles": ["default"]})
     host_attach.invalidate_host_gateway_cache()
     try:
