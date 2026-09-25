@@ -33,10 +33,6 @@ import pytest
 
 import hermes_constants
 
-# The spawned stand-in carries a real ``gateway run`` argv on purpose -- that argv IS the defect --
-# and is spawned and reaped by ``published_launcher_argv`` below, so it never outlives the file.
-pytestmark = pytest.mark.spawns_gateway_lookalike
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -80,6 +76,17 @@ def published_launcher_argv() -> Iterator[str]:
     finally:
         proc.kill()
         proc.wait(timeout=10)
+
+
+#: The spawned stand-in carries a real ``gateway run`` argv on purpose -- that argv IS the defect --
+#: and is spawned and reaped by ``published_launcher_argv``, so it never outlives the file. The
+#: premise is read off ``/proc`` and the shape is the POSIX shell launcher: Windows has the same
+#: inline-source defect through its ``.cmd`` launcher, but proving it there belongs to the Windows
+#: live suite, not a ``/proc`` read this file would fail on.
+pytestmark = [
+    pytest.mark.spawns_gateway_lookalike,
+    pytest.mark.platforms("posix"),
+]
 
 
 @pytest.fixture
