@@ -1884,8 +1884,22 @@ def clear_takeover_marker(target_home: Optional[Path] = None) -> None:
 def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tuple[int, int, Path]]:
     """Resolve a live scoped-lock owner to a verified ``(pid, start_time, home)``. A lock file is
     only a claim: the record, the target home's PID record, and the live process must agree on
-    PID, start-time, gateway identity, and home. Missing legacy metadata fails closed."""
+    PID, start-time, gateway identity, and home. Missing legacy metadata fails closed.
+
+    A record stamped in another PID namespace is never signalled (#123081): its PID was issued
+    there, so it names an unrelated process here — under ``PrivatePIDs=`` that is the host's init,
+    and every corroboration below would be read against the wrong process. This gate precedes the
+    cmdline check deliberately: a signal is irreversible, so nothing downstream may be load-bearing
+    for a PID we cannot even name.
+    """
     if not isinstance(record, dict) or not _record_looks_like_gateway(record):
+        return None
+    if not pid_checkable_from(record.get("pidns")):
+        logger.warning(
+            "Refusing to signal scoped-lock holder pid=%s: stamped in PID namespace %s, this "
+            "process is in %s — that PID names an unrelated process from here.",
+            record.get("pid"), record.get("pidns") or "unrecorded", describe_pid_namespace(),
+        )
         return None
     owner_pid = _pid_from_record(record)
     owner_start_time = record.get("start_time")
