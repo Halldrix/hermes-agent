@@ -796,12 +796,26 @@ def _record_matches_live_gateway_pid(
     """True when a live PID still identifies as this gateway record. The live command line wins (a
     stale record's argv must not make a recycled PID count as a gateway; with ``expected_home`` it
     must also belong to that profile — or serve it as the host multiplexer); unreadable cmdline
-    (Windows/EACCES) -> persisted record."""
+    (Windows/EACCES) -> persisted record.
+
+    The host-multiplexer proof RESCUES an argv the strict matcher cannot read. Since the #107002
+    fix the matchers answer ``None`` for an interpreter running inline source (#121635), and the
+    gateway this install launched itself is exactly that: ``<python> -I -c '<bootstrap>' gateway
+    run`` (``hermes_cli._launchers``). Consulted after the argv check, the rescue never applies.
+    :func:`_host_gateway_serves_home` asks a different question — the live owner's PID+createTime
+    incarnation and its served set, never argv — so it can answer for a bootstrap-launched gateway
+    and still cannot be answered by a restart watcher's borrowed argv (#107002): the watcher is
+    neither the recorded host PID nor in its served set.
+    """
     live_cmdline = _read_process_cmdline(pid)
     if not live_cmdline:
         return _record_looks_like_gateway(record)
     if not looks_like_gateway_runtime_command_line(live_cmdline):
-        return False
+        # Unscoped callers pass no ``expected_home``; the host owner is the gateway for THIS
+        # process's own home too, or a bootstrap-launched host reports no PID at all and
+        # ``gateway.pid``/``gateway.lock`` get unlinked from under the live process.
+        home = expected_home if expected_home is not None else _get_process_hermes_home()
+        return _host_gateway_serves_home(pid, home)
     if expected_home is not None and _host_gateway_serves_home(pid, expected_home):
         return True
     return expected_home is None or _command_line_belongs_to_profile(live_cmdline, expected_home)
