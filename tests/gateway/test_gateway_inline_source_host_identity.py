@@ -335,3 +335,62 @@ def test_the_rescue_protects_the_owner_and_nobody_else(
         )
         is True
     )
+
+
+def test_replace_can_still_reclaim_a_bootstrap_launched_owners_lock(
+    host_home, published_launcher_argv, monkeypatch
+):
+    """A lock nothing can take over is a wedge, so ``--replace`` must still work on this owner.
+
+    Protecting the owner from a plain second start (above) is only correct while a sanctioned
+    takeover remains: ``take_over_scoped_lock_holder`` resolves the owner through
+    ``_validated_scoped_lock_gateway_owner``, which had the same argv blindness, and returned
+    ``None`` for a bootstrap-launched owner — so its scoped token locks became unreclaimable.
+
+    The owner here is a FOREIGN live pid (the resolver refuses ``os.getpid()`` outright) and the
+    host record is published for it, so the proof is the real one.
+    """
+    import json
+
+    import gateway.host_rendezvous as hr
+    from gateway import host_attach
+    from gateway import status as status_mod
+
+    owner_pid = os.getppid()  # real, live, and not this process
+    start = 1000
+    monkeypatch.setattr(status_mod, "_pid_exists", lambda _p: True)
+    monkeypatch.setattr(status_mod, "_get_process_start_time", lambda _p: start)
+    monkeypatch.setattr(status_mod, "_process_is_stopped", lambda _p: False)
+    monkeypatch.setattr(status_mod, "_read_process_cmdline", lambda _p: published_launcher_argv)
+
+    # Publish the host record for a pid that is not us, through the real record type.
+    record = hr.HostRecord(
+        role=hr.ROLE_GATEWAY, pid=owner_pid, create_time=hr.process_create_time(owner_pid),
+        host="", port=None, protocol_version=hr.HOST_PROTOCOL_VERSION,
+        token_fingerprint=hr.token_fingerprint(""), profiles=("default",),
+        updated_at="2026-09-25T00:00:00+00:00", home=str(host_home),
+    )
+    hr.ensure_host_state_dir()
+    hr.atomic_json_write(hr.record_path(hr.ROLE_GATEWAY), record.to_json(), mode=0o600)
+    monkeypatch.setattr("gateway.control_socket.identify_gateway", lambda home: {
+        "pid": owner_pid, "hermes_home": str(host_home), "served_profiles": ["default"]})
+    host_attach.invalidate_host_gateway_cache()
+    try:
+        assert hr.read_record(hr.ROLE_GATEWAY) is not None, "the record must be a real one"
+        # What the real launcher persists: argv[0] is '-c'.
+        boot_argv = ["-c", "gateway", "run"]
+        (host_home / "gateway.pid").write_text(json.dumps({
+            "pid": owner_pid, "kind": "hermes-gateway", "start_time": start,
+            "hermes_home": str(host_home), "argv": boot_argv}))
+        lock = {
+            "pid": owner_pid, "kind": "hermes-gateway", "start_time": start,
+            "hermes_home": str(host_home), "argv": boot_argv,
+            "scope": "platform:telegram", "identity_hash": "deadbeef",
+        }
+        assert status_mod._record_looks_like_gateway(lock) is False, "premise: argv alone refuses"
+        resolved = status_mod._validated_scoped_lock_gateway_owner(lock)
+        assert resolved is not None, "--replace could not reclaim this owner's lock"
+        assert resolved[0] == owner_pid
+    finally:
+        hr.record_path(hr.ROLE_GATEWAY).unlink(missing_ok=True)
+        host_attach.invalidate_host_gateway_cache()
