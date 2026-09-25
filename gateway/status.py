@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home, get_process_hermes_home
+from hermes_platform.host.pid_namespace import (
+    describe_pid_namespace,
+    local_pid_namespace,
+    pid_checkable_from,
+    pid_namespace_id,
+)
 from utils import atomic_json_write
 
 if sys.platform == "win32":
@@ -808,13 +814,21 @@ def _record_matches_live_gateway_pid(
 
 
 def _build_pid_record() -> dict:
-    return {
+    record = {
         "pid": os.getpid(), "kind": _GATEWAY_KIND, "argv": list(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
         # Scoped locks are machine-global; the owner's home lets a cross-profile
         # --replace place its takeover marker where the target will read it.
         "hermes_home": str(_canonical_hermes_home(_get_process_hermes_home())),
     }
+    # A PID is only meaningful with the namespace that issued it. Inside
+    # ``PrivatePIDs=`` this process is PID 1, and that number names the host's init
+    # for every reader outside the namespace (#123081). Readers refuse to probe a
+    # record whose namespace is not their own rather than resolving PID 1 to init.
+    pidns = local_pid_namespace()
+    if pidns.known:
+        record["pidns"] = pidns.id
+    return record
 
 
 def _get_code_identity_fields() -> dict[str, Any]:
@@ -929,10 +943,43 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
     return (True, st.st_mtime_ns, st.st_size)
 
 
+def _record_pidns_guards_unlink(record: Optional[dict[str, Any]]) -> bool:
+    """True when a record's PID namespace says this process must not unlink its identity files.
+
+    #123081: a gateway inside ``PrivatePIDs=`` records PID 1. A checker outside the
+    namespace reads host init at PID 1, decides the recorded gateway is dead, and —
+    worse — unlinks ``gateway.pid`` AND ``gateway.lock``. The live gateway keeps its
+    flock on the now-unlinked inode, so the next ``acquire_gateway_runtime_lock()``
+    creates a FRESH file and succeeds: the flock singleton guard, the one atomic
+    arbiter against two gateways, is bypassed entirely and both run, fighting over
+    Telegram ``getUpdates``.
+
+    The flock itself is namespace-proof, so its liveness was never in doubt — only
+    the PID answer was. Refusing to unlink what we cannot verify is the safe answer;
+    deleting a live gateway's lock is never the conservative one.
+    """
+    if not isinstance(record, dict):
+        return False
+    if pid_checkable_from(record.get("pidns")):
+        return False
+    logger.warning(
+        "Refusing to unlink gateway identity files: the recorded gateway (pid=%s) was stamped in PID "
+        "namespace %s and this process is in %s. Its PID is not meaningful here, so its liveness cannot "
+        "be verified from this namespace — leaving the files in place preserves the runtime lock.",
+        record.get("pid"), record.get("pidns") or "unrecorded", describe_pid_namespace(),
+    )
+    return True
+
+
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check)."""
     if not cleanup_stale:
         return
+    # The lock is held but unprovable from here: the owner may be alive in another
+    # namespace. Refuse rather than delete a live gateway's singleton guard (#123081).
+    for record in (_read_pid_record(pid_path), _read_gateway_lock_record(_get_gateway_lock_path(pid_path))):
+        if _record_pidns_guards_unlink(record):
+            return
     _clear_running_pid_cache()
     for path in (pid_path, _get_gateway_lock_path(pid_path)):
         with contextlib.suppress(Exception):
@@ -1603,9 +1650,17 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
     so (also catches boot-time PID+start_time collisions; systemd spawns deterministically);
     cmdline unreadable AND start_time unknown on either side => the lock record's own argv is the
     only signal left. Stopped (SIGTSTP) processes look alive to _pid_exists; stale so --replace
-    works."""
+    works.
+
+    A record stamped in another PID namespace is never stale on that basis (#123081): inside
+    ``PrivatePIDs=`` the owner recorded PID 1, and reading that number from outside resolves the
+    host's init, whose cmdline is not a gateway — which would let a second gateway steal a live
+    bot token. Unverifiable is not the same as dead.
+    """
     if existing_pid is None or not _pid_exists(existing_pid):
         return True
+    if not pid_checkable_from(existing.get("pidns")):
+        return False
     recorded_start = existing.get("start_time")
     current_start = _get_process_start_time(existing_pid)
     if _start_times_conflict(recorded_start, current_start):
