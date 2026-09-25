@@ -309,34 +309,29 @@ def test_the_rescue_protects_the_owner_and_nobody_else(
     """Over-blocking would be its own defect: the proof keys on the live owner's identity, not argv.
 
     A foreign live PID carrying the very same inline-source argv must still lose the lock, or a
-    squatter's lock could never be reclaimed.
+    squatter's lock could never be reclaimed. The real host record published by ``bootstrap_host``
+    answers; nothing here stubs the proof.
     """
+    owner_pid, _ = bootstrap_host
     from gateway import status as status_mod
 
-    real_pid = os.getpid()
-    foreign = os.getppid()
     monkeypatch.setattr(status_mod, "_pid_exists", lambda _p: True)
     monkeypatch.setattr(status_mod, "_get_process_start_time", lambda _p: 1000)
     monkeypatch.setattr(status_mod, "_process_is_stopped", lambda _p: False)
+    # Same argv for every PID, so only the owner's identity can decide.
     monkeypatch.setattr(status_mod, "_read_process_cmdline", lambda _p: published_launcher_argv)
-    monkeypatch.setattr(
-        status_mod,
-        "_host_gateway_serves_home",
-        lambda pid, home: pid == real_pid and str(home) == str(host_home),
-    )
     record = {"kind": "hermes-gateway", "start_time": 1000, "hermes_home": str(host_home)}
 
-    assert status_mod._scoped_lock_record_is_stale(dict(record, pid=real_pid), real_pid) is False
+    # The recorded owner, serving this home: its lock is NOT stale.
+    assert status_mod._scoped_lock_record_is_stale(dict(record, pid=owner_pid), owner_pid) is False
+    # A foreign live process wearing the very same argv still loses its lock.
+    foreign = owner_pid + 1
     assert status_mod._scoped_lock_record_is_stale(dict(record, pid=foreign), foreign) is True
-    # A record stamped for another home is not the owner's either.
+    # And the owner judged against a profile it does NOT serve: not its gateway, so stale.
     assert (
         status_mod._scoped_lock_record_is_stale(
-            dict(record, pid=real_pid, hermes_home=str(tmp_other_home(host_home))), real_pid
+            dict(record, pid=owner_pid, hermes_home=str(host_home / "profiles" / "stranger")),
+            owner_pid,
         )
         is True
     )
-
-
-def tmp_other_home(host_home: Path) -> Path:
-    """A sibling home the live owner is provably not the gateway for."""
-    return host_home.parent / "other-installation" / ".hermes"
