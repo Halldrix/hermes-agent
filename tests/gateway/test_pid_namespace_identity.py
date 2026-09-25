@@ -338,3 +338,23 @@ def test_scoped_lock_from_our_namespace_still_reclaims_a_dead_owner(monkeypatch)
         "start_time": status._get_process_start_time(dead), "pidns": _HOST_NS,
     }
     assert status._scoped_lock_record_is_stale(same_ns, dead) is True
+
+
+def test_the_owner_namespace_can_still_reclaim_its_own_dead_lock(monkeypatch):
+    """The recovery path the refusal does NOT break.
+
+    A crashed namespaced gateway's lock is not reclaimable from outside (that is the
+    point), but the unit's own restart reclaims it from inside, where the record is
+    checkable. Without this, a SIGKILLed gateway would leak its bot token to every
+    outside starter with no way back short of deleting the lock by hand.
+    """
+    from gateway import status
+
+    monkeypatch.setattr(pns, "local_pid_namespace", lambda: _LIVE)
+    dead = 2 ** 22 + 12345
+    own_namespace_record = {
+        "pid": dead, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": status._get_process_start_time(dead), "pidns": _HOST_NS,
+    }
+    assert pid_checkable_from(own_namespace_record["pidns"]) is True
+    assert status._scoped_lock_record_is_stale(own_namespace_record, dead) is True
