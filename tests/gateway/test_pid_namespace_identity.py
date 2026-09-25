@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -358,3 +359,83 @@ def test_the_owner_namespace_can_still_reclaim_its_own_dead_lock(monkeypatch):
     }
     assert pid_checkable_from(own_namespace_record["pidns"]) is True
     assert status._scoped_lock_record_is_stale(own_namespace_record, dead) is True
+
+
+# ---------------------------------------------------------------------------
+# Consumer 4: the --replace takeover, where a wrong PID means an irreversible signal
+# ---------------------------------------------------------------------------
+
+
+def test_takeover_refuses_to_signal_a_foreign_namespace_holder(monkeypatch, tmp_path):
+    """`--replace` must never SIGTERM a PID that was issued in another namespace.
+
+    With the recorded PID being 1, the whole corroboration chain — start time,
+    gateway cmdline, the target home's own PID record — is read against the host's
+    init. A signal is irreversible, so the namespace gate is checked before any of
+    it rather than relying on init's command line happening to look wrong.
+
+    Init's real cmdline does refuse this today, so the fixture gives the checks
+    behind it everything they would need to say "yes": the owner is alive, its
+    start time agrees, its command line is a gateway's, and the target home's own
+    PID record corroborates it. Only the namespace disagrees — which is the whole
+    argument, because that corroboration is all being read about the wrong process.
+    """
+    from gateway import status
+
+    home = Path(str(tmp_path)).resolve()
+    monkeypatch.setattr(pns, "local_pid_namespace", lambda: _LIVE)
+    record = {
+        "pid": 1, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": 987654, "pidns": _OTHER_NS, "hermes_home": str(home),
+    }
+    (home / "gateway.pid").write_text(json.dumps(record))
+    # Every check downstream of the namespace gate is made to pass.
+    monkeypatch.setattr(status, "_scoped_lock_owner_state", lambda pid, st: "same")
+    monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "/usr/bin/hermes gateway run")
+    # Without the namespace guard this validates and the takeover SIGTERMs PID 1.
+    assert status._validated_scoped_lock_gateway_owner(record) is None
+
+
+def test_takeover_still_signals_a_holder_in_our_own_namespace(monkeypatch, tmp_path):
+    """The control: a same-namespace owner is validated exactly as before.
+
+    The owner is a stubbed live process, because the validator deliberately reads
+    the real command line — this test process' argv is the test runner, not a
+    gateway, and must not be made to look like one.
+    """
+    from gateway import status
+
+    home = Path(str(tmp_path)).resolve()
+    monkeypatch.setattr(pns, "local_pid_namespace", lambda: _LIVE)
+    owner_pid = 4242
+    start = 987654
+    record = {
+        "pid": owner_pid, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": start, "pidns": _HOST_NS, "hermes_home": str(home),
+    }
+    (home / "gateway.pid").write_text(json.dumps(record))
+    monkeypatch.setattr(status, "_scoped_lock_owner_state", lambda pid, st: "same")
+    monkeypatch.setattr(
+        status, "_read_process_cmdline", lambda pid: "/usr/bin/hermes gateway run"
+    )
+    owner = status._validated_scoped_lock_gateway_owner(record)
+    assert owner is not None and owner[0] == owner_pid
+
+
+def test_takeover_still_refuses_a_same_namespace_claim_it_cannot_corroborate(monkeypatch, tmp_path):
+    """The #123081 guard does not weaken the existing fail-closed owner checks:
+    a checkable record with no corroborating PID record in the target home is refused."""
+    from gateway import status
+
+    home = Path(str(tmp_path)).resolve()
+    monkeypatch.setattr(pns, "local_pid_namespace", lambda: _LIVE)
+    record = {
+        "pid": 4242, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": 987654, "pidns": _HOST_NS, "hermes_home": str(home),
+    }
+    monkeypatch.setattr(status, "_scoped_lock_owner_state", lambda pid, st: "same")
+    monkeypatch.setattr(
+        status, "_read_process_cmdline", lambda pid: "/usr/bin/hermes gateway run"
+    )
+    # No gateway.pid written in home: the corroboration step must still refuse.
+    assert status._validated_scoped_lock_gateway_owner(record) is None
