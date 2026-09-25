@@ -133,7 +133,8 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
     // session vanishing rather than being reclaimed. Drop the cached state
     // now — the stored row is untouched, so the sidebar keeps the
     // conversation and reopening it resumes from the DB.
-    const reclaimedRuntimeId = String((payload as { session_id?: string } | undefined)?.session_id ?? '')
+    const reclaimPayload = payload as { session_id?: string; stored_session_id?: string } | undefined
+    const reclaimedRuntimeId = String(reclaimPayload?.session_id ?? '')
 
     // The compression/reclaim lifecycle invalidates the keyed context
     // breakdown so the statusbar gauge refetches instead of serving the
@@ -147,7 +148,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       // already-painted chat flash empty until the explicit durable resume lands.
       const isActiveRuntime = $activeSessionId.get() === reclaimedRuntimeId
 
-      markRuntimeGone(reclaimedRuntimeId)
+      markRuntimeGone(reclaimedRuntimeId, reclaimPayload?.stored_session_id)
       invalidateContextBreakdown(reclaimedStoredId || reclaimedRuntimeId)
 
       if (isActiveRuntime) {
