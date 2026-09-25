@@ -909,6 +909,18 @@ class TestReaperStartupGrace:
         assert gateway._reap_unsupervised_gateway_orphans(min_age_s=180.0) is False
         assert marked_pids == []
 
+    def test_age_helper_returns_zero_when_the_process_probe_raises(self, monkeypatch):
+        """The fail-closed contract is the wrapper swallowing the probe, not a stubbed 0.0."""
+        import sys as _sys
+        from types import SimpleNamespace as _NS
+
+        def _explode(_pid):
+            raise RuntimeError("psutil says no")
+
+        monkeypatch.setitem(_sys.modules, "psutil", _NS(Process=_explode))
+
+        assert gateway._gateway_process_age_s(4242) == 0.0
+
 
 class TestReaperCandidateIsSupervisorOwned:
     """Regression for the Windows pidfile-less supervisor-owned case (#83683).
