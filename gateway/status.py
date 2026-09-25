@@ -1626,6 +1626,13 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
     if _start_times_conflict(recorded_start, current_start):
         return True
     if not _looks_like_gateway_process(existing_pid):
+        # Same inline-source rescue as _record_matches_live_gateway_pid: a bootstrap-launched owner
+        # (``<python> -I -c '<bootstrap>' gateway run``) is judged dead here on a READABLE command
+        # line, and its scoped token locks get taken over while it still serves them. The host
+        # proof cannot be answered by a non-owner, so a watcher's borrowed argv is still rejected.
+        home = existing.get("hermes_home") or _get_process_hermes_home()
+        if _host_gateway_serves_home(existing_pid, Path(str(home))):
+            return _process_is_stopped(existing_pid)
         if _read_process_cmdline(existing_pid) is not None:
             return True
         if None in (recorded_start, current_start) and not _record_looks_like_gateway(existing):
