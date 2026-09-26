@@ -156,9 +156,23 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
         # cleanly, so it runs and dies on its first third-party import. It also hands
         # ``_windows_cron_bootstrap_argv`` an overlay with no site-packages entry, which
         # logs a WARNING on every spawn (#123668 review).
+        #
+        # The catch is the repo's idiom for a PM read (environments_adopt.py:30,
+        # install.py:524), not bare ``Exception``: a malformed record degrades a job, but
+        # ``payload_venv``'s "payload environment escapes its root" is a fail-closed
+        # security check (pm/environments.py:92) and must not be downgraded to a warning.
+        # That one propagates, exactly as it does on the POSIX path today.
+        #
+        # The fall-through is safe because the interpreter handed to a cron script is
+        # ``sys.executable``, and on a managed install with nothing committed a booted
+        # process is by definition a venv interpreter (``_require_own_dependencies``,
+        # pm/environments.py:285-287) carrying its own packages. A stdlib venv here has
+        # no ``uv`` key, skips the overlay below, and keeps its own ``python.exe``.
         try:
             environment = committed_venv(repo)
-        except Exception:
+        except (OSError, RuntimeError, ValueError) as exc:
+            if "escapes its root" in str(exc):
+                raise
             logger.warning(
                 "Windows cron script: could not read the committed dependency environment "
                 "for %s; falling back to the handed venv", repo, exc_info=True)

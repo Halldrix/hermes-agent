@@ -78,7 +78,20 @@ def _validated_runtime_venv(env: dict) -> Path | None:
 
     root = Path(__file__).resolve().parents[2]
     if runtime_facts_path(root).is_file():
-        return selected_venv(root)
+        # ``selected_venv`` RAISES on an unreadable/out-of-tree record (pm/environments.py:
+        # 179-193) — the is_file() gate above suppresses the fallback, never the raise. This
+        # runs inside child-env finalization for EVERY spawn surface, so an unguarded read
+        # turns a malformed facts.json into a spawn-time crash. Degrade to no runtime venv
+        # (the entries below still come from ``sys.prefix``) instead; same shape as the
+        # cron sibling in #122183, which wraps the same resolver for the same reason.
+        try:
+            return selected_venv(root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if "escapes its root" in str(exc):
+                raise
+            logger.debug("PM dependency record unreadable; no runtime venv to strip",
+                         exc_info=True)
+            return None
     candidate = Path(env.get("VIRTUAL_ENV") or "")
     if not env.get("VIRTUAL_ENV") or not any(
             _same_path(candidate, root / "venv") for root in _state()._hermes_repo_root_aliases):
