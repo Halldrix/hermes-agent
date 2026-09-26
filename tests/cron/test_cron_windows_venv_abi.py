@@ -122,3 +122,36 @@ def test_managed_install_without_a_generation_falls_through_to_the_handed_venv(
         assert overlay == child / "Lib" / "site-packages", label
         assert not overlay.is_relative_to(stale), label
         assert interpreter != str(store), label
+
+
+def test_managed_fall_through_keeps_a_stdlib_venv_that_has_no_uv_key(tmp_path, monkeypatch):
+    """The fall-through's other arm: a venv with no ``uv`` key keeps its own python.exe.
+
+    ``_windows_cron_python_invocation`` only overlays when the cfg says ``uv``; a stdlib venv
+    has no such key, so the overlay is skipped and the handed interpreter is returned
+    untouched. That is correct — a stdlib venv's ``python.exe`` resolves its own
+    site-packages with no help — but it is the arm the uv fixture never exercised, and it
+    is the invariant that keeps the fall-through from returning the bare store Python.
+    """
+    from cron import scheduler_script as sched_script
+
+    store = tmp_path / "store" / "python.exe"
+    store.parent.mkdir(parents=True)
+    store.write_text("", encoding="utf-8")
+    child = tmp_path / "child"
+    (child / "Lib" / "site-packages").mkdir(parents=True)
+    (child / "Scripts").mkdir(parents=True)
+    (child / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+    # NOTE: no "uv" key — this is what makes it the stdlib arm.
+    (child / "pyvenv.cfg").write_text("home = C:/python\n", encoding="utf-8")
+
+    monkeypatch.setattr("hermes_cli._launchers.resolve_store_python", lambda _root: store)
+    monkeypatch.setattr("pm.environments.committed_venv", lambda _root: None)
+
+    interpreter, env_overlay = sched_script._windows_cron_python_invocation(
+        str(child / "Scripts" / "python.exe")
+    )
+
+    assert interpreter == str(child / "Scripts" / "python.exe")
+    assert env_overlay == {}
+    assert interpreter != str(store)

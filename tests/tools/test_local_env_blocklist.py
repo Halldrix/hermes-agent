@@ -928,6 +928,51 @@ class TestNativeEnvironmentContracts:
         local_pythonpath._strip_hermes_owned_pythonpath(env)
         assert env["PYTHONPATH"].split(os.pathsep) == ["/home/user/my-lib"]
 
+    def test_unreadable_pm_record_degrades_instead_of_raising(self, tmp_path, monkeypatch):
+        """A malformed facts.json must not crash child-env finalization.
+
+        ``_validated_runtime_venv`` runs inside ``_finalize_child_env`` — the guard path
+        every spawn surface shares — so an unguarded ``selected_venv`` turns an unreadable
+        PM record into a spawn-time traceback instead of a narrower strip list. The
+        ``runtime_facts_path().is_file()`` gate suppresses the FALLBACK, never the RAISE
+        (pm/environments.py:179-193). Same defect and same fix as the cron sibling in
+        #122183.
+        """
+        from tools.environments import local_pythonpath
+
+        def _boom(_root):
+            raise RuntimeError("cannot read dependency environment: facts.json")
+
+        monkeypatch.setattr(
+            "pm.environments.runtime_facts_path", lambda _root: tmp_path / "facts.json"
+        )
+        (tmp_path / "facts.json").write_text("{ not json", encoding="utf-8")
+        monkeypatch.setattr("pm.environments.selected_venv", _boom)
+
+        assert local_pythonpath._validated_runtime_venv({}) is None
+
+    def test_payload_escape_is_not_swallowed_by_the_degrade(self, tmp_path, monkeypatch):
+        """The degrade path must not absorb a fail-closed security check.
+
+        ``payload_venv`` raises "payload environment escapes its root" when a sealed
+        payload's manifest points outside its tree. Returning None here would silently
+        accept a tampered manifest, so the raise propagates — the narrow catch covers a
+        malformed RECORD, not a refusal by the resolver.
+        """
+        from tools.environments import local_pythonpath
+
+        def _escape(_root):
+            raise RuntimeError("payload environment escapes its root")
+
+        monkeypatch.setattr(
+            "pm.environments.runtime_facts_path", lambda _root: tmp_path / "facts.json"
+        )
+        (tmp_path / "facts.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr("pm.environments.selected_venv", _escape)
+
+        with pytest.raises(RuntimeError, match="escapes its root"):
+            local_pythonpath._validated_runtime_venv({})
+
 
 
 
