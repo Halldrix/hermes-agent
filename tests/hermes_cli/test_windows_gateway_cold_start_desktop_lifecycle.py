@@ -27,6 +27,7 @@ from hermes_cli import gateway_windows
 from hermes_cli import main as cli_main
 from hermes_cli import process_identity
 from hermes_cli import update_cmd
+import hermes_cli.main_install_repair as main_install_repair
 import hermes_cli.update_cmd_windows as update_cmd_windows
 
 
