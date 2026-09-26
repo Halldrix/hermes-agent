@@ -147,7 +147,20 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
         # cron sibling of the gateway crash in #122183/#123650. With no generation
         # committed this install provisioned no tree, so overlay none: the child keeps
         # the interpreter it was handed instead of borrowing a foreign ABI.
-        environment = committed_venv(repo)
+        #
+        # A corrupt record is not that: ``committed_venv`` RAISES on an unparseable or
+        # out-of-tree ``facts.json`` (pm/environments.py:179-193), and ``site_packages``
+        # raises when the committed tree vanished. Neither may abort the spawn — the
+        # caller is unguarded, so every job would fail at spawn with an environment
+        # error instead of running. Same shape as the ``None`` arm: repo-only overlay,
+        # child keeps its interpreter, degraded rather than dead.
+        try:
+            environment = committed_venv(repo)
+        except Exception:
+            logger.warning(
+                "Windows cron script: could not resolve the committed dependency environment "
+                "for %s; running without a dependency overlay", repo, exc_info=True)
+            environment = None
         pythonpath = [str(repo)]
         if environment is not None:
             pythonpath.append(str(dependency_site(environment)))
