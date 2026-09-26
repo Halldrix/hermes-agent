@@ -839,11 +839,15 @@ def _record_matches_live_gateway_pid(
     if not live_cmdline:
         return _record_looks_like_gateway(record)
     if not looks_like_gateway_runtime_command_line(live_cmdline):
-        # Unscoped callers pass no ``expected_home``; the host owner is the gateway for THIS
-        # process's own home too, or a bootstrap-launched host reports no PID at all and
-        # ``gateway.pid``/``gateway.lock`` get unlinked from under the live process.
-        home = expected_home if expected_home is not None else _get_process_hermes_home()
-        return _host_gateway_serves_home(pid, home)
+        # Unscoped callers pass no ``expected_home``. Anchor on the record's OWN home -- that is the
+        # identity being validated, and the caller's own ``HERMES_HOME`` is a different thing: the
+        # one unscoped caller checks the PID/lock identity files of a TARGET home, not the reader's.
+        # Falling back to the process home only when the record names none keeps ``expected_home is
+        # None`` meaning "unscoped", not "the reader's home", and stops a bootstrap-launched host from
+        # reporting no PID at all (which is what unlinked ``gateway.pid``/``gateway.lock`` from under
+        # a live process).
+        home = expected_home or record.get("hermes_home") or _get_process_hermes_home()
+        return _host_gateway_serves_home(pid, Path(str(home)))
     if expected_home is not None and _host_gateway_serves_home(pid, expected_home):
         return True
     return expected_home is None or _command_line_belongs_to_profile(live_cmdline, expected_home)

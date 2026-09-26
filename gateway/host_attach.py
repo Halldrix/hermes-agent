@@ -117,6 +117,9 @@ def _record_home(record) -> Path:
 #: reason to hold a caller. Hot poll paths (``gateway status``, ``gateway stop``'s post-kill
 #: confirmation) ask this per candidate, and the 2 s memo TTL is not a bound on a wedged owner's
 #: socket -- it costs the full client timeout on EVERY poll while its record keeps proving live.
+#: This bounds the WAIT to the first answer, which is the common wedge (an owner that never accepts);
+#: a connection that is accepted and then stalls on its reply is bounded by the same budget, and
+#: anything past it falls through to the client's own timeout with the verdict it had anyway.
 IDENTIFY_TIMEOUT_S = 0.25
 
 
@@ -301,7 +304,8 @@ def standalone_rescan_message(profile: str) -> str:
         "to the host gateway before starting this profile's gateway.")
 
 
-def _coexisting_gateways(owner: Optional[HostGateway]):
+def _coexisting_gateways(owner: Optional[HostGateway],
+                       identify_timeout: Optional[float] = None):
     """A standalone lock owner can hide a multiplexer launched beside it.
 
     Use the existing per-home liveness and control channels, not the single host
@@ -327,7 +331,8 @@ def _coexisting_gateways(owner: Optional[HostGateway]):
         yield peer
 
 
-def standalone_attach_decision(our_home: Path, owner: Optional[HostGateway]) -> Optional[HostAttachDecision]:
+def standalone_attach_decision(our_home: Path, owner: Optional[HostGateway],
+                              identify_timeout: Optional[float] = None) -> Optional[HostAttachDecision]:
     """An opt-out permits coexistence only after every live gateway confirms we are unserved.
 
     Shared by the initial attach check and the lock-losing race check.
@@ -337,7 +342,7 @@ def standalone_attach_decision(our_home: Path, owner: Optional[HostGateway]) -> 
     if not profile_is_standalone(our_home):
         return None
     profile = profile_name_for_home(our_home)
-    for peer in _coexisting_gateways(owner):
+    for peer in _coexisting_gateways(owner, identify_timeout):
         if not peer.served_known:
             return HostAttachDecision(REFUSE, _unknown_served_message(peer, profile), peer, transient=True)
         if peer.serves(profile):
@@ -346,14 +351,19 @@ def standalone_attach_decision(our_home: Path, owner: Optional[HostGateway]) -> 
     return HostAttachDecision(START, "", owner)
 
 
-def decide(our_home: Path, *, replace: bool = False) -> HostAttachDecision:
+def decide(our_home: Path, *, replace: bool = False,
+           identify_timeout: Optional[float] = None) -> HostAttachDecision:
     """Attach, rescan-then-attach, replace or refuse; configured standalone profiles may coexist.
 
     Never raises: a broken probe degrades to ``START``, i.e. exactly the pre-rendezvous behaviour.
+
+    ``identify_timeout`` bounds every identity probe this decision makes, including the
+    per-peer scan of coexisting profile gateways; ``None`` (the default) leaves each probe at
+    the control socket's own client timeout, unchanged.
     """
     profile = profile_name_for_home(our_home)
     try:
-        gateway = host_gateway()
+        gateway = host_gateway(identify_timeout=identify_timeout)
     except Exception:
         logger.debug("host gateway probe failed; starting as before", exc_info=True)
         return HostAttachDecision(START, "")
@@ -366,7 +376,7 @@ def decide(our_home: Path, *, replace: bool = False) -> HostAttachDecision:
         # the lock holder respawn-storms. Such an owner takes the non-replace path below instead.
         return HostAttachDecision(REPLACE_HOST, "", gateway)
     if gateway.served_known:
-        standalone = standalone_attach_decision(our_home, gateway)
+        standalone = standalone_attach_decision(our_home, gateway, identify_timeout)
         if standalone is not None:
             return standalone
     if gateway.serves(profile):
@@ -378,7 +388,7 @@ def decide(our_home: Path, *, replace: bool = False) -> HostAttachDecision:
         if waited is None:
             return HostAttachDecision(START, "")
         gateway = waited
-        standalone = standalone_attach_decision(our_home, gateway)
+        standalone = standalone_attach_decision(our_home, gateway, identify_timeout)
         if standalone is not None:
             return standalone
         if gateway.serves(profile):
