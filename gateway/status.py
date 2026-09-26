@@ -781,12 +781,15 @@ def _host_gateway_serves_home(pid: int, profile_home: Path) -> bool:
     secondary and the profile reads as "not running" while its messages are being served. The live
     served set is the only proof; the argv rule stays as the fallback when no record exists.
 
-    The record is checked FIRST, without dialing anything, and the dial itself is bounded
-    (:data:`gateway.host_attach.IDENTIFY_TIMEOUT_S`): this runs per candidate on hot poll paths
-    (``get_running_pid`` is polled by ``gateway stop``'s post-kill confirmation and by every
-    status read), and a live-but-wedged owner's socket would otherwise cost the control socket's
-    full 2 s client timeout on every poll. Both only make the answer arrive sooner or be
-    provably False — the served set itself still comes from the owner's own answer.
+    Two bounds keep this off the hot path's critical section. The owner record is read FIRST,
+    without dialing anything, so with no owner on the host -- the common case for a crashed or
+    pre-claim install -- the whole cost is one stat. The dial that follows is bounded
+    (:data:`gateway.host_attach.IDENTIFY_TIMEOUT_S`), because ``get_running_pid`` is polled by
+    ``gateway stop``'s post-kill confirmation and by every status read, and the control socket's
+    own 2 s client timeout would otherwise be re-paid on every poll by a wedged owner. Both only
+    make the answer arrive sooner or be provably False: the served set still comes from the
+    owner's own answer, and a timeout yields the same ``served_known=False`` an unanswered socket
+    already did.
     """
     try:
         from gateway import host_rendezvous

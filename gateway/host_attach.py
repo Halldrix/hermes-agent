@@ -113,15 +113,27 @@ def _record_home(record) -> Path:
     return Path(record.home) if getattr(record, "home", "") else Path(get_default_hermes_root())
 
 
+#: Ceiling for an IDENTITY-only probe: the answer is yes/no, so a slow owner is a "no", never a
+#: reason to hold a caller. Hot poll paths (``gateway status``, ``gateway stop``'s post-kill
+#: confirmation) ask this per candidate, and the 2 s memo TTL is not a bound on a wedged owner's
+#: socket -- it costs the full client timeout on EVERY poll while its record keeps proving live.
+IDENTIFY_TIMEOUT_S = 0.25
+
+
 def _identify(home: Path, timeout: Optional[float] = None) -> Optional[dict]:
     try:
         from gateway.control_socket import identify_gateway
 
-        # ``timeout`` is passed only when the caller set one, so the default call is byte-for-byte
-        # the one every existing stub/patch of ``identify_gateway`` (one positional arg) expects.
         if timeout is None:
             return identify_gateway(home)
-        return identify_gateway(home, timeout=timeout)
+        # Only pass the kwarg when the callee accepts it, so a one-argument patch of
+        # ``identify_gateway`` keeps working exactly as before instead of raising a TypeError that
+        # the blanket ``except`` below would turn into "owner did not answer" -- which reads a
+        # healthy multiplexer as absent.
+        try:
+            return identify_gateway(home, timeout=timeout)
+        except TypeError:
+            return identify_gateway(home)
     except Exception:
         logger.debug("host gateway identify failed for %s", home, exc_info=True)
         return None
@@ -159,13 +171,6 @@ def _identity_matches(identity, record, home: Path) -> bool:
 #: doctor, the lifecycle guards); a gateway PROCESS asks it for the life of the process, so the
 #: memo is time-bounded rather than permanent. Writes invalidate it eagerly.
 HOST_GATEWAY_CACHE_TTL_S = 2.0
-#: Ceiling for an IDENTITY-only probe: the answer is yes/no, so a slow owner is a "no", never a
-#: reason to hold a caller. Hot poll paths (``gateway status``, ``gateway stop``'s post-kill
-#: confirmation) ask this per candidate, and the cache TTL is not a bound on a wedged owner's
-#: socket: an owner that accepts and never replies costs the full client timeout on EVERY poll
-#: while its record keeps proving live. Opt-in (``identify_timeout``) rather than the default, so
-#: every lifecycle caller keeps the full wait it has always had.
-IDENTIFY_TIMEOUT_S = 0.25
 _cached_probe: Optional[tuple[float, Optional[HostGateway]]] = None
 
 
@@ -175,7 +180,7 @@ def invalidate_host_gateway_cache() -> None:
     _cached_probe = None
 
 
-def _probe_host_gateway(wait_for_channel: float, identify_timeout: Optional[float]) -> Optional[HostGateway]:
+def _probe_host_gateway(wait_for_channel: float, identify_timeout: Optional[float] = None) -> Optional[HostGateway]:
     from gateway import host_rendezvous as hr
 
     record = hr.read_record(hr.ROLE_GATEWAY)
@@ -204,11 +209,6 @@ def host_gateway(*, wait_for_channel: float = 0.0,
 
     The served set comes from the owner's control socket and nowhere else; a record with no live
     answer behind it yields ``served_known=False`` — an owner whose served set nobody knows yet.
-
-    ``identify_timeout`` bounds the socket round trip for callers that poll in a loop (see
-    :data:`IDENTIFY_TIMEOUT_S`). It changes only how long a slow owner is waited for, never the
-    verdict: a timeout yields the same ``served_known=False`` an unanswered socket already does.
-    The default is ``None`` — the control socket's own client timeout, unchanged.
     """
     global _cached_probe
     now = time.monotonic()
@@ -320,7 +320,7 @@ def _coexisting_gateways(owner: Optional[HostGateway]):
             continue
         seen.add(pid)
         peer = HostGateway(pid, home, (), served_known=False)
-        identity = _identify(home)
+        identity = _identify(home, identify_timeout)
         if isinstance(identity, dict) and _identity_matches(identity, peer, home):
             peer = HostGateway(pid, home, _served_from_identity(identity),
                                standalone=identity.get("multiplex") is False)
