@@ -65,20 +65,24 @@ function outputHash(out) {
 }
 
 // The desktop install stamp is a real prepared input — buildDesktop bakes its bytes
-// into electron-main.mjs — but write-build-stamp.mjs rewrites `builtAt` on every build
-// (#123308). Hashing the whole file made the build's own first step invalidate the
-// receipt it was about to write, so a second build racing the first killed it on
-// "inputs changed". Hash the identity the output actually depends on instead:
-// the baked bytes change only when provenance does, never when the clock moves.
+// into electron-main.mjs — but write-build-stamp.mjs rewrites its `builtAt` clock on
+// every build (#123308). Hashing the whole file let a second build racing this one
+// kill it with "inputs changed" for a difference the build machinery itself made.
+// Hash the stamp's provenance identity instead: commit/payload/tag must still
+// invalidate, and only the clock is ignored. The baked bytes DO move with the clock
+// (bundle-electron-main.mjs defines __HERMES_INSTALL_STAMP__ from the raw text), and
+// outputHash below is what notices that — the input hash stops reporting a rebuild as
+// a change it did not make.
 const stampClockFields = new Set(['builtAt'])
 
-// An unreadable/non-JSON stamp is not an identity loss: its bytes still feed the hash,
-// so the file's content keeps deciding freshness and only the clock is ignored.
+// Missing and non-JSON stamps fall back to the whole-file tree hash rather than
+// failing: a missing input must keep reading as one distinct hash, never as a
+// throw, so a build that has not stamped yet stays "not current" instead of
+// aborting. Only a parsable stamp object can have its clock removed.
 function stampContentHash(path) {
-  let raw = readFileSync(path)
-  let identity
+  let identity = null
   try {
-    identity = JSON.parse(raw)
+    identity = JSON.parse(readFileSync(path))
   } catch { return treeHash(resolve(path), ['.'], () => false) }
   if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return treeHash(resolve(path), ['.'], () => false)
   return createHash('sha256').update(JSON.stringify(
