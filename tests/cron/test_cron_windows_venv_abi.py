@@ -112,6 +112,42 @@ def test_managed_install_uses_the_committed_generation(tmp_path, monkeypatch):
     assert overlay == committed / "Lib" / "site-packages"
 
 
+def test_corrupt_record_degrades_instead_of_aborting_the_spawn(tmp_path, monkeypatch):
+    """A record that raises must not take every job down with it.
+
+    ``committed_venv`` raises (not returns None) on an unparseable or out-of-tree
+    ``facts.json``, and ``_script_argv`` calls it unguarded — so the raise would turn
+    every cron script into a spawn-time traceback. Degrade to the repo-only overlay.
+    """
+    from cron import scheduler_script as sched_script
+
+    repo = tmp_path / "repo"
+    stale = _write_venv(repo / "venv", tmp_path / "base")
+    store = tmp_path / "store" / "python.exe"
+    store.parent.mkdir(parents=True)
+    store.write_text("", encoding="utf-8")
+    child = _write_venv(tmp_path / "child", tmp_path / "childbase")
+
+    monkeypatch.setattr(sched_script, "_read_windows_pyvenv_cfg", lambda _dir: {})
+    monkeypatch.setattr("hermes_cli._launchers.resolve_store_python", lambda _root: store)
+    monkeypatch.setattr("pm.environments.selected_venv", lambda _root: stale)
+
+    def _boom(_root):
+        raise RuntimeError("cannot read dependency environment: facts.json")
+
+    monkeypatch.setattr("pm.environments.committed_venv", _boom)
+
+    interpreter, env_overlay = sched_script._windows_cron_python_invocation(
+        str(child / "Scripts" / "python.exe")
+    )
+
+    # Spawn survives; the store interpreter is still the one handed to the child.
+    assert interpreter == str(store)
+    overlay = _site_packages_in(env_overlay)
+    assert overlay is None or not overlay.is_relative_to(stale)
+    assert str(repo) in env_overlay["PYTHONPATH"]
+
+
 def test_non_managed_install_keeps_its_own_venv_overlay(tmp_path, monkeypatch):
     """With no store Python the uv base-interpreter overlay is unchanged: the legacy
     installs that depend on it must keep working."""
