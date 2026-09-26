@@ -141,11 +141,14 @@ def test_corrupt_record_degrades_instead_of_aborting_the_spawn(tmp_path, monkeyp
         str(child / "Scripts" / "python.exe")
     )
 
-    # Spawn survives; the store interpreter is still the one handed to the child.
+    # Spawn survives; the store interpreter is still the one handed to the child, and
+    # the overlay carries the REAL checkout root (the resolver's own ``repo``), not the
+    # tmp_path stand-in this test built.
     assert interpreter == str(store)
     overlay = _site_packages_in(env_overlay)
     assert overlay is None or not overlay.is_relative_to(stale)
-    assert str(repo) in env_overlay["PYTHONPATH"]
+    repo_root = str(Path(sched_script.__file__).resolve().parents[1])
+    assert repo_root in env_overlay["PYTHONPATH"]
 
 
 def test_non_managed_install_keeps_its_own_venv_overlay(tmp_path, monkeypatch):
