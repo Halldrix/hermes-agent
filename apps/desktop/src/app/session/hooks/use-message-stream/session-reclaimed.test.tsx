@@ -133,7 +133,12 @@ describe('session.reclaimed', () => {
     expect(wiringCache.has('live-kept')).toBe(true)
   })
 
-  it('keeps the atom-visible transcript when the imperative routing ref is stale', () => {
+  // The authority probe: the primary view resolves `$sessionStates[$activeSessionId]`
+  // (session-view.tsx), so the handler must read that atom. The routing ref is a
+  // write-routing hint that resume pins imperatively, and a subscriber firing
+  // between a ref pin and its atom write can observe the two disagreeing — this
+  // mounts them deliberately apart to prove the atom is what decides.
+  it('keeps the rendered transcript when the routing ref names another runtime', () => {
     mountStream('stale-ref')
     $activeSessionId.set('live-visible')
     publishSessionState('live-visible', {
@@ -156,8 +161,7 @@ describe('session.reclaimed', () => {
       } as GatewayEvent)
     )
 
-    // The rendered primary view follows the atom, not the deliberately mutable
-    // write-routing ref. Preserve the slice that actually remains on screen.
+    // Preserve the slice that actually remains on screen.
     expect($sessionStates.get()['live-visible']).toMatchObject({
       awaitingResponse: false,
       busy: false,
@@ -166,7 +170,6 @@ describe('session.reclaimed', () => {
       streamId: null,
       turnLive: false
     })
-    expect($sessionStates.get()['stale-ref']).toBeUndefined()
     expect($sessionResumeRequest.get()?.sessionId).toBe('stored-1')
   })
 
