@@ -21,6 +21,7 @@ import {
   $sessionStates,
   dropSessionState,
   publishSessionState,
+  retainAfterReclaim,
   unbindTileRuntime
 } from '@/store/session-states'
 // Leaf import (not the `@/themes` barrel) to avoid pulling the ThemeProvider
@@ -168,6 +169,10 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
             turnStartedAt: null,
             turnLive: false
           })
+          // The resume re-mints a fresh runtime id, so this one never publishes
+          // again and publish-time eviction can't reach it. Hold it until the
+          // atom moves off it, then drop it with its per-runtime ledgers.
+          retainAfterReclaim(reclaimedRuntimeId)
         }
       } else {
         dropSessionState(reclaimedRuntimeId)
