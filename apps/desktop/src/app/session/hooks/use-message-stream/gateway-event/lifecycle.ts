@@ -20,7 +20,7 @@ import { clearAllPrompts, clearApprovalRequest } from '@/store/prompts'
 import { markRuntimeGone } from '@/store/runtime-gone'
 import { $activeSessionId, getSessionOwnerHint, knownSessionOwner, ownerLookupSessionRows, requestSessionResume } from '@/store/session'
 import type { SessionOwnerScope } from '@/store/session-request-router'
-import { $sessionStates, $sessionTiles, dropSessionState, publishSessionState, sessionTileDelegate, unbindTileRuntime } from '@/store/session-states'
+import { $sessionStates, $sessionTiles, dropSessionState, publishSessionState, retainAfterReclaim, sessionTileDelegate, unbindTileRuntime } from '@/store/session-states'
 // Leaf import (not the `@/themes` barrel) to avoid pulling the ThemeProvider
 // module graph into the gateway event hot path.
 import { ingestBackendSkin } from '@/themes/backend-sync'
@@ -173,6 +173,10 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
             turnStartedAt: null,
             turnLive: false
           })
+          // The resume re-mints a fresh runtime id, so this one never publishes
+          // again and publish-time eviction can't reach it. Hold it until the
+          // atom moves off it, then drop it with its per-runtime ledgers.
+          retainAfterReclaim(reclaimedRuntimeId)
         }
       } else {
         dropSessionState(reclaimedRuntimeId)
