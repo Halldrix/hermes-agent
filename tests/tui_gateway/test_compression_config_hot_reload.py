@@ -354,3 +354,67 @@ def test_external_context_engine_skips_compressor_hot_reload(monkeypatch, caplog
     assert engine.threshold_tokens == 100_000
     assert not hasattr(engine, "tail_mode")
     assert plugin_calls == []
+
+
+def test_external_context_engine_still_adopts_the_context_length_pin(monkeypatch):
+    """``model.context_length`` is an AGENT-level pin, so an external engine must not
+    strand it: the guard that skips compressor internals used to return before the pin
+    block, leaving a live session reporting its construction-time window forever."""
+    engine = SimpleNamespace(
+        name="lcm",
+        threshold_tokens=100_000,
+        threshold_percent=0.65,
+        model_thresholds={},
+        update_model=lambda *a, **k: None,
+    )
+    agent = SimpleNamespace(
+        model="pin-test-model",
+        provider="",
+        base_url="",
+        context_compressor=engine,
+        compression_enabled=True,
+        compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+        _config_context_length=1_000_000,  # the construction-time pin
+    )
+    session = {"agent": agent, "session_key": "session-external-pin"}
+
+    _sync_with_cfg(
+        monkeypatch,
+        session,
+        {"model": {"default": "pin-test-model", "context_length": 400_000}, "compression": {}},
+    )
+
+    assert agent._config_context_length == 400_000
+    # The engine keeps owning its own policy: no compressor internals written on it.
+    assert not hasattr(engine, "tail_mode")
+    assert engine.threshold_tokens == 100_000
+
+
+def test_removing_context_length_clears_the_pin_on_an_external_engine(monkeypatch):
+    """The mirror half of the two-copy contract: dropping the key must stop the agent
+    claiming a ceiling the user removed, on an external engine too."""
+    engine = SimpleNamespace(
+        name="lcm",
+        threshold_tokens=100_000,
+        threshold_percent=0.65,
+        model_thresholds={},
+        update_model=lambda *a, **k: None,
+    )
+    agent = SimpleNamespace(
+        model="pin-test-model",
+        provider="",
+        base_url="",
+        context_compressor=engine,
+        compression_enabled=True,
+        compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+        _config_context_length=1_000_000,
+    )
+    session = {"agent": agent, "session_key": "session-external-pin-unset"}
+
+    _sync_with_cfg(monkeypatch, session, {"model": {}, "compression": {}})
+
+    assert agent._config_context_length is None
