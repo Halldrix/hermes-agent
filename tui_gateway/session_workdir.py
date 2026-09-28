@@ -493,13 +493,12 @@ def _submit_row_target_key(session: dict) -> str:
 _SUBMIT_ROW_SESSION_KEY = "_submit_row_session_id"
 
 
-def _submit_row_owner_key(staged: Any, session: dict) -> str:
-    """The session id a staged submit row lives under: recorded at write time, else the current best."""
-    if isinstance(staged, dict):
-        recorded = str(staged.get(_SUBMIT_ROW_SESSION_KEY) or "")
-        if recorded:
-            return recorded
-    return _submit_row_target_key(session)
+def _submit_row_owner_key(staged: dict, session: dict) -> str:
+    """The session id a staged submit row lives under: recorded at write time, else the current best.
+    Every caller narrows to a dict (and checks ``_row_id``) immediately before, so the recorded value is
+    the answer whenever the row exists; the re-derivation only covers a dict that predates the stamp."""
+    recorded = str(staged.get(_SUBMIT_ROW_SESSION_KEY) or "")
+    return recorded or _submit_row_target_key(session)
 
 
 def _write_submit_user_row(session: dict, text: Any, display_kind: str | None) -> dict | None:
@@ -508,8 +507,10 @@ def _write_submit_user_row(session: dict, text: Any, display_kind: str | None) -
     :func:`_persist_submit_user_row`, shared by the busy-queue accept (which attaches the dict to
     the queue envelope, never the shared session slot a possibly-still-staged in-flight turn owns).
     Returns None when nothing was written (no key / non-text / store unavailable / failed write)."""
-    key = session.get("session_key")
-    if not key or not isinstance(text, str) or not text.strip():
+    # ``session_key`` is only an "is this a real session" probe — the row is written to ``target`` below,
+    # which a rotation can already have moved off ``session_key`` (#123545). One guard, one value: the
+    # writer must not read a different key than the one it checks.
+    if not session.get("session_key") or not isinstance(text, str) or not text.strip():
         return None
     from agent.context_compressor import _DB_PERSISTED_MARKER
     from agent.message_metadata import stamp_message_timestamp

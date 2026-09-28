@@ -17,7 +17,10 @@ DB_ROW_SNAPSHOT = "_db_row_snapshot"
 CANONICAL_ROW = "_canonical_row"
 REPAIR_BOOKKEEPING_FIELDS = frozenset({DB_ROW_SNAPSHOT, CANONICAL_ROW})
 PERSISTENCE_ONLY_MESSAGE_FIELDS = frozenset(
-    {"timestamp", "display_kind", "display_metadata", "_row_id"}
+    # Membership is the real contract, NOT the leading underscore: the chat-completions transport happens
+    # to sweep underscore keys, but turn_context.py pops this set from every outgoing copy and a strict
+    # backend 400s on any key it does not know.
+    {"timestamp", "display_kind", "display_metadata", "_row_id", "_submit_row_session_id"},
 ) | REPAIR_BOOKKEEPING_FIELDS
 
 _Message = TypeVar("_Message", bound=MutableMapping[str, Any])
