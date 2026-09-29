@@ -53,8 +53,10 @@ LOG_FILES = {
     "mcp": "mcp-stderr.log",
 }
 
-# "2026-04-05 22:35:00[,123]" at the start of a line.
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})")
+# "2026-04-05 22:35:00[,123]" at the start of a line; update.log /
+# desktop-update-handoff.log stamp with the shell's ISO-8601 "T" shape
+# ("2026-09-29T21:36:18+08:00", "=== hermes update started 2026-09-29T21:36:18 ===").
+_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})")
 _LEVEL_RE = re.compile(r"\s(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s")
 # Logger name: the token before ":" after the level and optional "[session]" tag,
 # e.g. "INFO gateway.run:" or "INFO [sess_abc] tools.terminal_tool:".
@@ -72,11 +74,11 @@ def _parse_since(since_str: str) -> Optional[datetime]:
 
 
 def _parse_line_timestamp(line: str) -> Optional[datetime]:
-    m = _TS_RE.match(line)
+    m = _TS_RE.search(line)
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+        return datetime.strptime(m.group(1).replace("T", " "), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
 
