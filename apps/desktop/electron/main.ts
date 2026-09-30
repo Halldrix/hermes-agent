@@ -15279,7 +15279,11 @@ function createWindow() {
               fallbackActive: windowsSandboxFallbackSticky,
               reason: windowsSandboxFallbackReason,
               appVersion: app.getVersion(),
-              steady: true
+              steady: true,
+              // This process ran without the Chromium sandbox, so reaching a
+              // usable window proves nothing about it: a pending post-update
+              // `reprobe` stays owed to the next sandboxed launch.
+              pendingReprobe: windowsSandboxFallbackActive
             })
           )
         } catch (error) {
@@ -19754,8 +19758,14 @@ app.on('before-quit', event => {
   // Keyed on sticky (not active): a manual --no-sandbox run still records a
   // clean quit, while an engaged fallback keeps its sticky marker.
   if ((IS_WINDOWS || process.platform === 'linux') && !windowsSandboxFallbackSticky) {
+    // Routed through recordDirectCleanExit() rather than writing `ok` here: both
+    // clean-exit handlers must agree that a clean exit spends no evidence, and
+    // a second inline copy is how they drift apart.
     try {
-      writeSandboxMarker(app.getPath('userData'), markerAfterSuccessfulBoot({ fallbackActive: false }))
+      recordDirectCleanExit(app.getPath('userData'), {
+        isWindows: true,
+        stickyFallback: windowsSandboxFallbackSticky
+      })
     } catch {
       void 0
     }

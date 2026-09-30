@@ -474,6 +474,115 @@ test('a clean relaunch between arming the re-probe and the real probe keeps the 
   assert.equal(firstProbe.nextMarker?.state, 'fallback')
 })
 
+test('a reveal that ran with --no-sandbox leaves the re-probe owed to the next sandboxed launch', () => {
+  // Every in-app relaunch carries --no-sandbox, and such a boot DOES reach a
+  // window. That reveal must not consume the retry: this process never
+  // exercised the sandbox, so the next sandboxed launch is the one that gets
+  // to use it. A reveal that actually ran sandboxed legitimately consumes it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-reveal-reprobe-'))
+
+  const armed = { state: 'booting', reprobe: true, bootAborts: 0 } as const
+
+  // The relaunched process reveals a window while running with --no-sandbox.
+  const revealed = markerAfterSuccessfulBoot({
+    fallbackActive: false,
+    steady: true,
+    appVersion: '0.21.3',
+    pendingReprobe: true
+  })
+
+  assert.deepEqual(revealed, { state: 'running', version: '0.21.3', reprobe: true })
+  writeSandboxMarker(dir, revealed)
+
+  // Next launch: still steady-state evidence, and the retry moves forward.
+  const next = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(next.priorSteadyAbort, true)
+  assert.equal(next.nextMarker?.reprobe, true, 'the owed re-probe survives the reveal and the next launch')
+  writeSandboxMarker(dir, next.nextMarker)
+
+  // The first launch that really exercises the sandbox aborts: fallback, once.
+  const firstProbe = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(firstProbe.enable, true, 'the first failed post-update probe restores the fallback')
+  assert.equal(firstProbe.reason, 'reprobe-failed')
+  void armed
+})
+
+test('a clean quit after a --no-sandbox reveal still owes the re-probe to the next sandboxed launch', () => {
+  // The full post-update chain, through the NORMAL quit path rather than the
+  // app.exit() relaunch path: arm the probe, relaunch with --no-sandbox, that
+  // boot reaches a window (so it writes `running`), and the user then closes it
+  // normally. before-quit and exitAfterBackendShutdown both route through
+  // recordDirectCleanExit(), so the retry must survive whichever one runs.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-quit-reprobe-'))
+
+  writeSandboxMarker(dir, { state: 'fallback', reason: 'boot-loop', version: '0.21.2' })
+  const armed = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: [], env: {}, marker: readSandboxMarker(dir), appVersion: '0.21.3'
+  })
+  writeSandboxMarker(dir, armed.nextMarker)
+
+  const relaunched = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: ['--no-sandbox'], env: {}, marker: readSandboxMarker(dir), appVersion: '0.21.3'
+  })
+  writeSandboxMarker(dir, relaunched.nextMarker)
+
+  // That boot reaches a window without ever touching the sandbox.
+  writeSandboxMarker(dir, markerAfterSuccessfulBoot({
+    fallbackActive: false, steady: true, appVersion: '0.21.3', pendingReprobe: true
+  }))
+  assert.deepEqual(readSandboxMarker(dir), { state: 'running', version: '0.21.3', reprobe: true })
+
+  // A clean quit: this is what the before-quit handler runs.
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  const afterQuit = readSandboxMarker(dir)
+  assert.equal(afterQuit?.reprobe, true, 'quitting normally must not discard the owed re-probe')
+
+  // The next sandboxed launch gets the retry, and its abort is the one that counts.
+  const next = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: [], env: {}, marker: afterQuit, appVersion: '0.21.3'
+  })
+  writeSandboxMarker(dir, next.nextMarker)
+
+  const firstProbe = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: [], env: {}, marker: readSandboxMarker(dir), appVersion: '0.21.3'
+  })
+
+  // ONE abort is enough. Whether it lands on `reprobe-failed` (the retry being
+  // spent here) or on an already-sticky fallback (the retry having been spent
+  // by the previous launch) is not the property under test; what matters is
+  // that the sandbox is not tried a second time before the fallback engages.
+  assert.equal(firstProbe.enable, true, 'one failed post-update probe is enough to restore the fallback')
+  assert.equal(firstProbe.nextMarker?.state, 'fallback')
+})
+
+test('a reveal that actually ran sandboxed consumes the re-probe', () => {
+  // The mirror case: this process DID exercise the sandbox, so reaching a
+  // window is the probe succeeding. The retry is spent and must not linger.
+  const revealed = markerAfterSuccessfulBoot({
+    fallbackActive: false,
+    steady: true,
+    appVersion: '0.21.3'
+  })
+
+  assert.deepEqual(revealed, { state: 'running', version: '0.21.3' })
+  assert.equal('reprobe' in revealed, false)
+})
+
 test('a clean relaunch with no pending re-probe leaves nothing for the next launch to trip on', () => {
   // The ordinary case: no update in flight, so the clean exit is just `ok` and
   // the next launch starts from a plain boot.

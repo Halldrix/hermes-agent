@@ -290,7 +290,18 @@ export function decideWindowsSandboxLaunch(
     // (#112961 main-process abort, task-manager kill, power loss). This is
     // steady-state evidence, not boot evidence: it must not count toward the
     // boot-loop fallback and must not trigger ACL repair.
-    return { enable: false, reason: null, nextMarker: { state: 'booting' }, priorSteadyAbort: true }
+    //
+    // A `reprobe` carried over from this launch survived only because it ran
+    // with `--no-sandbox` (see markerAfterSuccessfulBoot): the window came up,
+    // but the sandbox was never exercised, so the one allowed retry is still
+    // owed and moves forward to this launch.
+    const nextMarker: SandboxMarker = { state: 'booting' }
+
+    if (marker.reprobe === true) {
+      nextMarker.reprobe = true
+    }
+
+    return { enable: false, reason: null, nextMarker, priorSteadyAbort: true }
   }
 
   // No marker, or a clean `ok` from the previous run.
@@ -322,6 +333,7 @@ export function markerAfterSuccessfulBoot(options: {
   reason?: SandboxFallbackReason
   appVersion?: string
   steady?: boolean
+  pendingReprobe?: boolean
 }): SandboxMarker {
   if (!options.fallbackActive) {
     if (options.steady) {
@@ -329,6 +341,15 @@ export function markerAfterSuccessfulBoot(options: {
 
       if (options.appVersion) {
         marker.version = options.appVersion
+      }
+
+      // A post-update `reprobe` survives a reveal that ran with the sandbox OFF:
+      // this process launched with `--no-sandbox`, so it never exercised the
+      // sandbox and is not entitled to spend the retry. A reveal that DID run
+      // sandboxed is the probe succeeding, which legitimately consumes it, so
+      // `running` is written plain there.
+      if (options.pendingReprobe) {
+        marker.reprobe = true
       }
 
       return marker
@@ -505,9 +526,13 @@ export function recordDirectCleanExit(
   }
 
   // Only `reprobe` describes the next process rather than this one, so it is
-  // the single field a clean exit carries forward. See the docstring.
+  // the single field a clean exit carries forward. It can be pending on either
+  // `booting` (relaunch before a window ever appeared) or `running` (a window
+  // appeared, but on a boot that ran with the sandbox already off, so it
+  // proves nothing). See the docstring.
   const prior = (options.readMarker ?? readSandboxMarker)(userDataDir)
-  const pendingReprobe = prior?.state === 'booting' && prior.reprobe === true
+  const pendingReprobe =
+    (prior?.state === 'booting' || prior?.state === 'running') && prior.reprobe === true
 
   writeSandboxMarker(
     userDataDir,
