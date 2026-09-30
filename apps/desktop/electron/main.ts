@@ -667,6 +667,7 @@ import {
   grantAllApplicationPackagesAcl,
   markerAfterSuccessfulBoot,
   readSandboxMarker,
+  recordDirectCleanExit,
   type SandboxFallbackReason,
   shouldAttemptAclRepair,
   shouldRelaunchForGpuSandboxCrash,
@@ -12700,6 +12701,17 @@ async function exitAfterBackendShutdown(code) {
 
   // app.exit() skips will-quit, and every in-app relaunch lands here.
   killTimedGitChildren()
+
+  // app.exit() emits no before-quit, so record the clean exit here instead.
+  try {
+    recordDirectCleanExit(app.getPath('userData'), {
+      isWindows: IS_WINDOWS,
+      stickyFallback: windowsSandboxFallbackSticky
+    })
+  } catch {
+    void 0
+  }
+
   app.exit(code)
 }
 

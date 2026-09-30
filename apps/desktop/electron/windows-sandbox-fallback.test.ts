@@ -19,6 +19,7 @@ import {
   markerAfterSuccessfulBoot,
   parseSandboxMarker,
   readSandboxMarker,
+  recordDirectCleanExit,
   sandboxMarkerPath,
   shouldAttemptAclRepair,
   shouldRelaunchForGpuSandboxCrash,
@@ -386,6 +387,90 @@ test('renderer crash-loop relaunch requires the sandbox breakpoint signature', (
   )
 })
 
+test('recordDirectCleanExit writes `ok` over a `running` leftover so the next launch sees no abort', () => {
+  // app.exit() emits no before-quit, so this is the only clean-exit marker
+  // write on the relaunch path. Drives the real seam — decision AND write,
+  // against a real userData dir — because a test of the decision alone cannot
+  // see whether main.ts routes its clean exits here.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-clean-exit-'))
+
+  writeSandboxMarker(dir, markerAfterSuccessfulBoot({ fallbackActive: false, appVersion: '0.21.3', steady: true }))
+  assert.deepEqual(readSandboxMarker(dir)?.state, 'running', 'precondition: reveal left a running marker')
+
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
+
+  // The next launch must therefore not report a steady abort.
+  const nextLaunch = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(nextLaunch.priorSteadyAbort, undefined, 'a clean direct exit must not read as a steady abort')
+})
+
+test('recordDirectCleanExit keeps the post-update re-probe armed instead of downgrading to `ok`', () => {
+  // Downgrading a `booting` marker to `ok` would drop the `reprobe` arming, and
+  // decideWindowsSandboxLaunch reaches the one-strike re-probe only from
+  // `booting` — a still-broken post-update sandbox would then need two aborts
+  // instead of one.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-reprobe-'))
+
+  // Launch N: a sticky fallback from the previous app version re-probes once.
+  writeSandboxMarker(dir, { state: 'fallback', reason: 'boot-loop', version: '0.21.2' })
+
+  const launchN = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(launchN.enable, false, 'the re-probe launches sandboxed')
+  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
+
+  writeSandboxMarker(dir, launchN.nextMarker)
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  // The run finished, so the tally advances by the one boot it completed, but
+  // the re-probe arming survives.
+  const afterExit = readSandboxMarker(dir)
+  assert.equal(afterExit?.state, 'booting')
+  assert.equal(afterExit?.reprobe, true)
+  assert.equal(afterExit?.bootAborts, 1)
+
+  // Round-trip through the real ladder: the re-probe still reaches fallback on
+  // its first strike.
+  const launchNPlus1 = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: afterExit,
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(launchNPlus1.enable, true, 'the re-probe abort still reaches fallback on its first strike')
+  assert.equal(launchNPlus1.reason, 'reprobe-failed')
+})
+
+test('recordDirectCleanExit leaves the marker untouched when it must not write', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-gated-'))
+  writeSandboxMarker(dir, { state: 'running', version: '0.21.3' })
+
+  // An engaged fallback keeps its sticky marker.
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: true })
+  assert.equal(readSandboxMarker(dir)?.state, 'running')
+
+  // A non-Windows run never touches the sandbox marker.
+  recordDirectCleanExit(dir, { isWindows: false, stickyFallback: false })
+  assert.equal(readSandboxMarker(dir)?.state, 'running')
+})
+
 test('buildNoSandboxRelaunchArgs appends a single --no-sandbox flag', () => {
   assert.deepEqual(buildNoSandboxRelaunchArgs(['--foo', '--no-sandbox', 'hermes://x']), [
     '--foo',
@@ -394,6 +479,88 @@ test('buildNoSandboxRelaunchArgs appends a single --no-sandbox flag', () => {
   ])
 })
 
+test('recordDirectCleanExit writes `ok` over a `running` leftover so the next launch sees no abort', () => {
+  // app.exit() emits no before-quit, so this is the only clean-exit marker
+  // write on the relaunch path. Drives the real seam — decision AND write,
+  // against a real userData dir — because a test of the decision alone cannot
+  // see whether main.ts routes its clean exits here.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-clean-exit-'))
+
+  writeSandboxMarker(dir, markerAfterSuccessfulBoot({ fallbackActive: false, appVersion: '0.21.3', steady: true }))
+  assert.deepEqual(readSandboxMarker(dir)?.state, 'running', 'precondition: reveal left a running marker')
+
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
+
+  // The next launch must therefore not report a steady abort.
+  const nextLaunch = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(nextLaunch.priorSteadyAbort, undefined, 'a clean direct exit must not read as a steady abort')
+})
+
+test('recordDirectCleanExit keeps the post-update re-probe armed instead of downgrading to `ok`', () => {
+  // Downgrading a `booting` marker to `ok` would drop the `reprobe` arming, and
+  // decideWindowsSandboxLaunch reaches the one-strike re-probe only from
+  // `booting` — a still-broken post-update sandbox would then need two aborts
+  // instead of one.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-reprobe-'))
+
+  // Launch N: a sticky fallback from the previous app version re-probes once.
+  writeSandboxMarker(dir, { state: 'fallback', reason: 'boot-loop', version: '0.21.2' })
+
+  const launchN = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(launchN.enable, false, 'the re-probe launches sandboxed')
+  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
+
+  writeSandboxMarker(dir, launchN.nextMarker)
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  // The run finished, so the tally advances by the one boot it completed, but
+  // the re-probe arming survives.
+  const afterExit = readSandboxMarker(dir)
+  assert.equal(afterExit?.state, 'booting')
+  assert.equal(afterExit?.reprobe, true)
+  assert.equal(afterExit?.bootAborts, 1)
+
+  // Round-trip through the real ladder: the re-probe still reaches fallback on
+  // its first strike.
+  const launchNPlus1 = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: afterExit,
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(launchNPlus1.enable, true, 'the re-probe abort still reaches fallback on its first strike')
+  assert.equal(launchNPlus1.reason, 'reprobe-failed')
+})
+
+test('recordDirectCleanExit leaves the marker untouched when it must not write', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-gated-'))
+  writeSandboxMarker(dir, { state: 'running', version: '0.21.3' })
+
+  // An engaged fallback keeps its sticky marker.
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: true })
+  assert.equal(readSandboxMarker(dir)?.state, 'running')
+
+  // A non-Windows run never touches the sandbox marker.
+  recordDirectCleanExit(dir, { isWindows: false, stickyFallback: false })
+  assert.equal(readSandboxMarker(dir)?.state, 'running')
 // #121954: Linux hosts where the sandboxed GPU child cannot start crash-loop
 // 100% ("GPU process isn't usable. Goodbye."); only --no-sandbox reaches the
 // UI. Same two-strike sticky ladder as #38216, minus the Windows-only extras.
@@ -501,4 +668,5 @@ test('linux GPU SIGTERM signature triggers the one-shot relaunch; other exits do
     }),
     false
   )
+
 })

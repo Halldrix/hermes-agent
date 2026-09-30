@@ -448,6 +448,59 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
   return isWindowsSandboxBreakpointExit(options.exitCode)
 }
 
+/**
+ * Record a direct clean exit into the sandbox marker file.
+ *
+ * `app.exit()` never emits `before-quit`, so the clean `ok` write in that
+ * handler does not run for an in-app relaunch or a GPU/renderer fallback
+ * relaunch — the `running` marker window reveal wrote would stay behind and the
+ * next launch would read it as a steady abort (#112961 instrumentation).
+ *
+ * This owns BOTH the decision and the write, so the seam is exercisable: a test
+ * of a pure decision alone cannot see whether main.ts routes its clean exits
+ * here. I/O is injected (`readMarker`/`writeMarker`) for the same reason
+ * `writeSandboxMarker` injects its fs calls.
+ *
+ * Keyed on sticky (not active) to match the before-quit handler: an engaged
+ * fallback keeps its sticky marker, and a non-Windows run never touches the
+ * sandbox marker.
+ *
+ * A `booting` marker is NOT downgraded to `ok`. The post-update re-probe arming
+ * and the boot-abort tally live in that state, and `decideWindowsSandboxLaunch`
+ * reaches the `reprobe` arm only from `booting` — overwriting it would cost a
+ * still-broken post-update sandbox its one-strike re-probe. This run did
+ * finish, so the tally advances by the one boot it completed.
+ */
+export function recordDirectCleanExit(
+  userDataDir: string,
+  options: {
+    isWindows: boolean
+    stickyFallback: boolean
+    readMarker?: typeof readSandboxMarker
+    writeMarker?: typeof writeSandboxMarker
+  }
+): void {
+  if (!options.isWindows || options.stickyFallback) {
+    return
+  }
+
+  const readMarker = options.readMarker ?? readSandboxMarker
+  const writeMarker = options.writeMarker ?? writeSandboxMarker
+  const prior = readMarker(userDataDir)
+  const marker: SandboxMarker = { state: 'ok' }
+
+  if (prior?.state === 'booting') {
+    marker.state = 'booting'
+    marker.bootAborts = (prior.bootAborts ?? 0) + 1
+
+    if (prior.reprobe) {
+      marker.reprobe = true
+    }
+  }
+
+  writeMarker(userDataDir, marker)
+}
+
 export function buildNoSandboxRelaunchArgs(argv: readonly string[]): string[] {
   const args = (Array.isArray(argv) ? argv : []).filter(arg => arg !== '--no-sandbox')
 
