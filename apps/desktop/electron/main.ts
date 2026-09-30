@@ -1021,6 +1021,7 @@ let windowsNoSandboxRelaunchAttempted = false
 // desktop.log is writable — console output alone is discarded on Start Menu
 // launches.
 let priorSteadyAbortDetected = false
+let sandboxReprobeOwed = false
 
 // #121954: the two-strike boot-abort ladder now also covers Linux. On Linux
 // hosts where the sandboxed GPU child cannot start (dies pre-main on an
@@ -1060,6 +1061,12 @@ if (IS_WINDOWS || process.platform === 'linux') {
   windowsSandboxFallbackActive = sandboxDecision.enable
   windowsSandboxFallbackSticky = sandboxDecision.nextMarker.state === 'fallback'
   priorSteadyAbortDetected = sandboxDecision.priorSteadyAbort === true
+  // Whether THIS launch owes the sandbox its one allowed post-update retry.
+  // Not the same question as windowsSandboxFallbackActive: that is "did we run
+  // without the sandbox", which a manual `hermes --no-sandbox` also answers yes
+  // to on a perfectly healthy host. Only the version-change arm actually arms
+  // the retry, so only that arms can be carried forward.
+  sandboxReprobeOwed = sandboxDecision.nextMarker.reprobe === true
 
   if (sandboxDecision.nextMarker.state === 'fallback' && sandboxDecision.nextMarker.reason) {
     windowsSandboxFallbackReason = sandboxDecision.nextMarker.reason
@@ -15280,10 +15287,10 @@ function createWindow() {
               reason: windowsSandboxFallbackReason,
               appVersion: app.getVersion(),
               steady: true,
-              // This process ran without the Chromium sandbox, so reaching a
-              // usable window proves nothing about it: a pending post-update
-              // `reprobe` stays owed to the next sandboxed launch.
-              pendingReprobe: windowsSandboxFallbackActive
+              // This launch owes a post-update retry (see sandboxReprobeOwed), so reaching
+              // a usable window on a sandbox-off relaunch proves nothing and the
+              // retry stays owed to the next sandboxed launch.
+              pendingReprobe: sandboxReprobeOwed
             })
           )
         } catch (error) {

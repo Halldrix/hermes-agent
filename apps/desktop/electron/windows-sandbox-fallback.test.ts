@@ -570,6 +570,58 @@ test('a clean quit after a --no-sandbox reveal still owes the re-probe to the ne
   assert.equal(firstProbe.nextMarker?.state, 'fallback')
 })
 
+test('a manual --no-sandbox run on a healthy host must not fabricate a post-update retry', () => {
+  // The reveal preserves a pending `reprobe` only when this launch genuinely
+  // OWES one. A user typing `hermes --no-sandbox` on a healthy machine runs
+  // with the sandbox off too, but nothing armed a retry — preserving one there
+  // would make the next ordinary launch report `reprobe-failed` and latch the
+  // app into a sticky fallback it never earned.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-manual-nosandbox-'))
+
+  // Healthy host, no update in flight: the previous run quit cleanly.
+  writeSandboxMarker(dir, { state: 'ok' })
+
+  const manual = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: ['--no-sandbox'],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(manual.reason, 'already-enabled')
+  assert.notEqual(manual.nextMarker?.reprobe, true, 'a manual flag arms no retry')
+  writeSandboxMarker(dir, manual.nextMarker)
+
+  // The reveal's `pendingReprobe` argument is derived from the launch decision,
+  // exactly as main.ts derives it — so a caller that passed the wrong predicate
+  // (e.g. "ran with the sandbox off", which a manual flag also satisfies) makes
+  // this fail rather than silently fabricate a retry.
+  const revealed = markerAfterSuccessfulBoot({
+    fallbackActive: false,
+    steady: true,
+    appVersion: '0.21.3',
+    pendingReprobe: manual.nextMarker?.reprobe === true
+  })
+  assert.equal(manual.nextMarker?.reprobe, undefined, 'the launch decision must report no owed retry')
+  writeSandboxMarker(dir, revealed)
+  assert.deepEqual(revealed, { state: 'running', version: '0.21.3' })
+
+  // Clean quit, then the next ordinary launch: sandboxed, no sticky fallback.
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  const next = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(next.enable, false, 'a healthy host must keep its sandbox')
+  assert.equal(next.reason, null)
+})
+
 test('a reveal that actually ran sandboxed consumes the re-probe', () => {
   // The mirror case: this process DID exercise the sandbox, so reaching a
   // window is the probe succeeding. The retry is spent and must not linger.
