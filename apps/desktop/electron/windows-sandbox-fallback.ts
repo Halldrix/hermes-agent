@@ -232,11 +232,16 @@ export function decideWindowsSandboxLaunch(
     // sandbox already off, so it is not the process that gets to use the retry.
     // The process that actually exercises the sandbox comes later, and it must
     // still find the retry armed or a still-broken sandbox gets a free extra
-    // attempt (two aborts to reach fallback instead of one).
+    // attempt (two aborts to reach fallback instead of one). Carried from the
+    // same two states recordDirectCleanExit accepts, so the three sites that
+    // preserve a pending retry cannot drift apart.
     let nextMarker: SandboxMarker
     if (marker?.state === 'fallback') {
       nextMarker = marker
-    } else if (marker?.state === 'booting' && marker.reprobe === true) {
+    } else if (
+      (marker?.state === 'booting' || marker?.state === 'running') &&
+      marker.reprobe === true
+    ) {
       nextMarker = { state: 'booting', reprobe: true }
     } else {
       nextMarker = { state: 'booting' }
@@ -349,11 +354,11 @@ export function markerAfterSuccessfulBoot(options: {
         marker.version = options.appVersion
       }
 
-      // A post-update `reprobe` survives a reveal that ran with the sandbox OFF:
-      // this process launched with `--no-sandbox`, so it never exercised the
-      // sandbox and is not entitled to spend the retry. A reveal that DID run
-      // sandboxed is the probe succeeding, which legitimately consumes it, so
-      // `running` is written plain there.
+      // A post-update `reprobe` survives only on a reveal that could not spend
+      // it. A reveal that DID run sandboxed is the re-probe succeeding, which
+      // legitimately consumes the retry, so `running` is written plain there.
+      // The caller owns that distinction: pass `pendingReprobe` only when this
+      // launch owed a retry AND ran with the sandbox off.
       if (options.pendingReprobe) {
         marker.reprobe = true
       }

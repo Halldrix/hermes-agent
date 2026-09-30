@@ -1062,11 +1062,15 @@ if (IS_WINDOWS || process.platform === 'linux') {
   windowsSandboxFallbackSticky = sandboxDecision.nextMarker.state === 'fallback'
   priorSteadyAbortDetected = sandboxDecision.priorSteadyAbort === true
   // Whether THIS launch owes the sandbox its one allowed post-update retry.
-  // Not the same question as windowsSandboxFallbackActive: that is "did we run
-  // without the sandbox", which a manual `hermes --no-sandbox` also answers yes
-  // to on a perfectly healthy host. Only the version-change arm actually arms
-  // the retry, so only that arms can be carried forward.
-  sandboxReprobeOwed = sandboxDecision.nextMarker.reprobe === true
+  // Whether this launch OWES a retry AND could not spend it. Both halves are
+  // needed. The version-change arm arms `reprobe` for the sandboxed re-probe
+  // launch itself (enable: false, sandbox ON) - and that launch spending the
+  // retry successfully is the whole point, so a reveal there must NOT carry it
+  // forward, or the next unrelated abort reports `reprobe-failed` and latches a
+  // host whose sandbox just got fixed. Only when we ALSO ran with the sandbox off
+  // is the retry still owed.
+  sandboxReprobeOwed =
+    sandboxDecision.nextMarker.reprobe === true && sandboxDecision.enable
 
   if (sandboxDecision.nextMarker.state === 'fallback' && sandboxDecision.nextMarker.reason) {
     windowsSandboxFallbackReason = sandboxDecision.nextMarker.reason
@@ -19773,8 +19777,10 @@ app.on('before-quit', event => {
         isWindows: true,
         stickyFallback: windowsSandboxFallbackSticky
       })
-    } catch {
-      void 0
+    } catch (error) {
+      // Same reasoning as the exitAfterBackendShutdown twin: a failed write
+      // leaves the prior marker behind, which the next launch reads as an abort.
+      rememberLog(`[sandbox] clean-exit marker write failed: ${error?.message || error}`)
     }
   }
 

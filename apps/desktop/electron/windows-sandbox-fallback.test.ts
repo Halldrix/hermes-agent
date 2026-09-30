@@ -622,17 +622,44 @@ test('a manual --no-sandbox run on a healthy host must not fabricate a post-upda
   assert.equal(next.reason, null)
 })
 
-test('a reveal that actually ran sandboxed consumes the re-probe', () => {
-  // The mirror case: this process DID exercise the sandbox, so reaching a
-  // window is the probe succeeding. The retry is spent and must not linger.
-  const revealed = markerAfterSuccessfulBoot({
-    fallbackActive: false,
-    steady: true,
-    appVersion: '0.21.3'
+test('a successful post-update re-probe consumes the retry', () => {
+  // The version-change arm arms `reprobe` for the sandboxed re-probe launch
+  // itself. That launch reaching a window IS the probe succeeding - the retry
+  // is spent and must not survive, or the next unrelated abort (a task-manager
+  // kill) reports `reprobe-failed` and latches a host whose sandbox just got
+  // fixed into sticky --no-sandbox until the following update.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-probe-succeeds-'))
+
+  writeSandboxMarker(dir, { state: 'fallback', reason: 'boot-loop', version: '0.21.2' })
+
+  const probeLaunch = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: [], env: {}, marker: readSandboxMarker(dir), appVersion: '0.21.3'
   })
 
-  assert.deepEqual(revealed, { state: 'running', version: '0.21.3' })
-  assert.equal('reprobe' in revealed, false)
+  // This launch IS the sandboxed re-probe.
+  assert.equal(probeLaunch.enable, false, 'the re-probe runs sandboxed')
+  assert.deepEqual(probeLaunch.nextMarker, { state: 'booting', reprobe: true })
+  writeSandboxMarker(dir, probeLaunch.nextMarker)
+
+  // It ran sandboxed, so it spent the retry: the caller passes no pendingReprobe.
+  const owed = probeLaunch.nextMarker?.reprobe === true && probeLaunch.enable === true
+  assert.equal(owed, false, 'a sandboxed re-probe spends the retry it was owed')
+
+  writeSandboxMarker(dir, markerAfterSuccessfulBoot({
+    fallbackActive: false, steady: true, appVersion: '0.21.3', pendingReprobe: owed
+  }))
+
+  assert.deepEqual(readSandboxMarker(dir), { state: 'running', version: '0.21.3' })
+
+  // A main-process abort later leaves that plain `running`, and the next
+  // launch must treat it as steady-state evidence, not a failed retry.
+  const afterAbort = decideWindowsSandboxLaunch({
+    platform: 'win32', argv: [], env: {}, marker: readSandboxMarker(dir), appVersion: '0.21.3'
+  })
+
+  assert.equal(afterAbort.priorSteadyAbort, true)
+  assert.equal(afterAbort.nextMarker?.reprobe, undefined, 'a spent retry must not come back')
+  assert.equal(afterAbort.enable, false, 'a healthy host keeps its sandbox')
 })
 
 test('a clean relaunch with no pending re-probe leaves nothing for the next launch to trip on', () => {
