@@ -223,7 +223,20 @@ export function decideWindowsSandboxLaunch(
   if (alreadyHasNoSandbox(argv, env)) {
     // Honor the explicit flag; keep the marker lifecycle unchanged. When the
     // relaunch path set the flag, the fallback marker it wrote is preserved.
-    const nextMarker: SandboxMarker = marker?.state === 'fallback' ? marker : { state: 'booting' }
+    //
+    // A pending post-update `reprobe` also survives: this launch runs with the
+    // sandbox already off, so it is not the process that gets to use the retry.
+    // The process that actually exercises the sandbox comes later, and it must
+    // still find the retry armed or a still-broken sandbox gets a free extra
+    // attempt (two aborts to reach fallback instead of one).
+    let nextMarker: SandboxMarker
+    if (marker?.state === 'fallback') {
+      nextMarker = marker
+    } else if (marker?.state === 'booting' && marker.reprobe === true) {
+      nextMarker = { state: 'booting', reprobe: true, bootAborts: marker.bootAborts ?? 0 }
+    } else {
+      nextMarker = { state: 'booting' }
+    }
 
     return { enable: true, reason: 'already-enabled', nextMarker }
   }
@@ -464,27 +477,44 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
  * fallback keeps its sticky marker, and a non-Windows run never touches the
  * sandbox marker.
  *
- * A clean `app.exit()` is a deliberate relaunch, so the leftover becomes `ok`
- * whatever the prior state was: the startup `booting` marker is written before
- * any window exists, so this run may never have revealed one, and neither the
- * two-strike `bootAborts` budget nor the one-shot post-update `reprobe` arming
- * may be spent on it. Only a genuinely aborted boot leaves `booting` behind,
- * and that is decided at launch time in `decideWindowsSandboxLaunch()`.
+ * A clean `app.exit()` is a deliberate relaunch, so it spends no evidence: the
+ * startup `booting` marker is written before any window exists, so this run may
+ * never have revealed one, and a clean exit must not advance the two-strike
+ * `bootAborts` budget. That is why the prior `bootAborts` count is carried
+ * through rather than incremented.
+ *
+ * The one thing that IS carried forward is a pending post-update `reprobe`.
+ * That flag does not describe THIS process — it describes the NEXT one: it is
+ * the sandbox's one allowed retry after an app update, and if a clean relaunch
+ * happened between arming it and the process that actually exercises the
+ * sandbox, then discarding it would silently hand a still-broken sandbox an
+ * extra free attempt (it would need a second abort to reach fallback instead of
+ * one). So a `booting`+`reprobe` leftover stays armed and just stops counting
+ * aborts; every other prior state becomes plain `ok`.
  */
 export function recordDirectCleanExit(
   userDataDir: string,
   options: {
     isWindows: boolean
     stickyFallback: boolean
+    readMarker?: typeof readSandboxMarker
   }
 ): void {
   if (!options.isWindows || options.stickyFallback) {
     return
   }
 
-  // The prior state is deliberately NOT read or carried forward: a clean exit
-  // spends neither boot-abort strike nor the one-shot re-probe. See docstring.
-  writeSandboxMarker(userDataDir, { state: 'ok' })
+  // Only `reprobe` describes the next process rather than this one, so it is
+  // the single field a clean exit carries forward. See the docstring.
+  const prior = (options.readMarker ?? readSandboxMarker)(userDataDir)
+  const pendingReprobe = prior?.state === 'booting' && prior.reprobe === true
+
+  writeSandboxMarker(
+    userDataDir,
+    pendingReprobe
+      ? { state: 'booting', reprobe: true, bootAborts: prior?.bootAborts ?? 0 }
+      : { state: 'ok' }
+  )
 }
 
 export function buildNoSandboxRelaunchArgs(argv: readonly string[]): string[] {
