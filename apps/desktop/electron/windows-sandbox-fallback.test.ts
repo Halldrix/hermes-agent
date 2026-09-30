@@ -16,6 +16,7 @@ import {
   GPU_CHILD_SANDBOX_SIGTERM_EXIT,
   grantAllApplicationPackagesAcl,
   isWindowsSandboxBreakpointExit,
+  launchStillOwesReprobe,
   markerAfterSuccessfulBoot,
   parseSandboxMarker,
   readSandboxMarker,
@@ -641,8 +642,9 @@ test('a successful post-update re-probe consumes the retry', () => {
   assert.deepEqual(probeLaunch.nextMarker, { state: 'booting', reprobe: true })
   writeSandboxMarker(dir, probeLaunch.nextMarker)
 
-  // It ran sandboxed, so it spent the retry: the caller passes no pendingReprobe.
-  const owed = probeLaunch.nextMarker?.reprobe === true && probeLaunch.enable === true
+  // The predicate main.ts actually calls, not a re-implementation of it: this
+  // launch owed a retry but ran sandboxed, so it spent it.
+  const owed = launchStillOwesReprobe(probeLaunch)
   assert.equal(owed, false, 'a sandboxed re-probe spends the retry it was owed')
 
   writeSandboxMarker(dir, markerAfterSuccessfulBoot({

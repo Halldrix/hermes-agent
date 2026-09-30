@@ -664,6 +664,7 @@ import {
   buildNoSandboxRelaunchArgs,
   decideWindowsSandboxLaunch,
   fallbackMarker,
+  launchStillOwesReprobe,
   grantAllApplicationPackagesAcl,
   markerAfterSuccessfulBoot,
   readSandboxMarker,
@@ -1061,16 +1062,10 @@ if (IS_WINDOWS || process.platform === 'linux') {
   windowsSandboxFallbackActive = sandboxDecision.enable
   windowsSandboxFallbackSticky = sandboxDecision.nextMarker.state === 'fallback'
   priorSteadyAbortDetected = sandboxDecision.priorSteadyAbort === true
-  // Whether THIS launch owes the sandbox its one allowed post-update retry.
-  // Whether this launch OWES a retry AND could not spend it. Both halves are
-  // needed. The version-change arm arms `reprobe` for the sandboxed re-probe
-  // launch itself (enable: false, sandbox ON) - and that launch spending the
-  // retry successfully is the whole point, so a reveal there must NOT carry it
-  // forward, or the next unrelated abort reports `reprobe-failed` and latches a
-  // host whose sandbox just got fixed. Only when we ALSO ran with the sandbox off
-  // is the retry still owed.
-  sandboxReprobeOwed =
-    sandboxDecision.nextMarker.reprobe === true && sandboxDecision.enable
+  // Whether this launch still owes the sandbox its post-update retry. The rule
+  // lives in the sandbox module so the suite can pin it - main.ts boots
+  // Electron at import and cannot be imported by a test.
+  sandboxReprobeOwed = launchStillOwesReprobe(sandboxDecision)
 
   if (sandboxDecision.nextMarker.state === 'fallback' && sandboxDecision.nextMarker.reason) {
     windowsSandboxFallbackReason = sandboxDecision.nextMarker.reason

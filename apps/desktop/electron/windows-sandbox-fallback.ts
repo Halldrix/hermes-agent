@@ -187,6 +187,24 @@ export interface SandboxLaunchDecision {
 }
 
 /**
+ * Does this launch still OWE the sandbox its one allowed post-update retry?
+ *
+ * Both halves are required. The version-change arm arms `reprobe` for the
+ * sandboxed re-probe launch itself (`enable: false`, sandbox ON) — and that
+ * launch spending the retry by reaching a window is the entire point of arming
+ * it. So the retry only survives when this launch owed it AND could not spend
+ * it, i.e. when we also ran with the sandbox off.
+ *
+ * The caller owns this answer today, which is how an earlier version of this
+ * branch ended up keying the reveal on "did we run without the sandbox" alone:
+ * a manual `hermes --no-sandbox` satisfies that too, fabricating a retry on a
+ * healthy host and latching it into `--no-sandbox` after one ordinary abort.
+ */
+export function launchStillOwesReprobe(decision: SandboxLaunchDecision): boolean {
+  return decision.nextMarker.reprobe === true && decision.enable === true
+}
+
+/**
  * Single launch-time transition: decide whether this Windows launch disables
  * the Chromium sandbox AND what the marker becomes for crash-detection on the
  * next launch.
