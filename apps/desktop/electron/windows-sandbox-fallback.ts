@@ -465,11 +465,12 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
  * fallback keeps its sticky marker, and a non-Windows run never touches the
  * sandbox marker.
  *
- * A `booting` marker is NOT downgraded to `ok`. The post-update re-probe arming
- * and the boot-abort tally live in that state, and `decideWindowsSandboxLaunch`
- * reaches the `reprobe` arm only from `booting` — overwriting it would cost a
- * still-broken post-update sandbox its one-strike re-probe. This run did
- * finish, so the tally advances by the one boot it completed.
+ * A `booting` marker is NOT downgraded to `ok`. The post-update `reprobe`
+ * arming lives in that state, and `decideWindowsSandboxLaunch` reaches the
+ * `reprobe` arm only from `booting` — overwriting it would cost a still-broken
+ * post-update sandbox its one-strike re-probe. `bootAborts` is carried through
+ * unchanged: a clean `app.exit()` is a deliberate relaunch, never a sandbox
+ * boot failure, so it must not spend the two-strike fallback budget.
  */
 export function recordDirectCleanExit(
   userDataDir: string,
@@ -490,8 +491,14 @@ export function recordDirectCleanExit(
   const marker: SandboxMarker = { state: 'ok' }
 
   if (prior?.state === 'booting') {
+    // The `booting` state is preserved so the post-update `reprobe` arming
+    // survives — but `bootAborts` is NOT advanced. A clean `app.exit()` here
+    // means the sandbox did not fail: the process was relaunched deliberately
+    // (GPU/renderer fallback, bundle swap), possibly before any window was
+    // revealed. Counting it would spend the two-strike budget on a run that
+    // never aborted and push the NEXT launch into `--no-sandbox` for no reason.
     marker.state = 'booting'
-    marker.bootAborts = (prior.bootAborts ?? 0) + 1
+    marker.bootAborts = prior.bootAborts ?? 0
 
     if (prior.reprobe) {
       marker.reprobe = true
