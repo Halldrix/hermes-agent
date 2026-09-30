@@ -433,7 +433,7 @@ test('a clean relaunch between arming the re-probe and the real probe keeps the 
   })
 
   assert.equal(launchN.enable, false, 'the re-probe launches sandboxed')
-  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
+  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true })
   writeSandboxMarker(dir, launchN.nextMarker)
 
   // A clean relaunch before this run ever revealed a window.
@@ -442,7 +442,7 @@ test('a clean relaunch between arming the re-probe and the real probe keeps the 
   const afterExit = readSandboxMarker(dir)
   assert.equal(afterExit?.state, 'booting', 'the pending re-probe outlives the clean exit')
   assert.equal(afterExit?.reprobe, true, 'the one allowed sandbox retry is still armed')
-  assert.equal(afterExit?.bootAborts ?? 0, 0, 'a clean exit spends no boot-abort strike')
+  assert.equal(afterExit?.bootAborts, undefined, 'a clean exit records no boot-abort strike')
 
 
   // The relaunched process still runs with --no-sandbox (every in-app relaunch
