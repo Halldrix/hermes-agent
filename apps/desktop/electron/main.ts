@@ -12708,8 +12708,10 @@ async function exitAfterBackendShutdown(code) {
       isWindows: IS_WINDOWS,
       stickyFallback: windowsSandboxFallbackSticky
     })
-  } catch {
-    void 0
+  } catch (error) {
+    // A failed write leaves the prior marker behind, which the next launch
+    // reads as an abort. Say so instead of failing silently (#112961).
+    rememberLog(`[sandbox] clean-exit marker write failed: ${error?.message || error}`)
   }
 
   app.exit(code)

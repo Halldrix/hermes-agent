@@ -413,14 +413,15 @@ test('recordDirectCleanExit writes `ok` over a `running` leftover so the next la
   assert.equal(nextLaunch.priorSteadyAbort, undefined, 'a clean direct exit must not read as a steady abort')
 })
 
-test('recordDirectCleanExit keeps the post-update re-probe armed instead of downgrading to `ok`', () => {
-  // Downgrading a `booting` marker to `ok` would drop the `reprobe` arming, and
-  // decideWindowsSandboxLaunch reaches the one-strike re-probe only from
-  // `booting` — a still-broken post-update sandbox would then need two aborts
-  // instead of one.
+test('recordDirectCleanExit clears a clean pre-window relaunch so neither boot-abort budget nor re-probe is spent', () => {
+  // The startup `booting` marker is written before any window exists, and the
+  // `reprobe` arm is checked BEFORE bootAborts, so carrying either forward here
+  // would engage --no-sandbox on a host where no sandbox boot ever failed. The
+  // same version change that arms `reprobe` is what triggers a bundle-swap
+  // relaunch, so this is the normal post-update path, not a corner case.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-reprobe-'))
 
-  // Launch N: a sticky fallback from the previous app version re-probes once.
+  // Launch N: a sticky fallback from the previous app version arms the re-probe.
   writeSandboxMarker(dir, { state: 'fallback', reason: 'boot-loop', version: '0.21.2' })
 
   const launchN = decideWindowsSandboxLaunch({
@@ -435,6 +436,8 @@ test('recordDirectCleanExit keeps the post-update re-probe armed instead of down
   assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
 
   writeSandboxMarker(dir, launchN.nextMarker)
+
+  // A clean relaunch before the window is ever revealed.
   recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
 
   // The run finished, so the tally advances by the one boot it completed, but
@@ -443,19 +446,19 @@ test('recordDirectCleanExit keeps the post-update re-probe armed instead of down
   assert.equal(afterExit?.state, 'booting')
   assert.equal(afterExit?.reprobe, true)
   assert.equal(afterExit?.bootAborts, 1)
+  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
 
-  // Round-trip through the real ladder: the re-probe still reaches fallback on
-  // its first strike.
+  // Round-trip through the real ladder: a healthy post-update host stays sandboxed.
   const launchNPlus1 = decideWindowsSandboxLaunch({
     platform: 'win32',
     argv: [],
     env: {},
-    marker: afterExit,
+    marker: readSandboxMarker(dir),
     appVersion: '0.21.3'
   })
 
-  assert.equal(launchNPlus1.enable, true, 'the re-probe abort still reaches fallback on its first strike')
-  assert.equal(launchNPlus1.reason, 'reprobe-failed')
+  assert.equal(launchNPlus1.enable, false, 'a clean relaunch must not engage --no-sandbox')
+  assert.equal(launchNPlus1.reason, null)
 })
 
 test('recordDirectCleanExit leaves the marker untouched when it must not write', () => {
@@ -501,6 +504,21 @@ test('linux boot-abort ladder engages --no-sandbox on the second consecutive abo
     argv,
     env,
     appVersion
+  // Clean intentional relaunch: the process never revealed a window, no
+  // sandbox boot failed, and the fallback is not engaged.
+  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+
+  // `booting` is the prior-run-aborted state, so a clean exit must clear it
+  // rather than leave a run that never aborted looking like an aborted boot.
+  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
+
+  // And the next launch must not engage the fallback.
+  const next = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
   })
 
   assert.equal(second.enable, true)

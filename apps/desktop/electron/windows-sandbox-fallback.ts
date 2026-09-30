@@ -458,54 +458,33 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
  *
  * This owns BOTH the decision and the write, so the seam is exercisable: a test
  * of a pure decision alone cannot see whether main.ts routes its clean exits
- * here. I/O is injected (`readMarker`/`writeMarker`) for the same reason
- * `writeSandboxMarker` injects its fs calls.
+ * here. `writeSandboxMarker` injects its own fs calls.
  *
  * Keyed on sticky (not active) to match the before-quit handler: an engaged
  * fallback keeps its sticky marker, and a non-Windows run never touches the
  * sandbox marker.
  *
- * A `booting` marker is NOT downgraded to `ok`. The post-update `reprobe`
- * arming lives in that state, and `decideWindowsSandboxLaunch` reaches the
- * `reprobe` arm only from `booting` — overwriting it would cost a still-broken
- * post-update sandbox its one-strike re-probe. `bootAborts` is carried through
- * unchanged: a clean `app.exit()` is a deliberate relaunch, never a sandbox
- * boot failure, so it must not spend the two-strike fallback budget.
+ * A clean `app.exit()` is a deliberate relaunch, so the leftover becomes `ok`
+ * whatever the prior state was: the startup `booting` marker is written before
+ * any window exists, so this run may never have revealed one, and neither the
+ * two-strike `bootAborts` budget nor the one-shot post-update `reprobe` arming
+ * may be spent on it. Only a genuinely aborted boot leaves `booting` behind,
+ * and that is decided at launch time in `decideWindowsSandboxLaunch()`.
  */
 export function recordDirectCleanExit(
   userDataDir: string,
   options: {
     isWindows: boolean
     stickyFallback: boolean
-    readMarker?: typeof readSandboxMarker
-    writeMarker?: typeof writeSandboxMarker
   }
 ): void {
   if (!options.isWindows || options.stickyFallback) {
     return
   }
 
-  const readMarker = options.readMarker ?? readSandboxMarker
-  const writeMarker = options.writeMarker ?? writeSandboxMarker
-  const prior = readMarker(userDataDir)
-  const marker: SandboxMarker = { state: 'ok' }
-
-  if (prior?.state === 'booting') {
-    // The `booting` state is preserved so the post-update `reprobe` arming
-    // survives — but `bootAborts` is NOT advanced. A clean `app.exit()` here
-    // means the sandbox did not fail: the process was relaunched deliberately
-    // (GPU/renderer fallback, bundle swap), possibly before any window was
-    // revealed. Counting it would spend the two-strike budget on a run that
-    // never aborted and push the NEXT launch into `--no-sandbox` for no reason.
-    marker.state = 'booting'
-    marker.bootAborts = prior.bootAborts ?? 0
-
-    if (prior.reprobe) {
-      marker.reprobe = true
-    }
-  }
-
-  writeMarker(userDataDir, marker)
+  // The prior state is deliberately NOT read or carried forward: a clean exit
+  // spends neither boot-abort strike nor the one-shot re-probe. See docstring.
+  writeSandboxMarker(userDataDir, { state: 'ok' })
 }
 
 export function buildNoSandboxRelaunchArgs(argv: readonly string[]): string[] {
