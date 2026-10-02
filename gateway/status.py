@@ -24,6 +24,7 @@ from typing import Any, Callable, NamedTuple, Optional
 from hermes_constants import _get_platform_default_hermes_home, get_hermes_home, get_process_hermes_home
 from hermes_cli._subprocess_compat import pid_exists_stdlib
 from hermes_platform.host.pid_namespace import (
+    PIDNS_UNRESOLVED,
     describe_pid_namespace,
     local_pid_namespace,
     pid_checkable_from,
@@ -911,12 +912,16 @@ def _build_pid_record() -> dict:
         "hermes_home": str(_canonical_hermes_home(_get_process_hermes_home())),
     }
     # A PID is only meaningful with the namespace that issued it. Inside
-    # ``PrivatePIDs=`` this process is PID 1, and that number names the host's init
+    # ``PrivatePIDS=`` this process is PID 1, and that number names the host's init
     # for every reader outside the namespace (#123081). Readers refuse to probe a
     # record whose namespace is not their own rather than resolving PID 1 to init.
+    # Omitting the key here would make this build indistinguishable from a pre-stamp one, so a
+    # writer on a platform WITH namespaces that cannot resolve its own says so explicitly. Where
+    # there is no namespace concept at all (``supported=False``: macOS, Windows) the key stays
+    # absent — there is nothing to qualify, and every reader keeps main's bare-PID semantics.
     pidns = local_pid_namespace()
-    if pidns.known:
-        record["pidns"] = pidns.id
+    if pidns.supported:
+        record["pidns"] = pidns.id if pidns.known else PIDNS_UNRESOLVED
     return record
 
 

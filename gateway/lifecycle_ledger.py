@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from hermes_platform.host.pid_namespace import (
+    PIDNS_UNRESOLVED,
     local_pid_namespace,
     pid_checkable_from,
     record_unlinkable_from,
@@ -296,8 +297,8 @@ def record_startup(home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
         # number is 1, and a reader in another namespace would resolve it to the host's init
         # and read a healthy gateway as an unclean death.
         _pidns = local_pid_namespace()
-        if _pidns.known:
-            claim["pidns"] = _pidns.id
+        if _pidns.supported:
+            claim["pidns"] = _pidns.id if _pidns.known else PIDNS_UNRESOLVED
         # Process birth (psutil), distinct from ``start_time`` (the ledger claim, seconds later once
         # imports finish): the Windows start attestation binds PIDs to birth time (#110020 review).
         from hermes_cli.process_identity import _process_create_time

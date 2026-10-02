@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from hermes_platform.host.pid_namespace import pid_checkable_from
+from hermes_platform.host.pid_namespace import PIDNS_UNRESOLVED, pid_checkable_from
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -511,7 +511,7 @@ def publish_record(
         pid=os.getpid(),
         create_time=process_create_time(),
         start_time=get_process_start_time(os.getpid()),
-        pidns=pidns.id if pidns.known else None,
+        pidns=pidns.id if pidns.known else PIDNS_UNRESOLVED if pidns.supported else None,
         host=str(host or ""),
         port=int(port) if isinstance(port, int) and port > 0 else None,
         protocol_version=HOST_PROTOCOL_VERSION,

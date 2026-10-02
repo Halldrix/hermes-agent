@@ -48,6 +48,18 @@ class LocalPidNamespace:
 _NO_NAMESPACE = LocalPidNamespace(id=None, supported=False)
 _UNRESOLVED = LocalPidNamespace(id=None, supported=True)
 
+#: Stamp written by a build that supports namespaces but could not resolve its own when it wrote
+#: the record. Distinct from an ABSENT stamp on purpose: absence means "written by a build that
+#: predates the stamp" and keeps main's behavior, while this says "written from inside a namespace
+#: I could not name". Without it, a transient procfs makes the CURRENT build emit a record the
+#: reader later reclassifies as legacy local authority (#123081).
+PIDNS_UNRESOLVED = "unresolved"
+
+
+def is_unresolved_pid_namespace(value: Any) -> bool:
+    """True when ``value`` is the explicit "this build could not qualify it" stamp."""
+    return value == PIDNS_UNRESOLVED
+
 
 def _parse_pid_namespace_link(text: str) -> Optional[str]:
     """``pid:[4026531834]`` → ``4026531834``; anything else → ``None``."""
@@ -138,6 +150,10 @@ def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) 
     if not ours.supported:
         return True
     if not ours.known:
+        return False
+    if is_unresolved_pid_namespace(recorded_pidns):
+        # The writer came from a namespace it could not name. Probing its PID here reads an
+        # unrelated process, so this is "unqualified", not "legacy" — absence is the legacy case.
         return False
     if not _is_canonical_pid_namespace(recorded_pidns):
         return True
