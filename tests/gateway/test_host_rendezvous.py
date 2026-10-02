@@ -110,6 +110,39 @@ def test_stale_record_is_never_attachable(host_dir, pid, create_time):
     assert hr.read_record(hr.ROLE_SERVE, include_stale=True) is not None
 
 
+def test_retraction_never_treats_a_foreign_pid_as_self(host_dir, monkeypatch):
+    """Numeric equality is not ownership, so it cannot grant deletion authority.
+
+    ``discard_dead_record`` only consulted the namespace/incarnation matcher when
+    ``record.pid != os.getpid()``. Two namespaces issue the same number, so a foreign record
+    whose PID equals this process' skipped the check entirely and lost both its record and its
+    token — reachable at the restart seam, where a replacement republishing the role before the
+    previous owner's retraction runs would be erased by that erasure. A retraction has to be
+    allowed on namespace + incarnation, or on an explicit "this is mine" identity, not on a
+    number that means different things in different namespaces.
+    """
+    from gateway import host_rendezvous as hr
+    from hermes_platform.host import pid_namespace as pns
+
+    ours = pns.local_pid_namespace()
+    if not ours.known:
+        pytest.skip("no PID namespace on this host")
+    monkeypatch.setattr(pns, "local_pid_namespace", lambda: ours)
+    monkeypatch.setenv("HERMES_HOME", str(host_dir))
+    record = hr.publish_record(hr.ROLE_GATEWAY, profiles=("default",), home=str(host_dir))
+    assert record is not None
+    foreign = dataclasses.replace(record, pidns="4026532999")  # canonical and not ours
+
+    # Collide numerically with the caller: the old short-circuit's only input.
+    assert foreign.pid == os.getpid()
+    hr.record_path(hr.ROLE_GATEWAY).write_text(json.dumps(foreign.to_json()), encoding="utf-8")
+    hr.token_path(hr.ROLE_GATEWAY).write_text("token", encoding="utf-8")
+
+    assert hr.discard_dead_record(hr.ROLE_GATEWAY) is False
+    assert hr.record_path(hr.ROLE_GATEWAY).exists(), "a foreign record was retracted"
+    assert hr.token_path(hr.ROLE_GATEWAY).exists(), "a foreign token was retracted"
+
+
 @pytest.mark.platforms("linux")
 def test_foreign_namespace_host_record_is_never_an_owner(host_dir, monkeypatch):
     """A host record stamped in another PID namespace names an unrelated process here (#123081).

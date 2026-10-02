@@ -548,12 +548,26 @@ def discard_dead_record(role: str) -> bool:
     A confirmed stop must retract the record too. Leaving it made ``gateway restart --all`` a
     silent no-op: the re-entered ``gateway run`` read the corpse's record, decided ATTACH and
     exited 0, so the host ended up with no gateway at all.
+
+    Retraction is allowed on the namespace + incarnation matcher ALONE, never on
+    ``record.pid == os.getpid()``. That shortcut looked like the "is this mine?" fast path, but
+    a PID number is namespace-relative: two namespaces issue the same one, so a record stamped
+    elsewhere whose number happens to collide with this process' skipped the matcher entirely and
+    lost both its record and its token. The restart seam reaches it — a replacement republishing
+    the role before the stopped owner's retraction runs would be erased by that erasure (#123081).
     """
     role = _validated_role(role)
     record = read_record(role, include_stale=True)
     if record is None:
         return False
-    if record.pid != os.getpid() and _record_incarnation_matches(record) is not False:
+    # A record stamped in another namespace is NOT ours to retract, whatever its number says.
+    # ``_record_incarnation_matches`` answers "stale", and stale is what authorizes the unlink
+    # below — a foreign owner would be indistinguishable from a corpse. Two namespaces issue the
+    # same PID, so the old ``record.pid != os.getpid()`` shortcut (which skipped the matcher on
+    # a numeric collision) erased a live replacement at the restart seam (#123081).
+    if record.pidns is not None and not pid_checkable_from(record.pidns):
+        return False
+    if _record_incarnation_matches(record) is not False:
         return False
     for path in (record_path(role), token_path(role)):
         with contextlib.suppress(OSError):
