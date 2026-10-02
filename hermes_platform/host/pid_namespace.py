@@ -90,11 +90,24 @@ def local_pid_namespace() -> LocalPidNamespace:
     A failed lookup is deliberately not cached, so a transient ``/proc`` problem
     (a permissions race, a partially mounted procfs) is retried on the next call
     instead of pinning the process to "unknown" for its whole life.
+
+    A retry that DOES learn the namespace promotes it into the memo. Without that, the cached
+    entry stayed ``_UNRESOLVED`` forever even after we had read a real id: the next lookup read
+    again, failed again on a different transient, and dropped the process back to UNKNOWN for the
+    rest of its life — contradicting the contract above and reactivating every unknown-namespace
+    refusal mid-process, including the ones that refuse to signal.
     """
     resolved = _local_pid_namespace_cached()
     if resolved.known:
         return resolved
-    return _resolve_local_pid_namespace()
+    retry = _resolve_local_pid_namespace()
+    if retry.known:
+        # Promote: functools' cache has no public setter, and its key is the no-arg call, so
+        # re-caching under that key replaces the unresolved entry.
+        _local_pid_namespace_cached.cache_clear()
+        _local_pid_namespace_cached()
+        return _local_pid_namespace_cached()
+    return retry
 
 
 def pid_namespace_id(pid: int) -> Optional[str]:
