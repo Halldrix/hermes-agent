@@ -140,14 +140,20 @@ def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) 
 
 
 def _is_canonical_pid_namespace(value: Optional[str]) -> bool:
-    """True when ``value`` is a namespace id this module could have written: bare digits.
+    """True when ``value`` is a namespace id this module could have written: ASCII digits.
 
     The kernel's ``/proc/<pid>/ns/pid`` symlink reads ``pid:[4026531836]``, so the id is a
     plain integer string. Anything else — a float, padded whitespace, an int that arrived
     as a JSON number, an empty string, arbitrary text — was not produced by
     :func:`local_pid_namespace` and carries no identity we can compare.
+
+    ``isascii() and isdecimal()``, not ``isdigit()``: ``str.isdigit`` accepts non-ASCII digit
+    forms (``'²'``, ``'٤٠٢٦'``, fullwidth ``'１２'``), so those would be classified CANONICAL,
+    compare unequal, read as FOREIGN and reintroduce the exact wedge this tolerance removes —
+    reachable only by hand-editing a record, but the predicate claims otherwise in its
+    docstring and that claim has to hold.
     """
-    return isinstance(value, str) and value.isdigit()
+    return isinstance(value, str) and value.isascii() and value.isdecimal()
 
 
 def describe_pid_namespace() -> str:

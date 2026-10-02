@@ -1009,7 +1009,20 @@ def _start_times_conflict(recorded_start: Any, current_start: Any) -> bool:
 
 
 def _live_pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
-    """Record's PID when it is alive and passes the start-time PID-reuse guard, else None."""
+    """Record's PID when it is alive and passes the start-time PID-reuse guard, else None.
+
+    The namespace gate is here, at the identity predicate every other guard sits around:
+    ``get_running_pid`` (lock-held branch), ``get_running_pid_identity_strict``,
+    ``get_runtime_status_running_pid`` and ``runtime_status_pid_is_live`` all route through
+    this function, and the first three feed processes that SIGNAL what comes back. Checking
+    liveness first made the verdict a coincidence of what this host's PID table held — under
+    ``PrivatePIDs=`` the recorded 1 resolves to the host's init, which is alive, so a record
+    with no ``start_time`` (unreadable at write time) and an unreadable cmdline returned a
+    live PID that ``find_gateway_pids`` then fed to SIGTERM. A PID issued in another
+    namespace names no process here, so nothing about its liveness is worth computing.
+    """
+    if not pid_checkable_from(record.get("pidns") if isinstance(record, dict) else None):
+        return None
     pid = _pid_from_record(record)
     if pid is None or not _pid_exists(pid):
         return None
@@ -1304,7 +1317,12 @@ def _prepare_runtime_status_update(
                 if not isinstance(k, str) or ":" not in k
                 or (drop_prefix is not None and not k.startswith(drop_prefix))
             }
-        payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time", "pidns")})
+        # ``pidns`` is OPTIONAL in the record — absent where the platform has no namespaces
+        # (macOS, Windows) and absent when our own lookup failed — so the merge cannot index
+        # it blindly. Keying it off membership keeps that platform publishing its state file
+        # at all instead of raising inside every caller's except-handler.
+        payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time", "pidns")
+                        if key in current_record})
         payload["updated_at"] = _utc_now_iso()
         payload.update(_get_code_identity_fields())
         _apply_set_fields(payload, (
