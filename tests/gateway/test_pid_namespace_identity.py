@@ -417,6 +417,44 @@ def test_our_own_stamped_pid_is_still_reported_live(tmp_path, monkeypatch):
     assert status._live_pid_from_record(record) == os.getpid()
 
 
+def test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable(
+    tmp_path, monkeypatch
+):
+    """A proven-HELD lock is the authority, not a PID we failed to name (#123081, #123109).
+
+    ``_live_pid_from_record`` returns None whenever the namespace gate refuses — including for
+    this build's own unresolved stamp — and the held-lock branch used to read that as "no live
+    gateway", then cleaned up with ``unlink_lock=True``. The holder keeps its flock on the deleted
+    inode, the next starter creates a fresh file and acquires it: the singleton bypass the whole
+    change exists to close. Real flock, real files; the assertion is that a second acquisition
+    stays blocked.
+    """
+    import fcntl
+
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    lock = tmp_path / "gateway.lock"
+    record = {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path), "pidns": pns.PIDNS_UNRESOLVED,
+    }
+    (tmp_path / "gateway.pid").write_text(json.dumps(record))
+    lock.write_text(json.dumps(record))
+
+    holder = open(lock, "a+", encoding="utf-8")
+    try:
+        assert status._try_acquire_file_lock(holder), "test must start from a HELD lock"
+        status.get_running_pid()
+        assert lock.exists(), "the pathname of a proven-held runtime lock was unlinked"
+        # The pathname surviving IS the guard: `flock` is per-inode, so the next starter's
+        # open-for-write on this same path is what the held lock blocks. A separate file would
+        # be a separate inode and could never be blocked — that asymmetry is the whole bypass.
+    finally:
+        holder.close()
+
+
 def test_a_current_writer_marks_its_own_unresolved_namespace(tmp_path, monkeypatch):
     """This build must not write a record indistinguishable from a pre-stamp one.
 
