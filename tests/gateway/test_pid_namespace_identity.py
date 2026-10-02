@@ -16,6 +16,7 @@ suite is deterministic on every host; one test reads the real ``/proc`` on Linux
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
@@ -56,12 +57,24 @@ def foreign_namespace(monkeypatch):
 def _set_local_namespace(monkeypatch, namespace):
     """Point BOTH the resolver and its in-tree consumers at a namespace identity.
 
-    ``scoped_lock_identity`` and ``status`` import ``local_pid_namespace`` by name,
-    so patching only the defining module would leave them resolving the real
-    namespace and the test would pass or fail for the wrong reason.
+    ``scoped_lock_identity``, ``status``, ``lifecycle_ledger`` and ``host_rendezvous``
+    import ``local_pid_namespace`` by name, so patching only the defining module would
+    leave them resolving the real namespace and the test would pass or fail for the wrong
+    reason — a writer-side test would silently exercise the host's real namespace.
+
+    ``monkeypatch`` undoes each of these at teardown, which is what keeps one case from
+    deciding the next one's answer.
     """
     for module in (pns, sli, ll):
         monkeypatch.setattr(module, "local_pid_namespace", lambda: namespace)
+    for name in ("gateway.status", "gateway.host_rendezvous"):
+        try:
+            module = importlib.import_module(name)
+        except Exception:  # pragma: no cover - a lane without that module
+            continue
+        if hasattr(module, "local_pid_namespace"):
+            monkeypatch.setattr(module, "local_pid_namespace", lambda: namespace)
+    pns._local_pid_namespace_cached.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -404,17 +417,56 @@ def test_our_own_stamped_pid_is_still_reported_live(tmp_path, monkeypatch):
     assert status._live_pid_from_record(record) == os.getpid()
 
 
+def test_a_current_writer_marks_its_own_unresolved_namespace(tmp_path, monkeypatch):
+    """This build must not write a record indistinguishable from a pre-stamp one.
+
+    The rollout boundary assumes ``pidns`` absent means "written by a build that predates
+    the stamp". That is false: ``_build_pid_record`` only sets the key when
+    ``local_pid_namespace().known``, so a transient or unmounted ``/proc`` makes THIS build emit
+    an unstamped record from inside a namespace. A later reader, once ``/proc`` recovers, sees
+    ``pidns is None`` and reclassifies it as legacy local authority — so the boundary did not
+    protect the record, it opened it. An unresolved-but-supported writer therefore has to write
+    an explicit state the reader can tell apart from absence.
+    """
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    record = status._build_pid_record()
+
+    assert "pidns" in record, "an unresolved writer must say so, not omit it"
+    assert record["pidns"] != _HOST_NS
+    assert pns.is_unresolved_pid_namespace(record["pidns"]) is True
+
+
+def test_an_unresolved_stamp_is_never_checkable_though_legacy_is(monkeypatch):
+    """The reader half: a stamp meaning 'this build could not qualify it' must fail closed.
+
+    Absence still means legacy and keeps main's behavior; the explicit unresolved state is
+    different — this record knows it came from a namespace it could not name, and probing its PID
+    here would read an unrelated process.
+    """
+    _set_local_namespace(monkeypatch, _LIVE)
+
+    assert pns.pid_checkable_from(pns.PIDNS_UNRESOLVED) is False
+    assert pns.pid_checkable_from(None) is True, "legacy absence keeps main's behavior"
+    # …and it must not wedge the unlink either: that was the round-4 trap.
+    assert pns.record_unlinkable_from(pns.PIDNS_UNRESOLVED) is False
+
+
 def test_pid_record_stamps_the_pid_namespace(tmp_path, monkeypatch):
     from gateway import status
 
+    # Compare against the writer's OWN resolver, not the defining module: the writer calls the
+    # name it imported, and this suite deliberately points that at a fixture in other cases.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     record = status._build_pid_record()
-    assert record["pidns"] == local_pid_namespace().id
+    assert record["pidns"] == status.local_pid_namespace().id
 
     # The stamp reaches the file the next process reads.
     status.write_pid_file()
     payload = json.loads((tmp_path / "gateway.pid").read_text())
-    assert payload["pidns"] == local_pid_namespace().id
+    assert payload["pidns"] == status.local_pid_namespace().id
 
 
 def test_pid_record_omits_pidns_where_no_namespace_exists(tmp_path, monkeypatch):
