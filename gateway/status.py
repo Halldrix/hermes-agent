@@ -1714,13 +1714,11 @@ def remove_pid_file() -> None:
         # …and numeric equality is not ownership outside a shared PID namespace (#123081).
         # Under ``PrivatePIDs=`` this gateway IS pid 1, so a record stamped in another
         # namespace passes the test above and this ordinary exit erases that namespace's
-        # gateway.pid while ``detect_unclean_exit()`` still reads it as live. Same rule the
-        # scoped token locks already apply via ``pid_checkable_from`` — deliberately that
-        # predicate and not ``scoped_lock_owned_by_self``: the question here is whether this
-        # stamp can be verified, not who owns it, so an unreadable record (file absent,
-        # empty or garbage → ``record`` is None) still gets cleaned up and an unstamped
-        # one keeps main's behavior.
-        if isinstance(record, dict) and not pid_checkable_from(record.get("pidns")):
+        # gateway.pid while ``detect_unclean_exit()`` still reads it as live. ``record_unlinkable_from``,
+        # not ``pid_checkable_from``: this call site deletes, so an unprovable namespace must keep
+        # main's behavior — a failed ``/proc`` lookup that refused here would leave the gateway
+        # unable to clear its OWN record, since the same lookup is what stamps it.
+        if isinstance(record, dict) and record_unlinkable_from(record.get("pidns")):
             logger.debug(
                 "Leaving %s in place: stamped in PID namespace %s, this process is in %s.",
                 path, record.get("pidns") or "unrecorded", describe_pid_namespace())

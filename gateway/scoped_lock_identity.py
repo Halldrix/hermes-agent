@@ -7,10 +7,15 @@ both be PID 1. Every decision that asks "is this record mine?" or "is this recor
 dead?" must therefore qualify the recorded PID with the namespace that issued it
 before treating any local process observation as evidence about it (#123081).
 
-Every consumer routes through :func:`scoped_lock_owned_by_self` and
-:func:`scoped_lock_stale_locally` so the qualification cannot be dropped again by
-a path that forgets it — the numeric-PID shortcuts that predate the stamp were
-exactly where it went missing.
+The single-record decisions route through :func:`scoped_lock_owned_by_self` and
+:func:`scoped_lock_stale_locally`, so a path cannot drop the qualification by
+forgetting it — the numeric-PID shortcuts that predate the stamp were exactly
+where it went missing. :func:`scoped_lock_qualification` is what they share.
+
+The bulk sweep ``release_all_scoped_locks(owner_pid=…)`` is NOT one of them: it
+filters by ``pidns`` directly, because it decides which of N locks to unlink rather
+than whether one record is self-owned. It must keep agreeing with the single-record
+answer, but it is a second place to look, not a consequence of this module.
 
 Unstamped records keep main's numeric-PID behavior: a record written before the
 stamp existed is not retroactively foreign, and refusing it would make every
