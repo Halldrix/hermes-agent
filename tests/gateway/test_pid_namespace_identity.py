@@ -287,6 +287,45 @@ def test_a_corrupt_stamp_still_lets_the_gateway_start(tmp_path, monkeypatch):
     status.write_pid_file()  # RED without the tolerance: FileExistsError
 
 
+def test_remove_pid_file_cleans_up_when_our_own_namespace_is_unreadable(tmp_path, monkeypatch):
+    """``remove_pid_file`` deletes, so it must not use the fail-closed signal predicate.
+
+    With an unresolvable local namespace the signal predicate refuses, this call site
+    returned early, and the gateway left its OWN ``gateway.pid`` behind — a record whose
+    stamp it could not even write, since the same lookup failed at write time. The docstring's
+    early-return is meant for an absent file, where it protects nothing. This is the third site
+    the unlink/signal split missed.
+    """
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    pid_path = tmp_path / "gateway.pid"
+    _write_pair(tmp_path, monkeypatch, {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path),
+    })
+
+    status.remove_pid_file()
+
+    assert not pid_path.exists()
+
+
+def test_remove_pid_file_still_keeps_a_foreign_namespaces_record(tmp_path, monkeypatch, foreign_namespace):
+    """The control in the other direction: a readable foreign stamp still blocks the unlink."""
+    from gateway import status
+
+    pid_path = tmp_path / "gateway.pid"
+    _write_pair(tmp_path, monkeypatch, {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": status._get_process_start_time(os.getpid()), "hermes_home": str(tmp_path),
+        "pidns": _OTHER_NS,
+    })
+
+    status.remove_pid_file()
+
+    assert pid_path.exists()
+
+
 def test_an_unresolvable_local_namespace_still_lets_the_gateway_start(tmp_path, monkeypatch):
     """A failed ``/proc`` lookup must not be able to wedge the install.
 
