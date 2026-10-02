@@ -110,7 +110,7 @@ def test_stale_record_is_never_attachable(host_dir, pid, create_time):
     assert hr.read_record(hr.ROLE_SERVE, include_stale=True) is not None
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_foreign_namespace_host_record_is_never_an_owner(host_dir, monkeypatch):
     """A host record stamped in another PID namespace names an unrelated process here (#123081).
 

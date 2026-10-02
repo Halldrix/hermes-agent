@@ -161,6 +161,31 @@ def test_pid_checkable_fails_closed_when_our_own_lookup_failed(monkeypatch):
     assert pid_checkable_from(None) is False
 
 
+@pytest.mark.parametrize(
+    "corrupt",
+    ["4026532999.0", " 4026532221 ", "", "abc", "pid:[4026531836]", "0x40265318", "4026532221\t"],
+    ids=lambda v: repr(v),
+)
+def test_pid_checkable_reads_a_non_canonical_stamp_as_unstamped(monkeypatch, corrupt):
+    """A corrupt stamp must not wedge the install.
+
+    ``pid_checkable_from`` compares strings, so any non-canonical value compared unequal
+    and read as FOREIGN — refusing to clean up a dead owner's files. Since
+    ``write_pid_file`` is O_EXCL, that turns one bad byte into a gateway that cannot start
+    at all, with no CLI route back. A value this module could never have written carries no
+    identity claim, so it takes the unstamped path — main's behavior — while a real foreign
+    stamp still refuses.
+    """
+    _set_local_namespace(monkeypatch, _LIVE)
+    assert pid_checkable_from(corrupt) is True
+
+
+def test_pid_checkable_still_refuses_a_real_foreign_stamp(monkeypatch):
+    """The control for the corrupt-stamp tolerance: a canonical foreign id is still refused."""
+    _set_local_namespace(monkeypatch, _LIVE)
+    assert pid_checkable_from(_OTHER_NS) is False
+
+
 def test_pid_checkable_keeps_legacy_unstamped_records_probeable(monkeypatch):
     """The rollout boundary: an unstamped record keeps main's behavior.
 
@@ -176,6 +201,28 @@ def test_pid_checkable_keeps_legacy_unstamped_records_probeable(monkeypatch):
 # ---------------------------------------------------------------------------
 # Consumer 1: the runtime record carries the namespace that issued its PID
 # ---------------------------------------------------------------------------
+
+
+def test_a_corrupt_stamp_still_lets_the_gateway_start(tmp_path, monkeypatch):
+    """The wedge this guards: O_EXCL + a refusing unlink = an install that cannot boot.
+
+    ``write_pid_file`` refuses to clobber an existing record, so a non-canonical ``pidns``
+    that read as foreign would keep a DEAD owner's files on disk and make every subsequent
+    start fail with ``FileExistsError``. Drives the real ``get_running_pid()`` then the real
+    ``write_pid_file()``, no mocked filesystem.
+    """
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _LIVE)
+    dead = 2 ** 22 + 4242
+    _write_pair(tmp_path, monkeypatch, {
+        "pid": dead, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": status._get_process_start_time(dead), "hermes_home": str(tmp_path),
+        "pidns": "4026532221.0",
+    })
+    status.get_running_pid()
+    assert not (tmp_path / "gateway.pid").exists()
+    status.write_pid_file()  # RED without the tolerance: FileExistsError
 
 
 def test_pid_record_stamps_the_pid_namespace(tmp_path, monkeypatch):
