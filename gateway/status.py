@@ -27,7 +27,6 @@ from hermes_platform.host.pid_namespace import (
     describe_pid_namespace,
     local_pid_namespace,
     pid_checkable_from,
-    pid_namespace_id,
 )
 from gateway.scoped_lock_identity import scoped_lock_owned_by_self, scoped_lock_stale_locally
 from utils import atomic_json_write
@@ -1689,9 +1688,24 @@ def remove_pid_file() -> None:
     atexit can fire AFTER the new process wrote its own record."""
     with contextlib.suppress(Exception):
         path = _get_pid_path()
-        file_pid = _pid_from_record(_read_json_file(path))
+        record = _read_json_file(path)
+        file_pid = _pid_from_record(record)
         if file_pid is not None and file_pid != os.getpid():
             return  # Belongs to a different process — leave it alone.
+        # …and numeric equality is not ownership outside a shared PID namespace (#123081).
+        # Under ``PrivatePIDs=`` this gateway IS pid 1, so a record stamped in another
+        # namespace passes the test above and this ordinary exit erases that namespace's
+        # gateway.pid while ``detect_unclean_exit()`` still reads it as live. Same rule the
+        # scoped token locks already apply via ``pid_checkable_from`` — deliberately that
+        # predicate and not ``scoped_lock_owned_by_self``: the question here is whether this
+        # stamp can be verified, not who owns it, so an unreadable record (file absent,
+        # empty or garbage → ``record`` is None) still gets cleaned up and an unstamped
+        # one keeps main's behavior.
+        if isinstance(record, dict) and not pid_checkable_from(record.get("pidns")):
+            logger.debug(
+                "Leaving %s in place: stamped in PID namespace %s, this process is in %s.",
+                path, record.get("pidns") or "unrecorded", describe_pid_namespace())
+            return
         path.unlink(missing_ok=True)
         _clear_running_pid_cache()
 

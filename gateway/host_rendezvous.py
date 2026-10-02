@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from hermes_platform.host.pid_namespace import pid_checkable_from
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,11 @@ class HostRecord:
     #: so a wall-clock resync cannot make a live owner look like a recycled PID. Optional for
     #: records written by older Hermes versions, which still fall back to create_time.
     start_time: Optional[int] = None
+    #: PID namespace that issued ``pid``. Absent in records written before this field, which keep
+    #: the pre-namespace semantics. This is the identity the incarnation probe consults FIRST:
+    #: a PID names a different process outside the namespace that issued it, so no probe of that
+    #: number — alive, dead, or matching — can speak about the owner (#123081).
+    pidns: Optional[str] = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -111,6 +117,7 @@ class HostRecord:
             "pid": self.pid,
             "createTime": self.create_time,
             "startTime": self.start_time,
+            "pidns": self.pidns,
             "host": self.host,
             "port": self.port,
             "protocolVersion": self.protocol_version,
@@ -129,6 +136,7 @@ class HostRecord:
             return None
         create = payload.get("createTime")
         start = payload.get("startTime")
+        pidns = payload.get("pidns")
         port = payload.get("port")
         profiles = payload.get("profiles")
         version = payload.get("protocolVersion")
@@ -141,6 +149,7 @@ class HostRecord:
                 if isinstance(start, int) and not isinstance(start, bool) and start > 0
                 else None
             ),
+            pidns=str(pidns) if isinstance(pidns, str) and pidns else None,
             host=str(payload.get("host") or ""),
             port=int(port) if isinstance(port, int) and 0 < port <= 65535 else None,
             protocol_version=version if isinstance(version, int) else 0,
@@ -239,10 +248,21 @@ def _pid_incarnation_matches(pid: int, create_time: Optional[float]) -> Optional
 def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     """Whether the record still names the same live process incarnation.
 
-    New records prefer the canonical start fingerprint: on Linux/WSL it comes from /proc start
-    ticks and is immune to wall-clock shifts that move psutil.create_time(). Legacy records keep
-    the create-time check until their owner republishes them.
+    The namespace gate comes FIRST, ahead of every local probe (#123081): under
+    ``PrivatePIDs=`` the owner published PID 1, and every probe of that number from here —
+    ``_pid_alive_matches`` seeing the host's init alive, the start-fingerprint comparison, a
+    psutil gap returning ``None`` — describes an unrelated process, not the owner. Answering
+    ``False`` here makes ``record_is_stale`` ignore the record and ``liveness_is_proven`` refuse
+    it, so ``decide()`` can never treat it as an owner to ``--replace``. Probing first and
+    filtering later would leave the verdict a coincidence of what the local PID table happened to
+    hold; ``False`` is the identity answer — "this number is not this owner's PID from here" —
+    and it is also what a dead owner in this namespace already returns.
+
+    An unstamped record (``pidns is None``) keeps main's behavior: it was written by a build that
+    predates the stamp, and refusing it would strand every live owner that has not restarted yet.
     """
+    if record.pidns is not None and not pid_checkable_from(record.pidns):
+        return False
     if record.start_time is None:
         return _pid_incarnation_matches(record.pid, record.create_time)
     alive = _pid_incarnation_matches(record.pid, None)
@@ -480,11 +500,18 @@ def publish_record(
     role = _validated_role(role)
     from gateway.status import get_process_start_time
 
+    from hermes_platform.host.pid_namespace import local_pid_namespace
+
+    # A PID only names this process' identity alongside the namespace that issued it; the
+    # incarnation probe on the read side refuses a foreign stamp rather than resolving PID 1
+    # to the host's init (#123081). Absent on a platform with no namespace concept.
+    pidns = local_pid_namespace()
     record = HostRecord(
         role=role,
         pid=os.getpid(),
         create_time=process_create_time(),
         start_time=get_process_start_time(os.getpid()),
+        pidns=pidns.id if pidns.known else None,
         host=str(host or ""),
         port=int(port) if isinstance(port, int) and port > 0 else None,
         protocol_version=HOST_PROTOCOL_VERSION,

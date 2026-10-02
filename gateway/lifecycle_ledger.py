@@ -325,6 +325,13 @@ def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdow
         sentinel = _read_json(get_lifecycle_sentinel_path(home))
         if sentinel is not None and sentinel.get("pid") != os.getpid():
             return
+        # …and numeric equality is not ownership outside a shared PID namespace (#123081). Two
+        # gateways in different namespaces can both be PID 1, so a clean exit here would rewrite
+        # the other namespace's ``phase=running`` sentinel to ``exited`` and its next boot would
+        # read a clean life for a gateway that is still serving. Same ``pid_checkable_from`` the
+        # read side uses; an unstamped sentinel (pre-stamp build) keeps rewriting as before.
+        if sentinel is not None and not pid_checkable_from(sentinel.get("pidns")):
+            return
         exited: Dict[str, Any] = {"phase": "exited", "pid": os.getpid(), "exit_code": exit_code, "exit_reason": reason,
                                   "exited_at": _now_iso()}
         # Carry the incarnation identity: the Windows start attestation matches a clean exit by
