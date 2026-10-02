@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from hermes_platform.host.pid_namespace import local_pid_namespace, pid_checkable_from
+from hermes_platform.host.pid_namespace import (
+    local_pid_namespace,
+    pid_checkable_from,
+    record_unlinkable_from,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -328,9 +332,12 @@ def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdow
         # …and numeric equality is not ownership outside a shared PID namespace (#123081). Two
         # gateways in different namespaces can both be PID 1, so a clean exit here would rewrite
         # the other namespace's ``phase=running`` sentinel to ``exited`` and its next boot would
-        # read a clean life for a gateway that is still serving. Same ``pid_checkable_from`` the
-        # read side uses; an unstamped sentinel (pre-stamp build) keeps rewriting as before.
-        if sentinel is not None and not pid_checkable_from(sentinel.get("pidns")):
+        # read a clean life for a gateway that is still serving. ``record_unlinkable_from``
+        # rather than ``pid_checkable_from``: this overwrites the sentinel, and an unprovable
+        # namespace must not leave a permanent ``phase=running`` that reads as an unclean death on
+        # every boot — the mirror of refusing to delete an identity file. An unstamped sentinel
+        # (pre-stamp build) is rewritten as before.
+        if sentinel is not None and record_unlinkable_from(sentinel.get("pidns")):
             return
         exited: Dict[str, Any] = {"phase": "exited", "pid": os.getpid(), "exit_code": exit_code, "exit_reason": reason,
                                   "exited_at": _now_iso()}

@@ -118,7 +118,7 @@ def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) 
     keeps exactly main's behavior, and a gateway picks up namespace protection the
     moment it restarts on a build that stamps one.
 
-    A ``pidns`` that is not a bare digit string is treated as unstamped rather than as
+    A ``pidns`` that is not a bare ASCII digit string is treated as unstamped rather than as
     foreign. This record is written by us, so a non-canonical value is a corrupted or
     hand-edited field, and the only reader that can be sure what it meant is the writer.
     Failing closed on it would refuse to clean up a dead owner's files — and since
@@ -128,6 +128,11 @@ def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) 
     that matters (a *real* foreign stamp still refuses) and leaves the corrupt-record
     cleanup that main does. Canonicalization happens on the write side too, so nothing
     this build writes can reach the branch.
+
+    CALLERS THAT DELETE MUST NOT USE THIS PREDICATE ON THE ``known=False`` ROW — see
+    :func:`record_unlinkable_from`. Refusing to signal is right when our identity is
+    unknown; refusing to delete a dead owner's identity files turns one unreadable
+    ``/proc`` into an install that cannot start.
     """
     ours = local_pid_namespace()
     if not ours.supported:
@@ -137,6 +142,32 @@ def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) 
     if not _is_canonical_pid_namespace(recorded_pidns):
         return True
     return recorded_pidns == ours.id
+
+
+def record_unlinkable_from(recorded_pidns: Any) -> bool:
+    """True when this record's namespace stamp proves the identity files must stay.
+
+    The unlink counterpart of :func:`pid_checkable_from`, and deliberately NOT the same
+    predicate, because "I cannot verify this PID" and "I must not delete these files" are
+    different claims with opposite costs. Failing closed is correct before a signal — an
+    unknown authority is not authority, and a signal cannot be taken back. Failing closed
+    before an unlink is a different trade entirely: ``write_pid_file`` is ``O_EXCL``, so
+    declining to remove a dead owner's record makes every later start die on
+    ``FileExistsError``, with no CLI route back. A failed ``/proc`` lookup — an unmounted
+    procfs, a permissions race — must not be able to do that.
+
+    So the unlink refuses only on a claim it can actually read: a canonical namespace id
+    that is not ours. An unstamped record, a non-canonical one, or a moment when this
+    process cannot name its own namespace all keep main's behavior.
+    """
+    ours = local_pid_namespace()
+    if not ours.supported:
+        return False
+    if not ours.known:
+        return False
+    if not _is_canonical_pid_namespace(recorded_pidns):
+        return False
+    return recorded_pidns != ours.id
 
 
 def _is_canonical_pid_namespace(value: Optional[str]) -> bool:

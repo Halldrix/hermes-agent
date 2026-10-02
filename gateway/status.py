@@ -27,6 +27,7 @@ from hermes_platform.host.pid_namespace import (
     describe_pid_namespace,
     local_pid_namespace,
     pid_checkable_from,
+    record_unlinkable_from,
 )
 from gateway.scoped_lock_identity import scoped_lock_owned_by_self, scoped_lock_stale_locally
 from utils import atomic_json_write
@@ -1061,7 +1062,7 @@ def _record_pidns_guards_unlink(record: Optional[dict[str, Any]]) -> bool:
     """
     if not isinstance(record, dict):
         return False
-    if pid_checkable_from(record.get("pidns")):
+    if not record_unlinkable_from(record.get("pidns")):
         return False
     logger.warning(
         "Refusing to unlink gateway identity files: the recorded gateway (pid=%s) was stamped in PID "
