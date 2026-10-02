@@ -72,8 +72,9 @@ export interface SandboxMarker {
   /** App version that entered fallback — a version change triggers a re-probe. */
   version?: string
   /** Consecutive aborted boots observed so far (state === 'booting'). Absent
-   *  means zero — `parseSandboxMarker` drops a non-positive count, so an
-   *  explicit `0` would not survive a round trip through disk. */
+   *  means zero: `parseSandboxMarker` drops a non-positive count, so an explicit
+   *  `0` written by decideWindowsSandboxLaunch does not survive a round trip
+   *  through disk — every read already normalizes with `?? 0`. */
   bootAborts?: number
   /** This boot is a sandbox re-probe after an app update; an abort returns
    *  straight to fallback instead of restarting the two-strike count. */
@@ -270,11 +271,13 @@ export function decideWindowsSandboxLaunch(
 
   if (marker?.state === 'fallback') {
     if (marker.version && appVersion && marker.version !== appVersion) {
-      // App updated since the fallback engaged — re-probe the sandbox once.
+      // App updated since the fallback engaged — re-probe the sandbox once. The
+      // explicit zero restates the fresh budget this launch starts from; it is
+      // dropped on the next disk round trip by parseSandboxMarker either way.
       return {
         enable: false,
         reason: null,
-        nextMarker: { state: 'booting', reprobe: true }
+        nextMarker: { state: 'booting', reprobe: true, bootAborts: 0 }
       }
     }
 
@@ -524,8 +527,9 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
  * here. `writeSandboxMarker` injects its own fs calls.
  *
  * Keyed on sticky (not active) to match the before-quit handler: an engaged
- * fallback keeps its sticky marker, and a non-Windows run never touches the
- * sandbox marker.
+ * fallback keeps its sticky marker. The platform gate belongs to the callers,
+ * exactly as the reveal and startup writes gate theirs — the marker itself is
+ * not platform-specific (both #38216 and #121954 write and read it).
  *
  * A clean `app.exit()` is a deliberate relaunch, so it spends no evidence: the
  * startup `booting` marker is written before any window exists, so this run may
@@ -544,11 +548,10 @@ export function shouldRelaunchForRendererSandboxCrashLoop(options: {
 export function recordDirectCleanExit(
   userDataDir: string,
   options: {
-    isWindows: boolean
     stickyFallback: boolean
   }
 ): void {
-  if (!options.isWindows || options.stickyFallback) {
+  if (options.stickyFallback) {
     return
   }
 

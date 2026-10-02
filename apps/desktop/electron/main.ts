@@ -12711,7 +12711,6 @@ async function exitAfterBackendShutdown(code) {
   // app.exit() emits no before-quit, so record the clean exit here instead.
   try {
     recordDirectCleanExit(app.getPath('userData'), {
-      isWindows: IS_WINDOWS,
       stickyFallback: windowsSandboxFallbackSticky
     })
   } catch (error) {
@@ -19769,7 +19768,6 @@ app.on('before-quit', event => {
     // a second inline copy is how they drift apart.
     try {
       recordDirectCleanExit(app.getPath('userData'), {
-        isWindows: true,
         stickyFallback: windowsSandboxFallbackSticky
       })
     } catch (error) {
