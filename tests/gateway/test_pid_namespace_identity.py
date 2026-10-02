@@ -91,6 +91,42 @@ def test_parse_pid_namespace_link_reads_the_kernel_inode():
     assert _parse_pid_namespace_link("") is None
 
 
+def test_a_successful_retry_is_promoted_into_the_cache(monkeypatch):
+    """Failure → success → later failure must keep returning what we already learned.
+
+    The cached resolver can hold ``_UNRESOLVED`` permanently: the direct retry in
+    ``local_pid_namespace`` returned a real id, but nothing replaced the cached value, so a later
+    transient failure dropped the process back to UNKNOWN for the rest of its life. That
+    contradicts the stated contract ("cached once a definite answer was obtained") and reactivates
+    every unknown-namespace refusal mid-process — including the branches that refuse to signal.
+    """
+    state = {"fail": True}
+
+    def flaky_readlink(path):
+        # Fail until the test flips the switch: deterministic, and independent of how many reads
+        # the resolver happens to make (a promotion re-reads, so a call-count is not stable).
+        if state["fail"]:
+            raise OSError()
+        return f"pid:[{_HOST_NS}]"
+
+    pns._local_pid_namespace_cached.cache_clear()
+    monkeypatch.setattr(pns.os, "readlink", flaky_readlink)
+    pns._local_pid_namespace_cached.cache_clear()  # drop anything a prior case learned
+    try:
+        assert local_pid_namespace().known is False, "reads are failing"
+
+        state["fail"] = False  # /proc recovers
+        assert local_pid_namespace().id == _HOST_NS
+
+        state["fail"] = True  # and fails again later
+        assert local_pid_namespace().id == _HOST_NS, (
+            "a namespace we already learned was forgotten when a later read failed"
+        )
+        assert local_pid_namespace().id == _HOST_NS
+    finally:
+        pns._local_pid_namespace_cached.cache_clear()
+
+
 def test_local_namespace_is_stable_and_known_on_this_linux_host():
     """A definite answer is cached; the namespace cannot change under a live process."""
     first = local_pid_namespace()
