@@ -29,7 +29,7 @@ import functools
 import os
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ def pid_namespace_id(pid: int) -> Optional[str]:
         return None
 
 
-def pid_checkable_from(recorded_pidns: Optional[str], recorded_pid: Optional[int] = None) -> bool:
+def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) -> bool:
     """True when a recorded PID may be probed in THIS process' namespace.
 
     * No namespace on this platform → checkable: there is only one namespace, so
@@ -117,15 +117,37 @@ def pid_checkable_from(recorded_pidns: Optional[str], recorded_pid: Optional[int
     install that had not yet restarted under this build. So an unstamped record
     keeps exactly main's behavior, and a gateway picks up namespace protection the
     moment it restarts on a build that stamps one.
+
+    A ``pidns`` that is not a bare digit string is treated as unstamped rather than as
+    foreign. This record is written by us, so a non-canonical value is a corrupted or
+    hand-edited field, and the only reader that can be sure what it meant is the writer.
+    Failing closed on it would refuse to clean up a dead owner's files — and since
+    ``write_pid_file`` is ``O_EXCL``, that turns one bad byte into an install that cannot
+    start at all, with no CLI route back (``hermes gateway stop`` finds no live PID and
+    doctor does not touch these files). Treating garbage as "no claim" keeps the boundary
+    that matters (a *real* foreign stamp still refuses) and leaves the corrupt-record
+    cleanup that main does. Canonicalization happens on the write side too, so nothing
+    this build writes can reach the branch.
     """
     ours = local_pid_namespace()
     if not ours.supported:
         return True
     if not ours.known:
         return False
-    if recorded_pidns is None:
+    if not _is_canonical_pid_namespace(recorded_pidns):
         return True
     return recorded_pidns == ours.id
+
+
+def _is_canonical_pid_namespace(value: Optional[str]) -> bool:
+    """True when ``value`` is a namespace id this module could have written: bare digits.
+
+    The kernel's ``/proc/<pid>/ns/pid`` symlink reads ``pid:[4026531836]``, so the id is a
+    plain integer string. Anything else — a float, padded whitespace, an int that arrived
+    as a JSON number, an empty string, arbitrary text — was not produced by
+    :func:`local_pid_namespace` and carries no identity we can compare.
+    """
+    return isinstance(value, str) and value.isdigit()
 
 
 def describe_pid_namespace() -> str:
