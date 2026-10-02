@@ -302,8 +302,95 @@ def test_unstamped_legacy_record_still_cleans_up(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Consumer 2b: the shutdown path, which unlinks on numeric PID alone
+# ---------------------------------------------------------------------------
+
+
+def test_exit_path_leaves_a_foreign_namespaces_pid_record_alone(tmp_path, monkeypatch, foreign_namespace):
+    """``remove_pid_file`` must not erase another namespace's record when the PIDs collide.
+
+    Under ``PrivatePIDs=`` this gateway IS pid 1 in its own namespace, so a
+    record stamped elsewhere with ``pid=1`` passes the numeric-equality test that
+    main uses to decide ownership. It runs at atexit (``run.py``'s
+    ``_exit_after_graceful_shutdown``, ``run_shutdown``, ``shutdown_watchdog``,
+    ``hermes gateway stop``), so an ordinary exit would delete the other
+    namespace's ``gateway.pid`` while ``detect_unclean_exit()`` still reads that
+    gateway as live. The flock is untouched here — this is not finding 1's bypass.
+    """
+    from gateway import status
+
+    pid_path = tmp_path / "gateway.pid"
+    _write_pair(tmp_path, monkeypatch, {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": status._get_process_start_time(os.getpid()), "hermes_home": str(tmp_path),
+        "pidns": _OTHER_NS,
+    })
+    status.remove_pid_file()
+    assert pid_path.exists()
+
+
+def test_exit_path_still_removes_our_own_pid_record(tmp_path, monkeypatch):
+    """The control: our own record is still cleaned up, stamped or not."""
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _LIVE)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "gateway.pid").write_text(json.dumps({
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "start_time": status._get_process_start_time(os.getpid()), "hermes_home": str(tmp_path),
+        "pidns": _HOST_NS,
+    }))
+    status.remove_pid_file()
+    assert not (tmp_path / "gateway.pid").exists()
+
+
+# ---------------------------------------------------------------------------
 # Consumer 3: the lifecycle ledger verdict and the scoped bot-token lock
 # ---------------------------------------------------------------------------
+
+
+def test_mark_exited_does_not_clobber_another_namespaces_sentinel(tmp_path, monkeypatch, foreign_namespace):
+    """``mark_exited`` is the mirror of finding 1: it rewrites by numeric PID alone.
+
+    Two gateways in different namespaces can both be PID 1, so a gateway exiting normally
+    would rewrite the other namespace's ``phase=running`` sentinel to ``phase=exited`` — and
+    the next boot's ``record_startup`` would read its own sentinel as a clean life while the
+    other gateway is still alive. Numeric equality is not ownership outside a shared namespace,
+    the same rule ``_pid_is_sentinel_owner`` already applies on the read side.
+    """
+    from gateway import lifecycle_ledger as ll
+    from gateway.lifecycle_ledger import get_lifecycle_sentinel_path
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    path = get_lifecycle_sentinel_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "phase": "running", "pid": os.getpid(), "pidns": _OTHER_NS,
+        "start_time": time.time(), "create_time": 111.0,
+    }), encoding="utf-8")
+
+    ll.mark_exited(0, home=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["phase"] == "running"
+
+
+def test_mark_exited_still_rewrites_our_own_sentinel(tmp_path, monkeypatch):
+    """The control: our own sentinel is still marked exited, namespace and all."""
+    from gateway import lifecycle_ledger as ll
+    from gateway.lifecycle_ledger import get_lifecycle_sentinel_path
+
+    _set_local_namespace(monkeypatch, _LIVE)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    path = get_lifecycle_sentinel_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "phase": "running", "pid": os.getpid(), "pidns": _HOST_NS,
+        "start_time": time.time(), "create_time": 111.0,
+    }), encoding="utf-8")
+
+    ll.mark_exited(0, home=tmp_path)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["phase"] == "exited"
 
 
 def test_lifecycle_ledger_does_not_call_a_foreign_namespace_gateway_unclean(monkeypatch):

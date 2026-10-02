@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from gateway import host_rendezvous as hr
+from hermes_platform.host import pid_namespace as pns
 
 _CHILD = """
 import json, os, sys, time
@@ -107,6 +108,33 @@ def test_stale_record_is_never_attachable(host_dir, pid, create_time):
     assert hr.record_is_stale(record) is True
     assert hr.read_record(hr.ROLE_SERVE) is None
     assert hr.read_record(hr.ROLE_SERVE, include_stale=True) is not None
+
+
+@pytest.mark.platforms("posix")
+def test_foreign_namespace_host_record_is_never_an_owner(host_dir, monkeypatch):
+    """A host record stamped in another PID namespace names an unrelated process here (#123081).
+
+    Under ``PrivatePIDs=`` the owner published PID 1, which from outside resolves to the host's
+    init: alive, not a gateway, and not this process. Liveness here must answer "this PID cannot
+    be probed from where we stand", so the record is ignored as stale and can never reach
+    ``decide()`` as an owner to --replace. Note this is an identity verdict, not a value
+    mismatch: the PID may well be free locally.
+    """
+    record = hr.publish_record(hr.ROLE_GATEWAY, profiles=("default",), home=str(host_dir))
+    assert record is not None
+    assert record.pidns == pns.local_pid_namespace().id
+
+    foreign = dataclasses.replace(record, pidns="4026532999")
+    assert hr.record_is_stale(foreign) is True
+    assert hr.liveness_is_proven(foreign) is False
+
+
+def test_unstamped_host_record_keeps_its_pre_namespace_semantics(host_dir):
+    """The rollout boundary: a record published before the stamp stays exactly as legible as before."""
+    record = hr.publish_record(hr.ROLE_GATEWAY, profiles=("default",), home=str(host_dir))
+    assert record is not None
+    legacy = dataclasses.replace(record, pidns=None)
+    assert hr.record_is_stale(legacy) is False
 
 
 @pytest.mark.platforms("posix")
