@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from hermes_platform.host import pid_namespace as pns
+from gateway import lifecycle_ledger as ll
 from hermes_platform.host.pid_namespace import (
     LocalPidNamespace,
     _parse_pid_namespace_link,
@@ -59,7 +60,7 @@ def _set_local_namespace(monkeypatch, namespace):
     so patching only the defining module would leave them resolving the real
     namespace and the test would pass or fail for the wrong reason.
     """
-    for module in (pns, sli):
+    for module in (pns, sli, ll):
         monkeypatch.setattr(module, "local_pid_namespace", lambda: namespace)
 
 
@@ -155,10 +156,56 @@ def test_pid_checkable_keeps_hostname_only_semantics_where_no_namespace_exists(m
 
 
 def test_pid_checkable_fails_closed_when_our_own_lookup_failed(monkeypatch):
-    """Absence of provenance cannot become provenance because the read failed."""
+    """Absence of provenance cannot become provenance because the read failed.
+
+    This is the SIGNAL-side predicate: refusing to act on a PID we cannot qualify is what
+    keeps an unknown namespace from authorizing a kill. It is deliberately not the same
+    predicate the unlink uses — see ``test_record_unlinkable_...`` below, where the same
+    tri-state row has to keep main's behavior or the install cannot start.
+    """
     _set_local_namespace(monkeypatch, _UNKNOWN)
     assert pid_checkable_from(_HOST_NS) is False
     assert pid_checkable_from(None) is False
+
+
+@pytest.mark.parametrize(
+    "recorded, unlinkable",
+    [
+        (_OTHER_NS, True),      # canonical and foreign — the only refusal
+        (_HOST_NS, False),      # ours
+        (None, False),          # unstamped legacy record
+        ("4026532999.0", False),  # non-canonical: no claim to read
+        ("", False),
+        ("abc", False),
+    ],
+    ids=lambda v: repr(v),
+)
+def test_record_unlinkable_refuses_only_on_a_readable_foreign_stamp(
+    monkeypatch, recorded, unlinkable
+):
+    """The unlink answers a different question than the signal, with opposite costs.
+
+    Refusing to delete a dead owner's identity files is only justified by a claim we can
+    actually read — a canonical namespace id that is not ours. Everything else (unstamped,
+    corrupt, or our own namespace unknown right now) keeps main's behavior, because
+    ``write_pid_file`` is O_EXCL and a refusal here becomes an install that cannot start.
+    """
+    from hermes_platform.host.pid_namespace import record_unlinkable_from
+
+    _set_local_namespace(monkeypatch, _LIVE)
+    assert record_unlinkable_from(recorded) is unlinkable
+
+
+def test_record_unlinkable_never_refuses_when_our_namespace_is_unknown(monkeypatch):
+    """A failed ``/proc`` lookup must not be able to block a cleanup, and therefore a start."""
+    from hermes_platform.host.pid_namespace import record_unlinkable_from
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    assert record_unlinkable_from(_OTHER_NS) is False
+    assert record_unlinkable_from(None) is False
+
+    _set_local_namespace(monkeypatch, _NONE)
+    assert record_unlinkable_from(_OTHER_NS) is False
 
 
 @pytest.mark.parametrize(
@@ -238,6 +285,45 @@ def test_a_corrupt_stamp_still_lets_the_gateway_start(tmp_path, monkeypatch):
     status.get_running_pid()
     assert not (tmp_path / "gateway.pid").exists()
     status.write_pid_file()  # RED without the tolerance: FileExistsError
+
+
+def test_an_unresolvable_local_namespace_still_lets_the_gateway_start(tmp_path, monkeypatch):
+    """A failed ``/proc`` lookup must not be able to wedge the install.
+
+    ``pid_checkable_from`` fails closed when this process cannot name its own namespace,
+    which is right before a signal. Applied to the unlink it was a trap: the owner's files
+    stayed on disk, and since ``write_pid_file`` is O_EXCL every later start died on
+    ``FileExistsError`` — reproduced here, three start attempts, all refused. ``procfs``
+    unmounted or a permissions race is enough to get there, with no namespace involved.
+    Drives the real ``get_running_pid()`` then the real ``write_pid_file()``.
+    """
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    dead = 2 ** 22 + 7
+    _write_pair(tmp_path, monkeypatch, {
+        "pid": dead, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path),  # unstamped — the documented legacy shape
+    })
+
+    status.get_running_pid()
+    assert not (tmp_path / "gateway.pid").exists()
+    status.write_pid_file()  # RED before the split: FileExistsError
+
+
+def test_an_unresolvable_local_namespace_still_refuses_to_signal(tmp_path, monkeypatch):
+    """The control for the split: failing closed stays in force before a signal.
+
+    ``_validated_scoped_lock_gateway_owner`` is a different question from an unlink — a
+    signal cannot be taken back, so an unknown namespace there still refuses.
+    """
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    assert status._validated_scoped_lock_gateway_owner({
+        "pid": 4242, "kind": "hermes-gateway", "start_time": 1,
+        "hermes_home": str(tmp_path), "pidns": _HOST_NS,
+    }) is None
 
 
 def test_a_foreign_stamped_pid_is_never_reported_live(tmp_path, monkeypatch, foreign_namespace):
