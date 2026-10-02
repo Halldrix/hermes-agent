@@ -177,6 +177,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       } else {
         dropSessionState(reclaimedRuntimeId)
       }
+
       // A prompt keyed to the dead runtime must not outlive it. The runtime id
       // rotates on every resume (cold/lazy/eager all mint a fresh sid), so the
       // new runtime's turn-end clears can never remove an entry keyed to THIS
