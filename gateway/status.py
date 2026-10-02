@@ -2228,17 +2228,27 @@ def get_running_pid(
         for record in records:
             pid = _live_pid_from_record(record)
             if pid is None:
-                # An unqualifiable record is not evidence of death while this caller has already
-                # proved the runtime lock HELD. `_live_pid_from_record` returns None whenever the
-                # namespace gate refuses — including for an unresolved one, which is the CURRENT
-                # build's own stamp when it could not read /proc — and treating that as "no live
-                # gateway here" sent the cleanup down with unlink_lock=True and deleted the
-                # pathname of a lock that is provably held. The holder keeps its flock on the
-                # unlinked inode, the next starter creates a fresh file and wins: the singleton
-                # bypass this whole change exists to close (#123081, #123109). The lock fact is
-                # the authority here, not a PID we could not name.
-                if record is not None and not record_unlinkable_from(record.get("pidns")):
-                    saw_live_pid = True
+                # Distinguish PROVEN DEAD from merely UNQUALIFIED. `_live_pid_from_record`
+                # returns None in both cases, but only the second means "maybe alive": it is what
+                # the namespace gate returns for a record we cannot qualify — including this
+                # build's own unresolved stamp. Reading that as "no live gateway" sent the
+                # cleanup down with unlink_lock=True and deleted the pathname of a lock this
+                # caller had just proven HELD; the holder keeps its flock on the unlinked inode,
+                # the next starter creates a fresh file and wins, and the singleton bypass this
+                # whole change exists to close is back (#123081, #123109).
+                #
+                # So: a qualified record whose PID is provably gone is still stale and takes the
+                # cleanup (#106406's scoped path relies on this). A record whose namespace refuses
+                # qualification, or whose PID still exists, counts as possibly-live while the
+                # lock is held — the lock fact is the authority here, not a PID we could not name.
+                if record is None:
+                    continue
+                recorded_pid = _pid_from_record(record)
+                if record_unlinkable_from(record.get("pidns")):
+                    continue
+                if recorded_pid is None or not _pid_exists(recorded_pid):
+                    continue  # provably dead, and not another namespace's claim
+                saw_live_pid = True
                 continue
             home_ok = (
                 _pid_record_belongs_to_current_profile(record) if expected_home is None
