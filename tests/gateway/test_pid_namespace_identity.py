@@ -180,6 +180,21 @@ def test_pid_checkable_reads_a_non_canonical_stamp_as_unstamped(monkeypatch, cor
     assert pid_checkable_from(corrupt) is True
 
 
+@pytest.mark.parametrize("unicode_digits", ["²", "٣", "٤٠٢٦", "１２", "⁵"])
+def test_pid_checkable_ignores_non_ascii_digit_forms(monkeypatch, unicode_digits):
+    """``str.isdigit()`` accepts non-ASCII digit forms, which would read as FOREIGN.
+
+    The canonical form is what ``/proc/<pid>/ns/pid`` yields — an ASCII integer string. A
+    record holding any other digit spelling was not written by :func:`local_pid_namespace`,
+    so it must take the unstamped path rather than be classified as a real identity and
+    reintroduce the wedge. Hand-editing a record is the only route here, but the predicate
+    documents that it only ever accepts what it writes, and that has to be true.
+    """
+    _set_local_namespace(monkeypatch, _LIVE)
+    assert unicode_digits.isdigit() is True, "still a digit per str.isdigit — that is the trap"
+    assert pid_checkable_from(unicode_digits) is True
+
+
 def test_pid_checkable_still_refuses_a_real_foreign_stamp(monkeypatch):
     """The control for the corrupt-stamp tolerance: a canonical foreign id is still refused."""
     _set_local_namespace(monkeypatch, _LIVE)
@@ -223,6 +238,45 @@ def test_a_corrupt_stamp_still_lets_the_gateway_start(tmp_path, monkeypatch):
     status.get_running_pid()
     assert not (tmp_path / "gateway.pid").exists()
     status.write_pid_file()  # RED without the tolerance: FileExistsError
+
+
+def test_a_foreign_stamped_pid_is_never_reported_live(tmp_path, monkeypatch, foreign_namespace):
+    """The identity predicate itself, not just the unlink paths.
+
+    ``_live_pid_from_record`` is what ``get_running_pid`` (lock-held branch),
+    ``get_running_pid_identity_strict``, ``get_runtime_status_running_pid`` and
+    ``runtime_status_pid_is_live`` all return, and the first three feed callers that SIGNAL
+    what they get. Under ``PrivatePIDs=`` the recorded 1 resolves to the host's init, which
+    is very much alive — so with no ``start_time`` in the record and an unreadable cmdline,
+    the old order answered "live, PID 1" and ``find_gateway_pids`` fed that to SIGTERM.
+    """
+    from gateway import status
+
+    record = {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path), "pidns": _OTHER_NS,
+    }
+    # No start_time and an unreadable cmdline: nothing but the namespace can answer.
+    monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+    monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+    assert status._live_pid_from_record(record) is None
+    assert status.runtime_status_pid_is_live(record) is False
+
+
+def test_our_own_stamped_pid_is_still_reported_live(tmp_path, monkeypatch):
+    """The control: a same-namespace record without a start_time is unchanged."""
+    from gateway import status
+
+    _set_local_namespace(monkeypatch, _LIVE)
+    record = {
+        "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path), "pidns": _HOST_NS,
+    }
+    monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+    monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
+
+    assert status._live_pid_from_record(record) == os.getpid()
 
 
 def test_pid_record_stamps_the_pid_namespace(tmp_path, monkeypatch):
