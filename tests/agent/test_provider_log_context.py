@@ -52,10 +52,13 @@ def _make_custom_gateway_agent(provider="custom",
                                base_url="https://api.kilo.ai/api/gateway/v1/",
                                model="stealth/ox-alpha"):
     """Build a bare agent whose identity looks like an ambiguous custom gateway."""
+    # Production resolves these off ``model_tools`` at call time (agent/agent_init.py
+    # does ``import model_tools`` then ``model_tools.get_tool_definitions(...)``), so
+    # model_tools is the seam to patch — ``run_agent`` no longer re-exports them.
     with (
-        patch("run_agent.get_tool_definitions", return_value=_tool_defs("todo")),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=_tool_defs("todo")),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("run_agent.AIAgent._create_request_openai_client"),
     ):
         agent = AIAgent(
             api_key="test-key",
@@ -135,7 +138,7 @@ def test_successful_api_call_log_carries_provider_base_url_and_model(caplog):
 
     with (
         caplog.at_level(logging.INFO, logger="agent.conversation_loop"),
-        patch("run_agent.handle_function_call", return_value="ok"),
+        patch("model_tools.handle_function_call", return_value="ok"),
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
@@ -176,7 +179,8 @@ def test_empty_response_retry_lines_identify_the_full_route(caplog):
 
     with (
         caplog.at_level(logging.WARNING, logger="agent.conversation_loop"),
-        patch("agent.conversation_loop.jittered_backoff", return_value=0.0),
+        # jittered_backoff is already 0.0 via the _fast_retry_backoff autouse
+        # fixture in tests/agent/conftest.py — patching it again here is a no-op.
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
@@ -235,18 +239,28 @@ def test_dropped_or_missing_content_lines_never_lose_routing_context(
 
     with (
         caplog.at_level(logging.WARNING, logger="agent.conversation_loop"),
-        patch("run_agent.handle_function_call", return_value="ok"),
+        patch("model_tools.handle_function_call", return_value="ok"),
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
     ):
         agent.run_conversation("do the task")
 
-    warnings_with_route = [
+    dropped = [
         r for r in caplog.records
-        if _FRAGMENT_RE.search(r.getMessage())
+        if "Empty response (no content or reasoning)" in r.getMessage()
+        or "dropped" in r.getMessage().lower()
     ]
-    assert warnings_with_route, (
-        "expected at least one warning carrying the routing fragment; got: "
+    assert dropped, (
+        "expected a dropped/empty-content warning line; got: "
         f"{[r.getMessage() for r in caplog.records]}"
     )
+    # Every one of them, not "at least one": a filter-then-assert would let a
+    # fragment-free line slip through as long as a sibling carried the fragment.
+    for record in dropped:
+        match = _FRAGMENT_RE.search(record.getMessage())
+        assert match, (
+            f"log line lacks the provider/base_url/model fragment: "
+            f"{record.getMessage()}"
+        )
+        provider, base_url, model = match.groups()
