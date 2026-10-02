@@ -398,7 +398,7 @@ test('recordDirectCleanExit writes `ok` over a `running` leftover so the next la
   writeSandboxMarker(dir, markerAfterSuccessfulBoot({ fallbackActive: false, appVersion: '0.21.3', steady: true }))
   assert.deepEqual(readSandboxMarker(dir)?.state, 'running', 'precondition: reveal left a running marker')
 
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+  recordDirectCleanExit(dir, { stickyFallback: false })
 
   assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
 
@@ -434,17 +434,16 @@ test('a clean relaunch between arming the re-probe and the real probe keeps the 
   })
 
   assert.equal(launchN.enable, false, 'the re-probe launches sandboxed')
-  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true })
+  assert.deepEqual(launchN.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
   writeSandboxMarker(dir, launchN.nextMarker)
 
   // A clean relaunch before this run ever revealed a window.
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+  recordDirectCleanExit(dir, { stickyFallback: false })
 
   const afterExit = readSandboxMarker(dir)
   assert.equal(afterExit?.state, 'booting', 'the pending re-probe outlives the clean exit')
   assert.equal(afterExit?.reprobe, true, 'the one allowed sandbox retry is still armed')
   assert.equal(afterExit?.bootAborts, undefined, 'a clean exit records no boot-abort strike')
-
 
   // The relaunched process still runs with --no-sandbox (every in-app relaunch
   // does), so it is NOT the process that gets to use the retry — and it must not
@@ -548,7 +547,7 @@ test('a clean quit after a --no-sandbox reveal still owes the re-probe to the ne
   assert.deepEqual(readSandboxMarker(dir), { state: 'running', version: '0.21.3', reprobe: true })
 
   // A clean quit: this is what the before-quit handler runs.
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+  recordDirectCleanExit(dir, { stickyFallback: false })
 
   const afterQuit = readSandboxMarker(dir)
   assert.equal(afterQuit?.reprobe, true, 'quitting normally must not discard the owed re-probe')
@@ -609,7 +608,7 @@ test('a manual --no-sandbox run on a healthy host must not fabricate a post-upda
   assert.deepEqual(revealed, { state: 'running', version: '0.21.3' })
 
   // Clean quit, then the next ordinary launch: sandboxed, no sticky fallback.
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+  recordDirectCleanExit(dir, { stickyFallback: false })
 
   const next = decideWindowsSandboxLaunch({
     platform: 'win32',
@@ -639,7 +638,7 @@ test('a successful post-update re-probe consumes the retry', () => {
 
   // This launch IS the sandboxed re-probe.
   assert.equal(probeLaunch.enable, false, 'the re-probe runs sandboxed')
-  assert.deepEqual(probeLaunch.nextMarker, { state: 'booting', reprobe: true })
+  assert.deepEqual(probeLaunch.nextMarker, { state: 'booting', reprobe: true, bootAborts: 0 })
   writeSandboxMarker(dir, probeLaunch.nextMarker)
 
   // The predicate main.ts actually calls, not a re-implementation of it: this
@@ -680,7 +679,7 @@ test('a clean relaunch with no pending re-probe leaves nothing for the next laun
   assert.deepEqual(startup.nextMarker, { state: 'booting' })
   writeSandboxMarker(dir, startup.nextMarker)
 
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
+  recordDirectCleanExit(dir, { stickyFallback: false })
 
   assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
 
@@ -696,25 +695,76 @@ test('a clean relaunch with no pending re-probe leaves nothing for the next laun
   assert.equal(next.reason, null)
 })
 
-test('recordDirectCleanExit leaves the marker untouched when it must not write', () => {
+test('recordDirectCleanExit leaves the marker untouched only under a sticky fallback', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-gated-'))
   writeSandboxMarker(dir, { state: 'running', version: '0.21.3' })
 
   // An engaged fallback keeps its sticky marker.
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: true })
+  recordDirectCleanExit(dir, { stickyFallback: true })
   assert.equal(readSandboxMarker(dir)?.state, 'running')
 
-  // A non-Windows run never touches the sandbox marker.
-  recordDirectCleanExit(dir, { isWindows: false, stickyFallback: false })
-  assert.equal(readSandboxMarker(dir)?.state, 'running')
+  // A Linux run DOES write: the marker ladder is shared with #121954, and a
+  // mid-session kill there would otherwise leave a `booting` leftover that
+  // counts toward the boot-loop budget. Only the sticky fallback blocks.
+  recordDirectCleanExit(dir, { stickyFallback: false })
+  assert.equal(readSandboxMarker(dir)?.state, 'ok')
 })
 
+
+test('recordDirectCleanExit takes no platform flag: a caller-supplied one cannot re-gate the write', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-sandbox-noflag-'))
+  writeSandboxMarker(dir, { state: 'running', version: '0.21.3' })
+
+  // The signature carries only `stickyFallback`. If a Windows-only gate ever
+  // creeps back in, the Linux path goes silent again — a mid-session kill then
+  // leaves a `booting` leftover that counts toward the boot-loop budget.
+  // Passing a stray `isWindows: false` must therefore be inert, not a mute.
+  recordDirectCleanExit(dir, { stickyFallback: false, isWindows: false } as never)
+
+  assert.equal(readSandboxMarker(dir)?.state, 'ok', 'the clean exit must still be recorded')
+})
 test('buildNoSandboxRelaunchArgs appends a single --no-sandbox flag', () => {
   assert.deepEqual(buildNoSandboxRelaunchArgs(['--foo', '--no-sandbox', 'hermes://x']), [
     '--foo',
     'hermes://x',
     '--no-sandbox'
   ])
+})
+
+test('recordDirectCleanExit does not spend the boot-abort budget on a clean pre-window relaunch', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-prewindow-'))
+
+  // Startup already persisted this, before any window exists.
+  const startup = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: null,
+    appVersion: '0.21.3'
+  })
+
+  assert.deepEqual(startup.nextMarker, { state: 'booting' })
+  writeSandboxMarker(dir, startup.nextMarker)
+
+  // Clean intentional relaunch: the process never revealed a window, no
+  // sandbox boot failed, and the fallback is not engaged.
+  recordDirectCleanExit(dir, { stickyFallback: false })
+
+  // `booting` is the prior-run-aborted state, so a clean exit must clear it
+  // rather than leave a run that never aborted looking like an aborted boot.
+  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
+
+  // And the next launch must not engage the fallback.
+  const next = decideWindowsSandboxLaunch({
+    platform: 'win32',
+    argv: [],
+    env: {},
+    marker: readSandboxMarker(dir),
+    appVersion: '0.21.3'
+  })
+
+  assert.equal(next.enable, false, 'a clean relaunch must not trigger --no-sandbox')
+  assert.equal(next.reason, null)
 })
 
 test('linux boot-abort ladder engages --no-sandbox on the second consecutive abort (#121954)', () => {
@@ -739,21 +789,6 @@ test('linux boot-abort ladder engages --no-sandbox on the second consecutive abo
     argv,
     env,
     appVersion
-  // Clean intentional relaunch: the process never revealed a window, no
-  // sandbox boot failed, and the fallback is not engaged.
-  recordDirectCleanExit(dir, { isWindows: true, stickyFallback: false })
-
-  // `booting` is the prior-run-aborted state, so a clean exit must clear it
-  // rather than leave a run that never aborted looking like an aborted boot.
-  assert.deepEqual(readSandboxMarker(dir), { state: 'ok' })
-
-  // And the next launch must not engage the fallback.
-  const next = decideWindowsSandboxLaunch({
-    platform: 'win32',
-    argv: [],
-    env: {},
-    marker: readSandboxMarker(dir),
-    appVersion: '0.21.3'
   })
 
   assert.equal(second.enable, true)
@@ -836,5 +871,4 @@ test('linux GPU SIGTERM signature triggers the one-shot relaunch; other exits do
     }),
     false
   )
-
 })
