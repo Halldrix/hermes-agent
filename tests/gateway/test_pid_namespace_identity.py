@@ -74,7 +74,7 @@ def _set_local_namespace(monkeypatch, namespace):
             continue
         if hasattr(module, "local_pid_namespace"):
             monkeypatch.setattr(module, "local_pid_namespace", lambda: namespace)
-    pns._local_pid_namespace_cached.cache_clear()
+    pns._clear_local_namespace_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +109,9 @@ def test_a_successful_retry_is_promoted_into_the_cache(monkeypatch):
             raise OSError()
         return f"pid:[{_HOST_NS}]"
 
-    pns._local_pid_namespace_cached.cache_clear()
+    pns._clear_local_namespace_cache()
     monkeypatch.setattr(pns.os, "readlink", flaky_readlink)
-    pns._local_pid_namespace_cached.cache_clear()  # drop anything a prior case learned
+    pns._clear_local_namespace_cache()  # drop anything a prior case learned
     try:
         assert local_pid_namespace().known is False, "reads are failing"
 
@@ -124,7 +124,40 @@ def test_a_successful_retry_is_promoted_into_the_cache(monkeypatch):
         )
         assert local_pid_namespace().id == _HOST_NS
     finally:
-        pns._local_pid_namespace_cached.cache_clear()
+        pns._clear_local_namespace_cache()
+
+
+def test_a_learned_namespace_survives_a_failure_during_its_own_promotion(monkeypatch):
+    """The retry's answer must be retained AS OBTAINED, not re-probed to be promoted (#123081).
+
+    The old promotion cleared the memo and called the resolver again, so retaining the id
+    depended on a SECOND read succeeding. Make that read fail and the "promotion" stored
+    ``_UNRESOLVED`` — and returned it, so the very call that had just learned the namespace
+    handed "unknown" back to its own caller. The observation already happened; keeping it
+    must not require observing it again.
+    """
+    reads = {"n": 0}
+
+    def fail_after_the_retry(path):
+        # The first read (the cached attempt) fails, the second (the direct retry) succeeds,
+        # and every read after that fails -- i.e. the promotion's own probe is the transient.
+        reads["n"] += 1
+        if reads["n"] == 2:
+            return f"pid:[{_HOST_NS}]"
+        raise OSError()
+
+    pns._clear_local_namespace_cache()
+    monkeypatch.setattr(pns.os, "readlink", fail_after_the_retry)
+    try:
+        learned = local_pid_namespace()
+        assert learned.id == _HOST_NS, (
+            "the retry learned a real id but its own promotion discarded it"
+        )
+        assert local_pid_namespace().id == _HOST_NS, (
+            "a namespace already learned was lost on the next call"
+        )
+    finally:
+        pns._clear_local_namespace_cache()
 
 
 def test_local_namespace_is_stable_and_known_on_this_linux_host():
@@ -156,7 +189,7 @@ def test_failed_lookup_is_not_cached_so_a_transient_proc_problem_recovers(monkey
         reads["n"] += 1
         raise PermissionError("transient")
 
-    pns._local_pid_namespace_cached.cache_clear()
+    pns._clear_local_namespace_cache()
     monkeypatch.setattr(pns.os, "readlink", failing_readlink)
     try:
         assert local_pid_namespace().known is False
@@ -164,7 +197,7 @@ def test_failed_lookup_is_not_cached_so_a_transient_proc_problem_recovers(monkey
         assert local_pid_namespace().known is False
         assert reads["n"] > after_first, "the failure was cached instead of retried"
     finally:
-        pns._local_pid_namespace_cached.cache_clear()
+        pns._clear_local_namespace_cache()
 
 
 def test_a_definite_answer_is_cached(monkeypatch):
@@ -175,7 +208,7 @@ def test_a_definite_answer_is_cached(monkeypatch):
         reads["n"] += 1
         return f"pid:[{_HOST_NS}]"
 
-    pns._local_pid_namespace_cached.cache_clear()
+    pns._clear_local_namespace_cache()
     monkeypatch.setattr(pns.os, "readlink", counting_readlink)
     try:
         first = local_pid_namespace()
@@ -183,7 +216,7 @@ def test_a_definite_answer_is_cached(monkeypatch):
         local_pid_namespace()
         assert reads["n"] == 1
     finally:
-        pns._local_pid_namespace_cached.cache_clear()
+        pns._clear_local_namespace_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +520,48 @@ def test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable(
         # The pathname surviving IS the guard: `flock` is per-inode, so the next starter's
         # open-for-write on this same path is what the held lock blocks. A separate file would
         # be a separate inode and could never be blocked — that asymmetry is the whole bypass.
+    finally:
+        holder.close()
+
+
+def test_a_held_lock_survives_a_dead_local_pid_we_cannot_qualify(tmp_path, monkeypatch):
+    """Held-lock protection must not depend on the local PID table (#123081, #123109).
+
+    ``test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable`` pins the
+    branch where the recorded PID happens to be locally live, so it can be satisfied by the
+    local process table alone. This one removes that coincidence: the recorded PID does not
+    exist here, and the record carries another namespace's stamp. A local absence says
+    nothing about an owner whose number was issued elsewhere — so it is not evidence that
+    our owner died, and the held lock's pathname must survive regardless.
+    """
+    import fcntl
+
+    from gateway import status
+
+    # The reader cannot name its own namespace, so `record_unlinkable_from` also answers False:
+    # this is the only shape where the qualification guard below is the sole thing standing
+    # between an unprovable owner and an unlinked lock. The neighbouring
+    # foreign-stamp case is already covered by the unlink policy, so it cannot witness this.
+    _set_local_namespace(monkeypatch, _UNKNOWN)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    absent_pid = 4194303  # far above any live pid_max here; the point is that it is gone
+    assert not status._pid_exists(absent_pid), "the control PID must not exist locally"
+    lock = tmp_path / "gateway.lock"
+    record = {
+        "pid": absent_pid, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
+        "hermes_home": str(tmp_path), "pidns": pns.PIDNS_UNRESOLVED,
+    }
+    (tmp_path / "gateway.pid").write_text(json.dumps(record))
+    lock.write_text(json.dumps(record))
+
+    holder = open(lock, "a+", encoding="utf-8")
+    try:
+        assert status._try_acquire_file_lock(holder), "test must start from a HELD lock"
+        status.get_running_pid()
+        assert lock.exists(), (
+            "a held lock was unlinked because the owner's PID was absent from THIS host's "
+            "table -- while its identity is unprovable that absence is not death evidence"
+        )
     finally:
         holder.close()
 

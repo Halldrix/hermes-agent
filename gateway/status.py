@@ -2237,11 +2237,16 @@ def get_running_pid(
                 # the next starter creates a fresh file and wins, and the singleton bypass this
                 # whole change exists to close is back (#123081, #123109).
                 #
-                # So: a qualified record whose PID is provably gone is still stale and takes the
-                # cleanup (#106406's scoped path relies on this). A record whose namespace refuses
-                # qualification, or whose PID still exists, counts as possibly-live while the
-                # lock is held — the lock fact is the authority here, not a PID we could not name.
+                # So the lock fact is the authority and identity is qualified FIRST. A record whose
+                # stamp we cannot compare is NOT evidence of death, whatever the local PID table
+                # says: that number was issued in the writer's namespace and may name an unrelated
+                # live process here, which is not our dead owner. Only a QUALIFIED record whose
+                # PID is provably gone is stale, and a qualified-dead record still takes the
+                # cleanup that #106406's scoped path depends on.
                 if record is None:
+                    continue
+                if not pid_checkable_from(record.get("pidns")):
+                    saw_live_pid = True  # unknown owner identity cannot negate a held lock
                     continue
                 recorded_pid = _pid_from_record(record)
                 if record_unlinkable_from(record.get("pidns")):
