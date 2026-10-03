@@ -130,6 +130,37 @@ class TestDashboardAuthRefreshCheck:
         assert finding.issues == []
         assert "✓" in capsys.readouterr().out
 
+
+    def test_line_cap_bounds_the_tail_independently_of_the_byte_cap(self, tmp_path, monkeypatch):
+        """The LINE cap is a second, independent bound. Dropping it (``splitlines()`` without
+        ``[-N:]``) leaves this test green — so it does not currently guard it. The failures must
+        be the OLDEST lines and the file must still fit the 512 KB byte window, so only the line
+        cap can exclude them."""
+        import json as _json
+
+        log = tmp_path / "logs" / "dashboard-auth.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        storm = "".join(_line("refresh_failure") for _ in range(25))
+        filler = _json.dumps({"event": "old_filler"}) + "\n"
+        # Failures first (oldest), then enough short filler lines to pass the 5000-line cap
+        # while the whole file stays well inside the 512 KB byte window.
+        log.write_text(storm + filler * 5100, encoding="utf-8")
+        monkeypatch.setattr(audit_mod, "resolve_log_path", lambda: log)
+        finding = doctor_mod._check_dashboard_auth_refresh(False)
+        assert finding.manual_issues == [], (
+            "line cap did not bound the tail: a storm older than the cap was still counted"
+        )
+
+    def test_storm_threshold_boundary_is_exactly_at_the_limit(self, tmp_path, monkeypatch, capsys):
+        """``total >= 20`` — pin the boundary itself, since a strict ``>`` would also pass
+        every other case in this file (the suite only uses 3 and 25 failures)."""
+        log = tmp_path / "logs" / "dashboard-auth.log"
+        _write_log(log, [_line("refresh_failure") for _ in range(doctor_mod._REFRESH_STORM_ISSUE_COUNT)])
+        monkeypatch.setattr(audit_mod, "resolve_log_path", lambda: log)
+        finding = doctor_mod._check_dashboard_auth_refresh(False)
+        assert "✗" in capsys.readouterr().out, "exactly-at-the-limit must FAIL, not warn"
+        assert len(finding.manual_issues) == 1
+
     def test_missing_log_is_info_not_failure(
         self, tmp_path, monkeypatch, capsys
     ):
