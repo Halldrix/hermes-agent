@@ -160,29 +160,44 @@ def test_a_learned_namespace_survives_a_failure_during_its_own_promotion(monkeyp
 
 
 def _memo_read_and_probe_are_one_critical_section(monkeypatch):
-    """Hold the reader inside its probe while a peer thread retains the namespace.
+    """Force a peer to retain the namespace while this call is deciding what to return.
 
-    Returns ``(peer_retained, reader_value, foreign_still_refused)``. Thread events fix the
-    ordering rather than a sleep, so the case does not depend on timing luck: the fake readlink
-    blocks until the peer's retain has completed, then fails, so the reader decides with the memo
-    already holding a value the reader never read.
+    Returns ``(peer_retained, reader_value, foreign_still_refused)``.
+
+    The synchronization point is the RETRY probe -- ``local_pid_namespace``'s second
+    ``_resolve_local_pid_namespace()`` call -- because that one runs OUTSIDE the memo lock. The
+    first probe is inside ``_local_pid_namespace_cached``'s critical section, so a peer
+    publishing from there would deadlock against it and the race would resolve on a timeout
+    instead of on the ordering we are trying to pin. Failing the retry therefore puts the peer
+    and this call on either side of the narrow window the fix exists to close, and the events
+    make that ordering deterministic rather than timed.
     """
     pns._clear_local_namespace_cache()
-    reader_inside_probe = threading.Event()
+    retry_in_flight = threading.Event()
     peer_retained = threading.Event()
-    peer_finished = threading.Event()
+    calls = {"n": 0}
 
     def readlink(path):
-        reader_inside_probe.set()
-        # Stay inside the probe until the peer's retain lands, then FAIL: this caller starts from
-        # an empty memo and cannot recover on its own, which is the finding's state.
-        peer_retained.wait(timeout=5)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # First probe: the memo is empty and this call cannot proceed to the retry without
+            # failing. This one runs under the memo lock, so do NOT block here.
+            raise OSError()
+        # Retry probe: outside the lock, so the peer can publish while this call is in it.
+        retry_in_flight.set()
+        # This assert IS the anti-timeout pin: it fails the case if the peer's retain was not
+        # actually observed here, so a synchronization that only "passes" because a timeout
+        # elapsed cannot go green.
+        assert peer_retained.wait(timeout=10), (
+            "the peer's retain was not observed by this retry probe -- the case would be resolving "
+            "on the timeout rather than on the intended ordering"
+        )
         raise OSError()
 
     monkeypatch.setattr(pns.os, "readlink", readlink)
 
     def peer():
-        assert reader_inside_probe.wait(timeout=5)
+        assert retry_in_flight.wait(timeout=10), "reader never reached its retry probe"
         pns._set_local_namespace(_LIVE)
         peer_retained.set()
 
@@ -195,7 +210,6 @@ def _memo_read_and_probe_are_one_critical_section(monkeypatch):
         # standalone predicate test passes with this fix reverted and proves nothing about it.
         foreign_refused = pns.record_unlinkable_from(_OTHER_NS)
     finally:
-        peer_finished.set()
         thread.join(timeout=10)
         pns._clear_local_namespace_cache()
     return peer_retained.is_set(), reader_value, foreign_refused
@@ -215,6 +229,7 @@ def test_a_concurrent_retain_cannot_slip_past_the_memo_decision(monkeypatch):
     )
 
     assert retained is True, "the peer never managed to retain, so this case is not exercising the race"
+
     assert reader_value == _LIVE, (
         f"the raced call returned {reader_value} instead of the namespace the peer had retained"
     )
