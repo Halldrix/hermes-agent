@@ -20,7 +20,10 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
+from hermes_cli.doctor_report import (
+    Finding, _section, check_bool, check_fail, check_info, check_ok, check_warn,
+    doctor_check, warn_on_error,
+)
 from hermes_cli.doctor_connectivity import _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes
 from hermes_cli.doctor_tools import _safe_which
 
@@ -171,9 +174,6 @@ def _check_dashboard_auth_refresh(should_fix: bool, f: Finding) -> None:
         elif total > 0:
             check_warn("Dashboard refresh",
                        f"({total} failures in the last hour: {top})")
-
-
-@doctor_check()
 
 
 @doctor_check()
