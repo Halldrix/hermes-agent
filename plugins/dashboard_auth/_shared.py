@@ -120,7 +120,15 @@ def pkce_login_start(authorize_url: str, *, client_id: str, scope: str, redirect
 # OAuth token-rejection codes: the IDP's verdict on the credential itself. A 401/403
 # carrying anything else (WAF page, proxy envelope) stays transient — never force a
 # re-login on an ambiguous signal.
-_PERMANENT_TOKEN_ERRORS = frozenset({"invalid_grant", "invalid_token", "expired_token"})
+#
+# Reuses the repo's canonical dead-grant set rather than restating it: this PR's own list
+# had drifted, omitting ``refresh_token_reused`` — which is exactly what Portal returns once a
+# rotated RT is replayed, so a reused grant would still have been answered 503 "try later"
+# and invited the retry storm this classifies away (#98338). ``expired_token`` (RFC 8628
+# device flow) is added on top.
+from hermes_cli.auth import _OAUTH_GRANT_DEAD_CODES
+
+_PERMANENT_TOKEN_ERRORS = _OAUTH_GRANT_DEAD_CODES | {"expired_token"}
 
 
 def parse_json_body(response: httpx.Response) -> Dict[str, Any]:

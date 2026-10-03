@@ -196,3 +196,113 @@ class TestNativeRefreshThrottle:
         # The limiter still works after pruning.
         limited, _ = _native_refresh_rate_limited("fresh-token-after-prune")
         assert limited is False
+
+
+class TestPermanentTokenErrorCodes:
+    """`refresh_token_reused` is what Portal returns once a rotated RT is replayed. The
+    first version of this PR listed invalid_grant/invalid_token/expired_token and omitted
+    it, so a reused grant was still answered 503 "try later" — the retry-storm response.
+    The set now reuses the repo's canonical dead-grant frozenset, so the two cannot drift."""
+
+    @pytest.mark.parametrize("code", [
+        "invalid_grant", "invalid_token", "expired_token", "refresh_token_reused",
+    ])
+    def test_dead_grant_codes_are_credential_verdicts(self, code):
+        with pytest.raises(RefreshExpiredError):
+            _exchange(401, {"error": code})
+        with pytest.raises(RefreshExpiredError):
+            _exchange(403, {"error": code})
+
+    @pytest.mark.parametrize("code", ["forbidden", "unauthorized", "server_error",
+                                      "temporarily_unavailable", "invalid_client"])
+    def test_other_codes_stay_transient(self, code):
+        """A WAF page or a proxy envelope must never force a re-login."""
+        with pytest.raises(ProviderError):
+            _exchange(403, {"error": code})
+
+    def test_non_string_error_payload_stays_transient(self):
+        """A JSON body with a non-string `error` must not crash or force a re-login."""
+        with pytest.raises(ProviderError):
+            _exchange(401, {"error": 42})
+
+    def test_set_is_derived_from_the_canonical_one(self):
+        from hermes_cli.auth import _OAUTH_GRANT_DEAD_CODES as canonical
+        from plugins.dashboard_auth import _shared
+
+        actual = _shared._PERMANENT_TOKEN_ERRORS
+        assert canonical <= actual, (
+            "the dead-grant set drifted from hermes_cli.auth._OAUTH_GRANT_DEAD_CODES: %r"
+            % sorted(canonical - actual)
+        )
+        assert "expired_token" in actual
+
+
+class TestBudgetExpires:
+    """A throttled credential must recover once its window passes. Nothing pinned that:
+    dropping the `while bucket and bucket[0] < cutoff` expiry entirely left all 8 tests green,
+    which would mean a single burst locks a legitimate client out permanently."""
+
+    def test_budget_recovers_after_the_window(self, monkeypatch):
+        from hermes_cli.dashboard_auth import routes as routes_mod
+
+        routes_mod._reset_native_refresh_rate_limit()
+        token = "expiring-budget-token"
+        for _ in range(routes_mod._REFRESH_RATE_MAX_ATTEMPTS):
+            limited, _ = routes_mod._native_refresh_rate_limited(token)
+            assert not limited
+        limited, _ = routes_mod._native_refresh_rate_limited(token)
+        assert limited, "the budget should be exhausted"
+
+        # Advance past the window without sleeping: rewind the recorded attempts.
+        real_monotonic = routes_mod.time.monotonic
+        monkeypatch.setattr(routes_mod.time, "monotonic",
+                            lambda: real_monotonic() + routes_mod._REFRESH_RATE_WINDOW_SEC + 1)
+        limited, retry = routes_mod._native_refresh_rate_limited(token)
+        assert not limited, (
+            "a throttled credential stays blocked forever once its window has passed "
+            "(retry_after=%r)" % retry
+        )
+        routes_mod._reset_native_refresh_rate_limit()
+
+
+class TestBucketKeyIsNeverTheCredential:
+    """The comment claims "the raw token never leaves this module as a dict key — only its
+    hash". Nothing enforced that: keying the table by the raw token would park plaintext
+    refresh tokens in a process-local dict and every test stayed green. Keying by IP instead
+    would throttle a whole NAT household (#98338 request 6), so the hash is load-bearing on
+    both sides."""
+
+    def test_every_bucket_key_is_a_hex_digest_not_the_token(self):
+        from hermes_cli.dashboard_auth.routes import _refresh_attempts, _refresh_token_bucket
+
+        token = "sk-super-secret-refresh-token-value"
+        _refresh_token_bucket(token)
+        _native_refresh_rate_limited(token)
+        assert _refresh_attempts, "the limiter recorded no bucket"
+        for key in _refresh_attempts:
+            assert key != token, "a refresh token is being used as a dict key: %r" % key
+            assert len(key) == 64 and all(c in "0123456789abcdef" for c in key), (
+                "bucket keys must be sha256 hex digests, got %r" % key
+            )
+        assert _refresh_token_bucket(token) != token
+
+    def test_different_tokens_get_different_buckets(self):
+        from hermes_cli.dashboard_auth.routes import _refresh_token_bucket
+
+        assert _refresh_token_bucket("token-a") != _refresh_token_bucket("token-b")
+
+    def test_retry_after_reflects_the_window_remainder(self):
+        """Not just "> 0": a client that honours Retry-After must be told roughly when its
+        budget frees up. A hardcoded 1.0 would pass a bare positive-value assertion."""
+        from hermes_cli.dashboard_auth.routes import _REFRESH_RATE_MAX_ATTEMPTS, _REFRESH_RATE_WINDOW_SEC
+
+        token = "retry-after-probe-token"
+        for _ in range(_REFRESH_RATE_MAX_ATTEMPTS):
+            limited, _retry = _native_refresh_rate_limited(token)
+            assert not limited
+        limited, retry_after = _native_refresh_rate_limited(token)
+        assert limited
+        assert retry_after > 1.0, (
+            "Retry-After must reflect the window remainder, not a fixed 1.0s: %r" % retry_after
+        )
+        assert retry_after <= _REFRESH_RATE_WINDOW_SEC, retry_after
