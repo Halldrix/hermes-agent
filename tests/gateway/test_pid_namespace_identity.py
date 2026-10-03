@@ -104,14 +104,13 @@ def test_a_successful_retry_is_promoted_into_the_cache(monkeypatch):
 
     def flaky_readlink(path):
         # Fail until the test flips the switch: deterministic, and independent of how many reads
-        # the resolver happens to make (a promotion re-reads, so a call-count is not stable).
+        # the resolver happens to make.
         if state["fail"]:
             raise OSError()
         return f"pid:[{_HOST_NS}]"
 
     pns._clear_local_namespace_cache()
     monkeypatch.setattr(pns.os, "readlink", flaky_readlink)
-    pns._clear_local_namespace_cache()  # drop anything a prior case learned
     try:
         assert local_pid_namespace().known is False, "reads are failing"
 
@@ -486,6 +485,23 @@ def test_our_own_stamped_pid_is_still_reported_live(tmp_path, monkeypatch):
     assert status._live_pid_from_record(record) == os.getpid()
 
 
+def _held_lock_carrying(tmp_path, monkeypatch, record):
+    """Write ``record`` to gateway.pid + gateway.lock and hold a real flock on the lock.
+
+    The record is written into the lock file too, because the held-lock branch reads both and
+    each one alone can decide the cleanup. Returns ``(lock_path, open_handle)``.
+    """
+    from gateway import status
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "gateway.pid").write_text(json.dumps(record))
+    lock = tmp_path / "gateway.lock"
+    lock.write_text(json.dumps(record))
+    handle = open(lock, "a+", encoding="utf-8")
+    assert status._try_acquire_file_lock(handle), "test must start from a HELD lock"
+    return lock, handle
+
+
 def test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable(
     tmp_path, monkeypatch
 ):
@@ -495,26 +511,17 @@ def test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable(
     this build's own unresolved stamp — and the held-lock branch used to read that as "no live
     gateway", then cleaned up with ``unlink_lock=True``. The holder keeps its flock on the deleted
     inode, the next starter creates a fresh file and acquires it: the singleton bypass the whole
-    change exists to close. Real flock, real files; the assertion is that a second acquisition
-    stays blocked.
+    change exists to close. Real flock, real files; the assertion is that the pathname survives.
     """
-    import fcntl
-
     from gateway import status
 
     _set_local_namespace(monkeypatch, _UNKNOWN)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    lock = tmp_path / "gateway.lock"
     record = {
         "pid": os.getpid(), "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
         "hermes_home": str(tmp_path), "pidns": pns.PIDNS_UNRESOLVED,
     }
-    (tmp_path / "gateway.pid").write_text(json.dumps(record))
-    lock.write_text(json.dumps(record))
-
-    holder = open(lock, "a+", encoding="utf-8")
+    lock, holder = _held_lock_carrying(tmp_path, monkeypatch, record)
     try:
-        assert status._try_acquire_file_lock(holder), "test must start from a HELD lock"
         status.get_running_pid()
         assert lock.exists(), "the pathname of a proven-held runtime lock was unlinked"
         # The pathname surviving IS the guard: `flock` is per-inode, so the next starter's
@@ -527,36 +534,26 @@ def test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable(
 def test_a_held_lock_survives_a_dead_local_pid_we_cannot_qualify(tmp_path, monkeypatch):
     """Held-lock protection must not depend on the local PID table (#123081, #123109).
 
-    ``test_a_held_runtime_lock_is_never_unlinked_because_identity_is_unprovable`` pins the
-    branch where the recorded PID happens to be locally live, so it can be satisfied by the
-    local process table alone. This one removes that coincidence: the recorded PID does not
-    exist here, and the record carries another namespace's stamp. A local absence says
-    nothing about an owner whose number was issued elsewhere — so it is not evidence that
-    our owner died, and the held lock's pathname must survive regardless.
+    The test above pins the branch where the recorded PID happens to be locally live, so the
+    local process table alone could satisfy it. This one removes that coincidence: the recorded
+    PID does not exist here and the identity is unprovable, so the local table's silence is not
+    evidence that our owner died. Only qualified identity may license that inference.
     """
-    import fcntl
-
     from gateway import status
 
     # The reader cannot name its own namespace, so `record_unlinkable_from` also answers False:
-    # this is the only shape where the qualification guard below is the sole thing standing
-    # between an unprovable owner and an unlinked lock. The neighbouring
-    # foreign-stamp case is already covered by the unlink policy, so it cannot witness this.
+    # this is the only shape where the qualification guard is the sole thing standing between an
+    # unprovable owner and an unlinked lock. A foreign stamp is already refused by the unlink
+    # policy, so it cannot witness this.
     _set_local_namespace(monkeypatch, _UNKNOWN)
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     absent_pid = 4194303  # far above any live pid_max here; the point is that it is gone
     assert not status._pid_exists(absent_pid), "the control PID must not exist locally"
-    lock = tmp_path / "gateway.lock"
     record = {
         "pid": absent_pid, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
         "hermes_home": str(tmp_path), "pidns": pns.PIDNS_UNRESOLVED,
     }
-    (tmp_path / "gateway.pid").write_text(json.dumps(record))
-    lock.write_text(json.dumps(record))
-
-    holder = open(lock, "a+", encoding="utf-8")
+    lock, holder = _held_lock_carrying(tmp_path, monkeypatch, record)
     try:
-        assert status._try_acquire_file_lock(holder), "test must start from a HELD lock"
         status.get_running_pid()
         assert lock.exists(), (
             "a held lock was unlinked because the owner's PID was absent from THIS host's "

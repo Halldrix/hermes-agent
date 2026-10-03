@@ -2248,11 +2248,12 @@ def get_running_pid(
                 if not pid_checkable_from(record.get("pidns")):
                     saw_live_pid = True  # unknown owner identity cannot negate a held lock
                     continue
+                # Qualified identity, so a local liveness answer is about our own owner. Any
+                # stamp `pid_checkable_from` refuses (foreign, unresolved, unnameable) already
+                # left above, which is why there is no second namespace check here.
                 recorded_pid = _pid_from_record(record)
-                if record_unlinkable_from(record.get("pidns")):
-                    continue
                 if recorded_pid is None or not _pid_exists(recorded_pid):
-                    continue  # provably dead, and not another namespace's claim
+                    continue  # provably dead
                 saw_live_pid = True
                 continue
             home_ok = (

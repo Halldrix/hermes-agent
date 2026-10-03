@@ -86,14 +86,15 @@ _local_namespace_lock = threading.Lock()
 
 
 def _set_local_namespace(value: LocalPidNamespace) -> None:
-    """Retain a definite observation, or clear the memo when ``value`` is unresolved.
+    """Retain a definite observation in the memo.
 
-    Only a ``known`` answer is ever retained: memoizing ``_UNRESOLVED`` is precisely the bug
-    this memo replaces, since it would pin the process to UNKNOWN for its whole life.
+    Only ever called with a ``known`` value: memoizing ``_UNRESOLVED`` is precisely the bug this
+    memo replaces, since it would pin the process to UNKNOWN for its whole life. Both call sites
+    guard on ``.known`` before getting here, so an unresolved result stays absent and retryable.
     """
     global _local_namespace_memo
     with _local_namespace_lock:
-        _local_namespace_memo = value if value.known else None
+        _local_namespace_memo = value
 
 
 def _local_pid_namespace_cached() -> LocalPidNamespace:
@@ -138,13 +139,13 @@ def local_pid_namespace() -> LocalPidNamespace:
     if not retry.known:
         # Unknown stays retryable: nothing is memoized, so the next call probes again.
         return retry
-    # Promote the value we ALREADY obtained. Clearing the memo and re-reading /proc
-    # re-introduces the very race this branch exists to close: if that extra read fails on
-    # its own transient, the "promotion" stores _UNRESOLVED and pins the process to UNKNOWN
-    # for life -- and it RETURNS that, so the call which just learned the id hands back
-    # "unknown" to its own caller. A second probe is not a retained observation.
+    # Retain the value we ALREADY obtained. Clearing a memo and re-reading /proc re-introduces
+    # the very race this branch exists to close: if that extra read fails on its own transient,
+    # the "promotion" stores _UNRESOLVED and pins the process to UNKNOWN for life -- and it
+    # RETURNS that, so the call which just learned the id hands back "unknown" to its own
+    # caller. A second probe is not a retained observation.
     _set_local_namespace(retry)
-    return _local_pid_namespace_cached()
+    return retry
 
 
 def pid_namespace_id(pid: int) -> Optional[str]:
@@ -160,7 +161,7 @@ def pid_namespace_id(pid: int) -> Optional[str]:
         return None
 
 
-def pid_checkable_from(recorded_pidns: Any, recorded_pid: Optional[int] = None) -> bool:
+def pid_checkable_from(recorded_pidns: Any) -> bool:
     """True when a recorded PID may be probed in THIS process' namespace.
 
     * No namespace on this platform → checkable: there is only one namespace, so
