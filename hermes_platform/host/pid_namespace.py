@@ -80,7 +80,10 @@ def _resolve_local_pid_namespace() -> LocalPidNamespace:
 
 
 #: Process-local memo for a definite observation. ``functools.cache`` cannot be written to, so a
-#: known answer needs an explicit home of its own; the lock is held only for the pointer swap.
+#: known answer needs an explicit home of its own. The lock is held across the read AND the store,
+#: not just the pointer swap: a caller that reads an empty memo and then resolves could otherwise
+#: return an unresolved value that another thread had already made definite, and that stale unknown
+#: reaches ``record_unlinkable_from`` as "this record is a foreign namespace, delete it".
 _local_namespace_memo: Optional[LocalPidNamespace] = None
 _local_namespace_lock = threading.Lock()
 
@@ -104,12 +107,19 @@ def _local_pid_namespace_cached() -> LocalPidNamespace:
     and is retained, while ``local_pid_namespace``'s in-call retry retains its own value and
     returns it directly rather than routing a second read back through here.
     """
-    memo = _local_namespace_memo
-    if memo is not None:
-        return memo
-    resolved = _resolve_local_pid_namespace()
-    if resolved.known:
-        _set_local_namespace(resolved)
+    global _local_namespace_memo
+    with _local_namespace_lock:
+        memo = _local_namespace_memo
+        if memo is not None:
+            return memo
+        # Resolve UNDER the lock: an unresolved read is not retained, so two threads could
+        # otherwise both miss the memo, both fail their reads, and both return a stale unknown
+        # while a third had already retained the real id. Holding the lock across the read makes
+        # "check the memo, then probe" one atomic step, so a probe only happens while the memo
+        # is genuinely empty and a concurrent retain cannot slip past the decision.
+        resolved = _resolve_local_pid_namespace()
+        if resolved.known:
+            _local_namespace_memo = resolved
     return resolved
 
 
@@ -138,8 +148,12 @@ def local_pid_namespace() -> LocalPidNamespace:
         return resolved
     retry = _resolve_local_pid_namespace()
     if not retry.known:
-        # Unknown stays retryable: nothing is memoized, so the next call probes again.
-        return retry
+        # Unknown stays retryable, but a peer thread may have retained a definite namespace while
+        # this probe was in flight. Returning our own failed read would hand that caller a stale
+        # unknown, and `record_unlinkable_from` reads an unnameable own-namespace as "cannot read a
+        # claim, so unlink" -- so a KNOWN foreign record becomes eligible for cleanup. Re-read the
+        # memo (synchronized) before giving up on it.
+        return _local_pid_namespace_cached()
     # Retain the value we ALREADY obtained. Clearing a memo and re-reading /proc re-introduces
     # the very race this branch exists to close: if that extra read fails on its own transient,
     # the "promotion" stores _UNRESOLVED and pins the process to UNKNOWN for life -- and it

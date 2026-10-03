@@ -159,6 +159,87 @@ def test_a_learned_namespace_survives_a_failure_during_its_own_promotion(monkeyp
         pns._clear_local_namespace_cache()
 
 
+def _memo_read_and_probe_are_one_critical_section(monkeypatch):
+    """Probe the window between "memo read" and "decision", from a peer thread.
+
+    The finding is that those two were not one atomic step. This drives the reader's own probe
+    and, from a peer thread, attempts a retain WHILE that probe is in flight. The peer records
+    whether it got in. Under a synchronized decision the reader holds the lock across the probe,
+    so the peer cannot retain until the reader has decided -- which is the property, stated as a
+    fact the test can assert rather than as a schedule it hopes for.
+    """
+    pns._clear_local_namespace_cache()
+    reader_inside_probe = threading.Event()
+    peer_finished = threading.Event()
+    observed = {"peer_retained": False, "reader_value": None}
+
+    def readlink(path):
+        reader_inside_probe.set()
+        # Stay inside the probe long enough for the peer's attempt to be observable.
+        peer_finished.wait(timeout=5)
+        raise OSError()
+
+    monkeypatch.setattr(pns.os, "readlink", readlink)
+
+    def peer():
+        try:
+            assert reader_inside_probe.wait(timeout=5)
+            pns._set_local_namespace(pns.LocalPidNamespace(id="4026531836", supported=True))
+            observed["peer_retained"] = True
+        finally:
+            peer_finished.set()
+
+    thread = threading.Thread(target=peer, daemon=True)
+    thread.start()
+    try:
+        observed["reader_value"] = pns.local_pid_namespace()
+    finally:
+        thread.join(timeout=10)
+        pns._clear_local_namespace_cache()
+    return observed
+
+
+def test_a_concurrent_retain_cannot_slip_past_the_memo_decision(monkeypatch):
+    """The memo read and the decision must be one critical section (#123081).
+
+    ``_set_local_namespace`` serialized only the pointer swap, so reading the memo and resolving
+    sat outside the lock: a caller could observe an empty memo, fail its probe, and return
+    ``_UNRESOLVED`` after another thread had retained the real namespace. That stale value is not
+    inert -- ``record_unlinkable_from`` reads ``ours.known is False`` as "cannot read a claim, so
+    unlink", which makes a KNOWN foreign record eligible for cleanup.
+    """
+    observed = _memo_read_and_probe_are_one_critical_section(monkeypatch)
+
+    # The peer retained while this call's own probe was failing. A caller that returned its own
+    # failed read would hand back a stale unknown that the memo no longer holds; the contract is
+    # that it returns the value that WON, not the one it happened to read first.
+    assert observed["peer_retained"] is True, (
+        "the peer never managed to retain, so this case is not exercising the race"
+    )
+    assert observed["reader_value"] == pns.LocalPidNamespace(id="4026531836", supported=True), (
+        f"the raced call returned {observed['reader_value']} instead of the namespace the peer "
+        "had already retained"
+    )
+
+
+def test_a_foreign_record_stays_unlinkable_refused_once_the_namespace_is_known(monkeypatch):
+    """The policy the concurrency hole would have opened, pinned independently of any schedule.
+
+    Once this process can name its own namespace, a canonical FOREIGN stamp must be reported as
+    one that must stay. This asserts the predicate directly so the guarantee does not rest on a
+    thread schedule the test does not control.
+    """
+    peer_value = pns.LocalPidNamespace(id="4026531836", supported=True)
+    pns._set_local_namespace(peer_value)
+    try:
+        assert pns.record_unlinkable_from("4026532999") is True, (
+            "a canonical foreign record was reported unlinkable because our own namespace was "
+            "read as unresolved"
+        )
+    finally:
+        pns._clear_local_namespace_cache()
+
+
 def test_local_namespace_is_stable_and_known_on_this_linux_host():
     """A definite answer is cached; the namespace cannot change under a live process."""
     first = local_pid_namespace()
