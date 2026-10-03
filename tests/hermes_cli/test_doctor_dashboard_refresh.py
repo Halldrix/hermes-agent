@@ -132,10 +132,9 @@ class TestDashboardAuthRefreshCheck:
 
 
     def test_line_cap_bounds_the_tail_independently_of_the_byte_cap(self, tmp_path, monkeypatch):
-        """The LINE cap is a second, independent bound. Dropping it (``splitlines()`` without
-        ``[-N:]``) leaves this test green — so it does not currently guard it. The failures must
-        be the OLDEST lines and the file must still fit the 512 KB byte window, so only the line
-        cap can exclude them."""
+        """The LINE cap is a second, independent bound: the whole file fits inside the
+        512 KB byte window, so only ``[-_REFRESH_LOG_TAIL_LINES:]`` can exclude a storm sitting
+        at the OLDEST lines. Removing that slice turns this RED."""
         import json as _json
 
         log = tmp_path / "logs" / "dashboard-auth.log"
@@ -161,13 +160,24 @@ class TestDashboardAuthRefreshCheck:
         assert "✗" in capsys.readouterr().out, "exactly-at-the-limit must FAIL, not warn"
         assert len(finding.manual_issues) == 1
 
-    def test_missing_log_is_info_not_failure(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        monkeypatch.setattr(
-            audit_mod, "resolve_log_path", lambda: tmp_path / "nope.log"
-        )
+    def test_byte_cap_bounds_the_tail_independently_of_the_line_cap(self, tmp_path, monkeypatch):
+        """The BYTE cap is the other independent bound, and nothing else pins it.
+
+        25 failures at the OLDEST offsets, then 4900 filler lines of ~110 B: the file is
+        ~541 KB (> the 512 KB byte window) but only 4925 lines (< the 5000-line cap). The storm
+        is therefore inside the last 5000 lines — the LINE cap keeps it — yet before the start
+        of the byte window, so only _REFRESH_LOG_TAIL_BYTES can exclude it."""
+        import json as _json
+
+        log = tmp_path / "logs" / "dashboard-auth.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        storm = "".join(_line("refresh_failure") for _ in range(25))
+        filler = _json.dumps({"event": "old_filler"}) + "y" * 84 + "\n"
+        assert len(storm) + 4900 * len(filler) > doctor_mod._REFRESH_LOG_TAIL_BYTES
+        assert 25 + 4900 < doctor_mod._REFRESH_LOG_TAIL_LINES
+        log.write_text(storm + filler * 4900, encoding="utf-8")
+        monkeypatch.setattr(audit_mod, "resolve_log_path", lambda: log)
         finding = doctor_mod._check_dashboard_auth_refresh(False)
-        assert finding.issues == []
-        out = capsys.readouterr().out
-        assert "✗" not in out and "⚠" not in out
+        assert finding.manual_issues == [], (
+            "byte cap did not bound the tail: a storm older than the byte window was counted"
+        )

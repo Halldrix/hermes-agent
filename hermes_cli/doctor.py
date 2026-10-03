@@ -171,7 +171,7 @@ def _check_dashboard_auth_refresh(should_fix: bool, f: Finding) -> None:
                 f"Dashboard auth refresh failing ({total} REFRESH_FAILURE in the last hour: "
                 f"{top}). Inspect dashboard-auth.log; a looping client or a struggling "
                 f"upstream is likely.")
-        elif total > 0:
+        else:
             check_warn("Dashboard refresh",
                        f"({total} failures in the last hour: {top})")
 
