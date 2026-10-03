@@ -5,11 +5,7 @@ success from the pre-restart ``.update_exit_code`` write alone.
 """
 
 import json
-import os
-import shutil
 import subprocess
-import time
-from pathlib import Path
 
 import pytest
 
@@ -203,3 +199,80 @@ class TestGatewayUpdateFinalizedGate:
             "hermes_cli.update_cmd_fleet._fleet_restart_obligation_armed", lambda: False)
 
         assert GatewayNotificationsMixin._gateway_update_finalized(paths) is False
+
+
+class TestUnfinalizedRunKeepsRetryState:
+    """The user-visible contract the eight private-method cases above miss.
+
+    Every gate test asserts ``_gateway_update_finalized`` in isolation, so a
+    refactor that made the watcher clear the pending markers on the
+    "exit 0 but no receipt" path would stay green — while destroying the only
+    carrier of update_id, so a receipt landing one tick later could never
+    authorize success and the restart obligation never discharged. Drive the
+    watcher and assert on what it sends and what it leaves on disk.
+    """
+
+    def _watch(self, tmp_path, monkeypatch, *, receipt: bool, timeout: float):
+        import asyncio
+
+        from gateway.run_notifications import GatewayNotificationsMixin
+
+        gate = TestGatewayUpdateFinalizedGate()
+        paths, update_id = gate._paths(tmp_path)
+        if receipt:
+            gate._write_receipt(tmp_path, update_id)
+
+        sent = []
+
+        class _Target:
+            session_key = "agent:main:telegram:1"
+
+            async def send(self, text, **_kw):
+                sent.append(text)
+
+        monkeypatch.setattr(GatewayNotificationsMixin, "_update_paths",
+                            classmethod(lambda cls: paths))
+        monkeypatch.setattr(GatewayNotificationsMixin, "_resolve_update_target",
+                            lambda self, _p: _Target())
+        cleared = []
+        real_clear = GatewayNotificationsMixin._clear_update_markers
+
+        def _tracking_clear(self, _p, _k):
+            cleared.append(True)
+            real_clear(self, _p, _k)
+
+        monkeypatch.setattr(GatewayNotificationsMixin, "_clear_update_markers",
+                            _tracking_clear)
+        monkeypatch.setattr(
+            "hermes_cli.update_cmd_fleet._fleet_restart_obligation_armed", lambda: False)
+        # Only reached for the optional prompt re-forward; this loop never
+        # takes that branch (no .update_prompt.json is written here).
+        monkeypatch.setattr(GatewayNotificationsMixin, "_peek_session_state",
+                            lambda self, _k: None, raising=False)
+
+        watcher = GatewayNotificationsMixin()
+        asyncio.run(watcher._watch_update_progress(
+            poll_interval=0.01, stream_interval=0.01, timeout=timeout))
+        return sent, paths, cleared
+
+    def test_finalized_run_announces_success(self, tmp_path, monkeypatch):
+        sent, _paths, cleared = self._watch(tmp_path, monkeypatch, receipt=True, timeout=5.0)
+
+        assert sent, "a finalized run must notify the user"
+        assert cleared, "a finalized run must retire its markers"
+        assert "\u2705" in sent[-1]
+
+    def test_unfinalized_run_keeps_markers_for_retry(self, tmp_path, monkeypatch):
+        sent, paths, cleared = self._watch(tmp_path, monkeypatch, receipt=False, timeout=0.05)
+
+        assert sent and "\u274c" in sent[-1], "an unfinalized run must not claim success"
+        # The regression: clearing here strands the update — update_id lives only
+        # in these markers, so no late receipt can ever match afterwards.
+        assert not cleared, (
+            "an unfinalized run must not clear its markers: they are the retry "
+            "state and the only carrier of update_id, so a late receipt could "
+            "never authorize success"
+        )
+        assert paths.pending.exists(), (
+            "an unfinalized run must leave the pending marker on disk"
+        )

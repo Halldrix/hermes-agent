@@ -13,8 +13,6 @@ import dataclasses
 import json
 import logging
 import time
-from contextlib import suppress
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
@@ -28,18 +26,6 @@ from gateway.run_notifications_update import GatewayUpdateNotificationsMixin
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
-
-# A failed /update leaves the previous version running; the full pip/git log stays on the host
-# (`hermes update` re-runs it in the terminal) and only a short tail is quoted in chat.
-def _update_failed_notice() -> str:
-    return t("gateway.update.failed_notice")
-
-# An update's completion notice waits for its target platform adapter to (re)connect before it
-# can be delivered. Nothing bounds that wait, so a marker naming a platform that is not
-# configured at all — no adapter will ever appear — would keep itself on disk and re-log a
-# deferred line on every poll, in every process, forever. Stop waiting past this age.
-_UPDATE_NOTIFY_MAX_ADAPTER_WAIT_SECONDS = 3600.0
-
 
 def _served_notice_target_key(profile: Optional[str], platform_value: str, chat_id, thread_id) -> tuple:
     """Notice-dedupe key for one SERVED profile's home channel.
