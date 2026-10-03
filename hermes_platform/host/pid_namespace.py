@@ -25,9 +25,9 @@ Tri-state, mirroring how the platform reports other facts:
 
 from __future__ import annotations
 
-import functools
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -79,35 +79,72 @@ def _resolve_local_pid_namespace() -> LocalPidNamespace:
         return _UNRESOLVED
 
 
-@functools.cache
+#: Process-local memo for a definite observation. ``functools.cache`` cannot be written to, so a
+#: known answer needs an explicit home of its own; the lock is held only for the pointer swap.
+_local_namespace_memo: Optional[LocalPidNamespace] = None
+_local_namespace_lock = threading.Lock()
+
+
+def _set_local_namespace(value: LocalPidNamespace) -> None:
+    """Retain a definite observation, or clear the memo when ``value`` is unresolved.
+
+    Only a ``known`` answer is ever retained: memoizing ``_UNRESOLVED`` is precisely the bug
+    this memo replaces, since it would pin the process to UNKNOWN for its whole life.
+    """
+    global _local_namespace_memo
+    with _local_namespace_lock:
+        _local_namespace_memo = value if value.known else None
+
+
 def _local_pid_namespace_cached() -> LocalPidNamespace:
-    return _resolve_local_pid_namespace()
+    """The retained observation, or a fresh read that is retained when it is definite.
+
+    Every definite answer passes through here — first read, later call, or a retry that
+    recovered — so retention does not depend on which path happened to observe it.
+    """
+    memo = _local_namespace_memo
+    if memo is not None:
+        return memo
+    resolved = _resolve_local_pid_namespace()
+    if resolved.known:
+        _set_local_namespace(resolved)
+    return resolved
+
+
+def _clear_local_namespace_cache() -> None:
+    """Drop the retained observation. Test-only seam."""
+    global _local_namespace_memo
+    with _local_namespace_lock:
+        _local_namespace_memo = None
 
 
 def local_pid_namespace() -> LocalPidNamespace:
     """This process' PID namespace identity, cached once a definite answer was obtained.
 
-    A failed lookup is deliberately not cached, so a transient ``/proc`` problem
+    A failed lookup is deliberately not retained, so a transient ``/proc`` problem
     (a permissions race, a partially mounted procfs) is retried on the next call
     instead of pinning the process to "unknown" for its whole life.
 
-    A retry that DOES learn the namespace promotes it into the memo. Without that, the cached
-    entry stayed ``_UNRESOLVED`` forever even after we had read a real id: the next lookup read
-    again, failed again on a different transient, and dropped the process back to UNKNOWN for the
-    rest of its life — contradicting the contract above and reactivating every unknown-namespace
-    refusal mid-process, including the ones that refuse to signal.
+    A retry that DOES learn the namespace is retained as-is. Without that, the memo stayed
+    empty even after we had read a real id: the next lookup read again, failed again on a
+    different transient, and dropped the process back to UNKNOWN for the rest of its life --
+    contradicting the contract above and reactivating every unknown-namespace refusal
+    mid-process, including the ones that refuse to signal.
     """
     resolved = _local_pid_namespace_cached()
     if resolved.known:
         return resolved
     retry = _resolve_local_pid_namespace()
-    if retry.known:
-        # Promote: functools' cache has no public setter, and its key is the no-arg call, so
-        # re-caching under that key replaces the unresolved entry.
-        _local_pid_namespace_cached.cache_clear()
-        _local_pid_namespace_cached()
-        return _local_pid_namespace_cached()
-    return retry
+    if not retry.known:
+        # Unknown stays retryable: nothing is memoized, so the next call probes again.
+        return retry
+    # Promote the value we ALREADY obtained. Clearing the memo and re-reading /proc
+    # re-introduces the very race this branch exists to close: if that extra read fails on
+    # its own transient, the "promotion" stores _UNRESOLVED and pins the process to UNKNOWN
+    # for life -- and it RETURNS that, so the call which just learned the id hands back
+    # "unknown" to its own caller. A second probe is not a retained observation.
+    _set_local_namespace(retry)
+    return _local_pid_namespace_cached()
 
 
 def pid_namespace_id(pid: int) -> Optional[str]:
