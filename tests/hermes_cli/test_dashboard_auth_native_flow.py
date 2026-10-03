@@ -763,7 +763,8 @@ def test_device_id_is_stable_and_bounded(gated_client, monkeypatch):
     assert len(devices) == 3, calls
     assert len(set(devices)) == 3, "distinct clients must get distinct ids: %r" % devices
     for dev in devices:
-        assert dev and len(dev) <= 16, "id must be a short stable hash: %r" % dev
+        assert dev and len(dev) == 16, "id must be exactly 16 hex chars: %r" % dev
+        assert all(c in "0123456789abcdef" for c in dev), "id must be hex: %r" % dev
     # An oversized header cannot inflate the id beyond the hash width.
     assert devices[-1] == _expected_device_id("X" * 2000)
 
@@ -782,6 +783,14 @@ def test_device_id_is_stable_across_repeated_failures(gated_client, monkeypatch)
     devices = [c[1].get("device") for c in calls if c[0] is AuditEvent.REFRESH_FAILURE]
     assert len(devices) == 3 and len(set(devices)) == 1, (
         "the same client must produce one correlatable id across records: %r" % devices
+    )
+    # Computed here, not via client_device: a test that calls the production function
+    # passes even when that function is wrong (a constant, or a truncated hash).
+    import hashlib as _hashlib
+
+    expected = _hashlib.sha256(ua.encode("utf-8")).hexdigest()[:16]
+    assert devices[0] == expected, (
+        "the id must be sha256(User-Agent)[:16]; got %r, expected %r" % (devices[0], expected)
     )
 
 
@@ -814,23 +823,15 @@ def test_cookie_gate_refresh_failure_also_records_the_device_id(monkeypatch):
 
     Drives _attempt_refresh directly against a provider that rejects the token, so the gate's
     audit site is genuinely reached (a route-level request would silently skip it)."""
-    import hermes_cli.dashboard_auth.request_utils as ru_mod
     from hermes_cli.dashboard_auth import middleware as mw_mod
-    from hermes_cli.dashboard_auth.base import RefreshExpiredError
     from starlette.requests import Request
 
-    calls: list = []
-    monkeypatch.setattr(ru_mod, "audit_log",
-                        lambda event, **fields: calls.append((event, fields)))
+    calls = _capture_audit_log(monkeypatch)
 
     class _Rejecting:
+        """Stands in for the provider the singleflight rejects. ``refresh`` is never
+        called: the fake passes the instance straight to ``on_rejected``."""
         name = "stub"
-
-        def refresh(self, **kwargs):
-            raise RefreshExpiredError("dead rt")
-
-    from hermes_cli.dashboard_auth import register_provider
-    from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
     def _fake_coalesced(rt, provider_hint, *, phase, log, on_rejected, on_unreachable):
         on_rejected(_Rejecting())
@@ -856,13 +857,47 @@ def test_cookie_gate_refresh_failure_also_records_the_device_id(monkeypatch):
     assert fields.get("device") == _expected_device_id("Mozilla/5.0 (desktop browser)"), fields
 
 
-def test_both_refresh_failure_sites_share_one_audit_helper():
-    """Regression guard for the structural fix: the native route and the cookie gate must
-    keep routing through the SAME helper. If they diverge, one path silently loses its
-    client attribution again — the exact shape of the original route-only patch."""
-    from hermes_cli.dashboard_auth import middleware as mw_mod
-    from hermes_cli.dashboard_auth import request_utils as ru_mod
-    from hermes_cli.dashboard_auth import routes as routes_mod
+def test_both_refresh_failure_sites_emit_the_device_field(gated_client, monkeypatch):
+    """Both writers of REFRESH_FAILURE must EMIT the device field, not merely import the
+    same helper name. An import-identity assertion passes even when one call site is
+    reverted to a plain audit_log call — which is exactly the divergence this guards."""
+    calls = _capture_audit_log(monkeypatch)
+    ua = "HermesDesktop/2.3 (shared-seam)"
+    gated_client.post(
+        "/auth/native/refresh",
+        json={"refresh_token": "garbage-not-a-real-rt", "provider": "stub"},
+        headers={"User-Agent": ua},
+    )
+    route_failures = [c for c in calls if c[0] is AuditEvent.REFRESH_FAILURE]
 
-    assert mw_mod.audit_refresh_failure is ru_mod.audit_refresh_failure
-    assert routes_mod.audit_refresh_failure is ru_mod.audit_refresh_failure
+    # Now drive the gate's own site through the production closure.
+    from hermes_cli.dashboard_auth import middleware as mw_mod
+    from hermes_cli.dashboard_auth.base import RefreshExpiredError
+    from starlette.requests import Request
+
+    class _Rejecting:
+        name = "stub"
+
+        def refresh(self, **kwargs):
+            raise RefreshExpiredError("dead rt")
+
+    def _fake_coalesced(rt, provider_hint, *, phase, log, on_rejected, on_unreachable):
+        on_rejected(_Rejecting())
+        return None
+
+    monkeypatch.setattr(mw_mod, "refresh_session_coalesced", _fake_coalesced)
+    scope = {"type": "http", "headers": [
+        (b"user-agent", ua.encode()),
+        (b"x-forwarded-for", b"1.2.3.4"),
+    ], "client": ("1.2.3.4", 5000), "method": "GET", "path": "/api/config",
+        "query_string": b"", "scheme": "https", "server": ("x", 443), "root_path": ""}
+    assert mw_mod._attempt_refresh(Request(scope), refresh_token="garbage-rt") is None
+
+    reasons = {c[1].get("reason") for c in calls if c[0] is AuditEvent.REFRESH_FAILURE}
+    assert {"all_providers_rejected_rt", "refresh_expired"} <= reasons, (
+        "both REFRESH_FAILURE sites must be exercised here; saw %r" % (reasons,)
+    )
+    for event, fields in (c for c in calls if c[0] is AuditEvent.REFRESH_FAILURE):
+        assert fields.get("device") == _expected_device_id(ua), (
+            "REFRESH_FAILURE(%s) lost its device attribution: %r" % (fields.get("reason"), fields)
+        )
