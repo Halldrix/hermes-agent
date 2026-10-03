@@ -96,21 +96,23 @@ def test_unhydrated_env_reference_is_not_accused_of_being_burned(capsys):
 
 
 def test_unreadable_pool_warns_and_reports_issue(capsys, monkeypatch):
-    """A pool store that raises must produce a warn row + issue instead of killing the
+    """A pool store that raises OSError must produce a warn row + issue instead of killing the
     scan for the remaining providers (one broken provider must not hide the others)."""
     import agent.credential_pool as cp
 
     def _boom(_pid):
-        raise RuntimeError("auth.json malformed")
+        # load_pool propagates OSError from _load_auth_store; unparseable JSON is absorbed
+        # there and never reaches the caller.
+        raise OSError("auth.json unreadable")
 
     monkeypatch.setattr(cp, "load_pool", _boom)
     from hermes_cli.doctor_pools import _check_credential_pools
 
     finding = _check_credential_pools(False)
     out = capsys.readouterr().out
-    assert "unreadable: auth.json malformed" in out
+    assert "unreadable: auth.json unreadable" in out
     assert len(finding.manual_issues) >= 1, finding.manual_issues
-    assert "auth.json malformed" in finding.manual_issues[0]
+    assert "auth.json unreadable" in finding.manual_issues[0]
 
 
 def test_mixed_dead_and_exhausted_reports_recovery_time(capsys):
@@ -130,6 +132,87 @@ def test_mixed_dead_and_exhausted_reports_recovery_time(capsys):
     assert len(finding.manual_issues) == 1, finding.manual_issues
 
 
+
+def test_partially_burned_pool_with_unhydrated_env_ref_stays_silent(capsys):
+    """The #119533 false-burn guard, at the shape that actually regressed.
+
+    Two entries: one exhausted (timed) and one env-sourced reference whose secret does not
+    resolve in this process (``access_token: ""``, no burn stamp). ``burned < total`` is TRUE
+    here, so the pool must print NOTHING. Dropping ``burned < total`` makes this pool report
+    "all 2 entries benched" plus a manual issue — accusing a healthy env reference of being
+    burned, which is exactly the false burn the issue was filed about."""
+    _write_openrouter_pool([
+        {**_BASE, "last_status": "exhausted", "last_status_at": time.time(), "last_error_code": 429},
+        {
+            **_BASE, "id": "key-2", "label": "key-2", "access_token": "",
+            "source": "env:OPENROUTER_API_KEY", "extra": {"secret_fingerprint": "abc123"},
+        },
+    ])
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    finding = _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "Credential pool: openrouter" not in out, out
+    assert finding.manual_issues == [], finding.manual_issues
+
+
+def test_one_unreadable_pool_does_not_hide_a_burned_one(capsys, monkeypatch):
+    """Isolation: the scan must continue past a broken provider. ``_boom`` here raises for
+    openrouter ONLY, so a second provider with a burned pool must still get its row — a
+    ``continue`` -> ``break`` mutation loses it silently."""
+    import agent.credential_pool as cp
+
+    real = cp.load_pool
+    burned_entry = {
+        **_BASE, "id": "key-gmi", "base_url": "https://generativelanguage.googleapis.com",
+        "last_status": "exhausted", "last_status_at": time.time(), "last_error_code": 402,
+    }
+
+    def _selective(pid):
+        if pid == "openrouter":
+            raise OSError("auth.json unreadable")
+        if pid == "gemini":
+            return real(pid)
+        return real(pid)
+
+    _write_openrouter_pool([])
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home()
+    (home / "auth.json").write_text(
+        json.dumps({"version": 1, "credential_pool": {
+            "openrouter": [{**_BASE, "access_token": ""}],
+            "gemini": [burned_entry],
+        }}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cp, "load_pool", _selective)
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "unreadable" in out, "the broken provider should still warn:\n%s" % out
+    assert "Credential pool: gemini" in out, (
+        "a healthy provider after the broken one was never scanned (continue -> break?):\n%s" % out
+    )
+
+
+def test_no_section_header_when_every_pool_is_healthy_or_absent(capsys):
+    """The "Credential Pools" header renders only when rows exist. An unconditional header
+    prints a dangling section on every clean install."""
+    _write_openrouter_pool([{**_BASE}])  # configured, available -> an OK row, not empty
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    _check_credential_pools(False)
+    healthy = capsys.readouterr().out
+    _write_openrouter_pool([{**_BASE, "access_token": ""}])  # nothing to report
+    _check_credential_pools(False)
+    empty = capsys.readouterr().out
+    assert "Credential Pools" in healthy, "a row must render its section header:\n%s" % healthy
+    assert "Credential Pools" not in empty, (
+        "no rows must mean no section header:\n%s" % empty
+    )
+
+
 def test_check_registered_and_openrouter_coverage():
     """Wiring contract: the check runs from DOCTOR_CHECKS, and openrouter — deliberately absent
     from PROVIDER_REGISTRY (#109397) — is still scanned alongside every api_key registry pool."""
@@ -145,3 +228,21 @@ def test_check_registered_and_openrouter_coverage():
         if getattr(pconfig, "auth_type", "") == "api_key"
     }
     assert registry_api_keys <= ids, registry_api_keys - ids
+
+
+def test_programming_bug_is_not_disguised_as_unreadable(capsys, monkeypatch):
+    """``except OSError`` must stay narrow: a TypeError from a real bug must surface (via the
+    check's own error handling), not be reported to the user as a corrupt credential store."""
+    import agent.credential_pool as cp
+
+    def _bug(_pid):
+        raise TypeError("pool.entries() changed shape")
+
+    monkeypatch.setattr(cp, "load_pool", _bug)
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    finding = _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "unreadable" not in out, "a programming bug must not be reported as unreadable:\n%s" % out
+    assert not finding.manual_issues or all("unreadable" not in i for i in finding.manual_issues), \
+        finding.manual_issues

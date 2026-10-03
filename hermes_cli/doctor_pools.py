@@ -22,15 +22,19 @@ def _pool_provider_ids() -> list[str]:
 def _check_credential_pools(should_fix: bool, f: Finding) -> None:
     """Benched/exhausted pool rows: distinguish "pool burned (wait or ``hermes auth reset``)" from
     actual config loss — the generic ``No LLM provider configured`` turn-death hides which one it
-    was (#119533). Snapshot only: no token refresh and no network calls (load_pool may normalize
-    stale pool rows exactly as any model call does); unconfigured pools print nothing."""
+    was (#119533). Unconfigured pools print nothing.
+
+    Never triggers a token refresh and never makes a network call. Note it is NOT read-only:
+    ``load_pool`` persists exactly what any model call would (env-key ingestion into auth.json,
+    singleton seeding, stale-row pruning), so this is not a safe way to inspect a machine you
+    must not touch — read ``auth.json`` directly instead."""
     from agent.credential_pool import STATUS_DEAD, STATUS_EXHAUSTED, load_pool
 
     rows: list = []
     for pid in _pool_provider_ids():
         try:
             pool = load_pool(pid)
-        except Exception as exc:
+        except OSError as exc:
             rows.append((
                 check_warn, f"Credential pool: {pid}", f"(unreadable: {exc})",
                 f"Could not read this pool. Fix: check auth.json or run `hermes auth reset {pid}`",
@@ -39,14 +43,15 @@ def _check_credential_pools(should_fix: bool, f: Finding) -> None:
             continue
         if not pool.has_credentials():
             continue  # not configured: the env/connectivity checks own that verdict
-        total = len(pool.entries())
+        entries = pool.entries()
+        total = len(entries)
         if pool.has_available():
             rows.append((
                 check_ok, f"Credential pool: {pid}",
                 f"({total} entries, at least one available)", None,
             ))
             continue
-        burned = sum(1 for entry in pool.entries() if entry.last_status in (STATUS_EXHAUSTED, STATUS_DEAD))
+        burned = sum(1 for entry in entries if entry.last_status in (STATUS_EXHAUSTED, STATUS_DEAD))
         if not burned or burned < total:
             # Unusable rows without burn state (env-sourced references whose secret does not
             # resolve in this process): key-presence verdicts belong to the env/connectivity
