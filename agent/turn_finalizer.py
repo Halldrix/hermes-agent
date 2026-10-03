@@ -21,6 +21,7 @@ from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
 from agent.served_model import result_model_fields
+from agent.interrupt_control import STOP_KIND_USER_STOP, STOP_KIND_CLIENT_DISCONNECT
 
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
@@ -667,19 +668,19 @@ def finalize_turn(
     if interrupted and failed is not True and not (
         isinstance(final_response, str) and final_response.strip()
     ):
-        if getattr(agent, "_interrupt_stop_kind", None) == "client_disconnect":
+        if getattr(agent, "_interrupt_stop_kind", None) == STOP_KIND_CLIENT_DISCONNECT:
             final_response = (
                 "⚠️ The turn was interrupted because the client disconnected. "
                 "Send any message to continue."
             )
         elif (
             getattr(agent, "_interrupt_message", None)
-            and getattr(agent, "_interrupt_stop_kind", None) != "user_stop"
+            and getattr(agent, "_interrupt_stop_kind", None) != STOP_KIND_USER_STOP
         ):
             # Redirect: an incoming user message interrupted the turn. The
             # next turn answers that message, so synthesizing "stopped before
             # a reply was generated" would be misleading (#84236 review).
-            # An explicit stop_kind="user_stop" carrying a diagnostic message
+            # An explicit stop_kind=STOP_KIND_USER_STOP carrying a diagnostic message
             # (cli_shutdown._emit_interrupted_session_end) is a deliberate
             # stop, not a redirect — it falls through to the visible fallback.
             pass

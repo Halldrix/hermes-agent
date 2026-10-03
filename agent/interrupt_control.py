@@ -4,17 +4,21 @@ Soft/hard interrupt requests, tool-thread interrupt propagation, pending steer/r
 Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO unchanged.
 """
 import contextlib
-import inspect
 import logging
 import threading
-from typing import Any, Optional
+from typing import Optional
 
-from agent.interrupt_compat import request_hard_interrupt
+from agent.interrupt_compat import _accepts_keyword, request_hard_interrupt
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
 logger = logging.getLogger("run_agent")
+
+# Durable interrupt provenance (#84236). These ride the persisted message row so resume-time
+# orphan recovery can say WHO stopped the turn without re-inferring it from message text.
+STOP_KIND_USER_STOP = "user_stop"
+STOP_KIND_CLIENT_DISCONNECT = "client_disconnect"
 
 # ``interrupt()`` categories that mean a human stopped the turn. Any other ``_tool_interrupt_reason`` was
 # supplied by a system producer via ``tool_reason`` (watchdogs, lease loss, lifecycle cancellation) and is
@@ -113,14 +117,6 @@ def _ic_signal_tool_workers(agent, active: bool, **kw) -> None:
 class InterruptControlMixin:
     """interrupt()/hard_interrupt()/clear_interrupt()/steer()/redirect() (see module docstring)."""
 
-    def _child_accepts_stop_kind(self, child: Any) -> bool:
-        """True when ``child.interrupt`` declares the ``stop_kind`` parameter — a legacy third-party
-        child written against ``interrupt(message=None)`` would TypeError on the forward."""
-        try:
-            return "stop_kind" in inspect.signature(child.interrupt).parameters
-        except (TypeError, ValueError):
-            return False
-
     def interrupt(
         self, message: Optional[str] = None, *, hard_cancel: bool = False,
         tool_reason: Optional[str] = None, require_generation: Optional[int] = None,
@@ -150,14 +146,17 @@ class InterruptControlMixin:
             else (_REASON_NEW_MESSAGE if message else _REASON_USER_INTERRUPT)
         )
 
-        _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
         def _publish_interrupt_state() -> None:
             self._interrupt_requested = True
             self._interrupt_message = message
             self._tool_interrupt_reason = tool_interrupt_reason
             # The turn record and the log must agree on WHO asked for the stop (#112647).
             logger.info("Interrupt requested (%s): %s", "hard" if hard_cancel else "soft", tool_interrupt_reason)
-            self._interrupt_stop_kind = stop_kind
+            # A system producer (a tool worker's own KeyboardInterrupt, a watchdog) escalates
+            # without a stop_kind; it must not erase a human stop already stamped this turn, or
+            # the closing bubble and the resume note both blame Hermes for the user's own Ctrl+C.
+            if stop_kind is not None or getattr(self, "_interrupt_stop_kind", None) is None:
+                self._interrupt_stop_kind = stop_kind
             _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
             if _hard_event is not None:
                 _hard_event.set()
@@ -218,7 +217,7 @@ class InterruptControlMixin:
             try:
                 if hard_cancel:
                     request_hard_interrupt(child, message, tool_reason=tool_interrupt_reason, stop_kind=stop_kind)
-                elif self._child_accepts_stop_kind(child):
+                elif _accepts_keyword(child.interrupt, "stop_kind"):
                     child.interrupt(message, stop_kind=stop_kind)
                 else:
                     child.interrupt(message)

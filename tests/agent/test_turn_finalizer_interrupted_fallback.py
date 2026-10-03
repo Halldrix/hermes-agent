@@ -276,3 +276,16 @@ def test_request_hard_interrupt_stop_kind_legacy_hard_interrupt():
     assert accepted is True
     assert calls == ["SSE client disconnected"]
     assert agent._interrupt_stop_kind == "client_disconnect"
+
+def test_system_interrupt_does_not_erase_a_human_stop():
+    """A tool worker's own KeyboardInterrupt escalates through interrupt() without a
+    stop_kind. It must not clobber the provenance a human stop already stamped, or the
+    closing bubble and the resume note both blame Hermes for the user's own Ctrl+C."""
+    from agent.interrupt_control import STOP_KIND_USER_STOP
+
+    agent = _bare_agent()
+    agent.interrupt("received signal 2", stop_kind=STOP_KIND_USER_STOP)
+    agent.interrupt("keyboard interrupt")
+    assert agent._interrupt_stop_kind == STOP_KIND_USER_STOP, (
+        f"system interrupt erased human provenance: {agent._interrupt_stop_kind!r}"
+    )

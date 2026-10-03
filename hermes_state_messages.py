@@ -275,7 +275,7 @@ class SessionMessagesMixin:
         return (session_id, role, encoded_content, msg.get("tool_call_id"),
             encoded_tool_calls, encoded_tool_name,
             msg.get("effect_disposition"),
-            _scrub_surrogates(msg.get("stop_kind")) if isinstance(msg.get("stop_kind"), str) else None,
+            _str_or_none(msg.get("stop_kind")),
             message_timestamp, msg.get("token_count"), msg.get("finish_reason"),
             _scrub_surrogates(_reasoning("reasoning")), _scrub_surrogates(_reasoning("reasoning_content")),
             *(self._reasoning_json_text(_reasoning(k))
@@ -332,7 +332,7 @@ class SessionMessagesMixin:
             "role": row["role"],
             "content": self._decode_content(row["content"]),
         }
-        for column in ("tool_call_id", "tool_name", "effect_disposition", "token_count", "finish_reason"):
+        for column in ("tool_call_id", "tool_name", "effect_disposition", "stop_kind", "token_count", "finish_reason"):
             if row[column] is not None:
                 msg[column] = row[column]
         if row["tool_calls"]:

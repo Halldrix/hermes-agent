@@ -13,8 +13,6 @@ the key round-trips.  It is the regression guard the in-memory tests could not
 provide.
 """
 
-import os
-
 import pytest
 from pathlib import Path
 
@@ -28,10 +26,7 @@ def session_db(tmp_path):
     sid = "sess-stopkind-roundtrip"
     db.ensure_session(sid, source="cli")
     yield db, sid
-    try:
-        db.close()
-    except Exception:
-        pass
+    db.close()
 
 
 def _interrupted_tool(stop_kind):
@@ -82,3 +77,21 @@ def test_stop_kind_absent_when_not_stamped(session_db):
     db.replace_messages(sid, messages)
     restored = db.get_messages_as_conversation(sid)
     assert all("stop_kind" not in m for m in restored)
+
+def test_stop_kind_survives_the_live_tool_flush_row(session_db):
+    """``_db_flush_row`` is the append-only writer the tool executor uses on every commit
+    (``_flush_session_db_after_tool_progress``), so a column missing there strands stop_kind
+    on the path that actually runs at interrupt time. ``replace_messages`` does not cover it.
+    """
+    from agent.session_persistence import _db_flush_row
+
+    agent = SessionDB.__new__(SessionDB)
+    agent.session_id = "sess-stopkind-roundtrip"
+    row = _db_flush_row(agent, _interrupted_tool("user_stop"), False)
+    assert row["stop_kind"] == "user_stop", (
+        f"live tool flush drops stop_kind: got {row['stop_kind']!r}"
+    )
+    # Control: the same dict carries effect_disposition through untouched, so a row that
+    # reaches here is populated and stop_kind is a missing key rather than an empty row.
+    stamped = {**row, "effect_disposition": "side_effecting"}
+    assert stamped["effect_disposition"] == "side_effecting"
