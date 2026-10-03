@@ -143,6 +143,11 @@ def local_pid_namespace() -> LocalPidNamespace:
     different transient, and dropped the process back to UNKNOWN for the rest of its life --
     contradicting the contract above and reactivating every unknown-namespace refusal
     mid-process, including the ones that refuse to signal.
+
+    When this call's own probes fail but a concurrent thread retained the namespace while they
+    were in flight, this returns THAT retained value rather than its own unresolved one. It is
+    this process' namespace either way -- a PID namespace is immutable for a live process -- so
+    the answer is correct, and handing back the stale unknown would be actively wrong.
     """
     resolved = _local_pid_namespace_cached()
     if resolved.known:
@@ -154,7 +159,9 @@ def local_pid_namespace() -> LocalPidNamespace:
         # unknown, and `record_unlinkable_from` reads an unnameable own-namespace as "cannot read a
         # claim, so unlink" -- so a KNOWN foreign record becomes eligible for cleanup. Take the memo
         # POINTER, not another probe: a third readlink here would only re-discover the failure.
-        global _local_namespace_memo
+        # The lock here is REQUIRED, not defensive: it is the happens-before that makes a peer's
+        # retained value visible on a free-threaded build. A bare read of the global passes every
+        # test on GIL CPython and would drop that guarantee silently, so do not "simplify" it away.
         with _local_namespace_lock:
             memo = _local_namespace_memo
         return memo if memo is not None else retry

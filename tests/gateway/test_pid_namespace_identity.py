@@ -160,70 +160,65 @@ def test_a_learned_namespace_survives_a_failure_during_its_own_promotion(monkeyp
 
 
 def _memo_read_and_probe_are_one_critical_section(monkeypatch):
-    """Probe the window between "memo read" and "decision", from a peer thread.
+    """Hold the reader inside its probe while a peer thread retains the namespace.
 
-    The finding is that those two were not one atomic step. This drives the reader's own probe
-    and, from a peer thread, retains a definite namespace WHILE that probe is in flight. Thread
-    events fix the ordering rather than a sleep, so the case does not depend on timing luck.
+    Returns ``(peer_retained, reader_value, foreign_still_refused)``. Thread events fix the
+    ordering rather than a sleep, so the case does not depend on timing luck: the fake readlink
+    blocks until the peer's retain has completed, then fails, so the reader decides with the memo
+    already holding a value the reader never read.
     """
     pns._clear_local_namespace_cache()
     reader_inside_probe = threading.Event()
+    peer_retained = threading.Event()
     peer_finished = threading.Event()
-    observed = {"peer_retained": False, "reader_value": None, "foreign_still_refused": None}
 
     def readlink(path):
         reader_inside_probe.set()
-        # Stay inside the probe until the peer's attempt is done, then FAIL: this caller starts
-        # from an empty memo and cannot recover on its own, which is the finding's state.
-        peer_finished.wait(timeout=5)
+        # Stay inside the probe until the peer's retain lands, then FAIL: this caller starts from
+        # an empty memo and cannot recover on its own, which is the finding's state.
+        peer_retained.wait(timeout=5)
         raise OSError()
 
     monkeypatch.setattr(pns.os, "readlink", readlink)
 
     def peer():
-        try:
-            assert reader_inside_probe.wait(timeout=5)
-            pns._set_local_namespace(_LIVE)
-            observed["peer_retained"] = True
-        finally:
-            peer_finished.set()
+        assert reader_inside_probe.wait(timeout=5)
+        pns._set_local_namespace(_LIVE)
+        peer_retained.set()
 
     thread = threading.Thread(target=peer, daemon=True)
     thread.start()
     try:
-        observed["reader_value"] = pns.local_pid_namespace()
+        reader_value = pns.local_pid_namespace()
         # The raced value is what feeds the unlink policy, so assert the consequence while the
         # memo still holds the peer's namespace. Checked here rather than in a separate case: a
         # standalone predicate test passes with this fix reverted and proves nothing about it.
-        observed["foreign_still_refused"] = pns.record_unlinkable_from(_OTHER_NS)
+        foreign_refused = pns.record_unlinkable_from(_OTHER_NS)
     finally:
+        peer_finished.set()
         thread.join(timeout=10)
         pns._clear_local_namespace_cache()
-    return observed
+    return peer_retained.is_set(), reader_value, foreign_refused
 
 
 def test_a_concurrent_retain_cannot_slip_past_the_memo_decision(monkeypatch):
-    """The memo read and the decision must be one critical section (#123081).
+    """A failed probe must not hand back an unresolved value a peer already superseded (#123081).
 
-    ``_set_local_namespace`` serialized only the pointer swap, so reading the memo and resolving
-    sat outside the lock: a caller could observe an empty memo, fail its probe, and return
-    ``_UNRESOLVED`` after another thread had retained the real namespace. That stale value is not
-    inert -- ``record_unlinkable_from`` reads ``ours.known is False`` as "cannot read a claim, so
-    unlink", which makes a KNOWN foreign record eligible for cleanup.
+    The lock around "check the memo, then probe" does NOT close this on its own -- reverting it
+    leaves the suite green. What closes it is the unresolved branch taking the memo POINTER before
+    returning, so the caller gets the namespace that won rather than the read it happened to take
+    first. The stale value is not inert: `record_unlinkable_from` reads `ours.known is False` as
+    "cannot read a claim, so unlink", which makes a KNOWN foreign record eligible for cleanup.
     """
-    observed = _memo_read_and_probe_are_one_critical_section(monkeypatch)
+    retained, reader_value, foreign_refused = _memo_read_and_probe_are_one_critical_section(
+        monkeypatch
+    )
 
-    # The peer retained while this call's own probe was failing. A caller that returned its own
-    # failed read would hand back a stale unknown that the memo no longer holds; the contract is
-    # that it returns the value that WON, not the one it happened to read first.
-    assert observed["peer_retained"] is True, (
-        "the peer never managed to retain, so this case is not exercising the race"
+    assert retained is True, "the peer never managed to retain, so this case is not exercising the race"
+    assert reader_value == _LIVE, (
+        f"the raced call returned {reader_value} instead of the namespace the peer had retained"
     )
-    assert observed["reader_value"] == _LIVE, (
-        f"the raced call returned {observed['reader_value']} instead of the namespace the peer "
-        "had already retained"
-    )
-    assert observed["foreign_still_refused"] is True, (
+    assert foreign_refused is True, (
         "a canonical foreign record became unlinkable because our own namespace was read as "
         "unresolved"
     )
