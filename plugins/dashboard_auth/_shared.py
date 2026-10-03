@@ -121,11 +121,10 @@ def pkce_login_start(authorize_url: str, *, client_id: str, scope: str, redirect
 # carrying anything else (WAF page, proxy envelope) stays transient — never force a
 # re-login on an ambiguous signal.
 #
-# Reuses the repo's canonical dead-grant set rather than restating it: this PR's own list
-# had drifted, omitting ``refresh_token_reused`` — which is exactly what Portal returns once a
-# rotated RT is replayed, so a reused grant would still have been answered 503 "try later"
-# and invited the retry storm this classifies away (#98338). ``expired_token`` (RFC 8628
-# device flow) is added on top.
+# Derived from the repo's canonical set, not restated: a local copy drifted once by omitting
+# ``refresh_token_reused``, which Portal returns when a rotated RT is replayed — a dead grant
+# answered 503 "try later" invites exactly the retry storm this removes (#98338).
+# ``expired_token`` (RFC 8628 device flow) is added on top.
 from hermes_cli.auth import _OAUTH_GRANT_DEAD_CODES
 
 _PERMANENT_TOKEN_ERRORS = _OAUTH_GRANT_DEAD_CODES | {"expired_token"}
