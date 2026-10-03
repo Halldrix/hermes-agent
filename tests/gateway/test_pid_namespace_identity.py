@@ -163,19 +163,18 @@ def _memo_read_and_probe_are_one_critical_section(monkeypatch):
     """Probe the window between "memo read" and "decision", from a peer thread.
 
     The finding is that those two were not one atomic step. This drives the reader's own probe
-    and, from a peer thread, attempts a retain WHILE that probe is in flight. The peer records
-    whether it got in. Under a synchronized decision the reader holds the lock across the probe,
-    so the peer cannot retain until the reader has decided -- which is the property, stated as a
-    fact the test can assert rather than as a schedule it hopes for.
+    and, from a peer thread, retains a definite namespace WHILE that probe is in flight. Thread
+    events fix the ordering rather than a sleep, so the case does not depend on timing luck.
     """
     pns._clear_local_namespace_cache()
     reader_inside_probe = threading.Event()
     peer_finished = threading.Event()
-    observed = {"peer_retained": False, "reader_value": None}
+    observed = {"peer_retained": False, "reader_value": None, "foreign_still_refused": None}
 
     def readlink(path):
         reader_inside_probe.set()
-        # Stay inside the probe long enough for the peer's attempt to be observable.
+        # Stay inside the probe until the peer's attempt is done, then FAIL: this caller starts
+        # from an empty memo and cannot recover on its own, which is the finding's state.
         peer_finished.wait(timeout=5)
         raise OSError()
 
@@ -184,7 +183,7 @@ def _memo_read_and_probe_are_one_critical_section(monkeypatch):
     def peer():
         try:
             assert reader_inside_probe.wait(timeout=5)
-            pns._set_local_namespace(pns.LocalPidNamespace(id="4026531836", supported=True))
+            pns._set_local_namespace(_LIVE)
             observed["peer_retained"] = True
         finally:
             peer_finished.set()
@@ -193,6 +192,10 @@ def _memo_read_and_probe_are_one_critical_section(monkeypatch):
     thread.start()
     try:
         observed["reader_value"] = pns.local_pid_namespace()
+        # The raced value is what feeds the unlink policy, so assert the consequence while the
+        # memo still holds the peer's namespace. Checked here rather than in a separate case: a
+        # standalone predicate test passes with this fix reverted and proves nothing about it.
+        observed["foreign_still_refused"] = pns.record_unlinkable_from(_OTHER_NS)
     finally:
         thread.join(timeout=10)
         pns._clear_local_namespace_cache()
@@ -216,28 +219,14 @@ def test_a_concurrent_retain_cannot_slip_past_the_memo_decision(monkeypatch):
     assert observed["peer_retained"] is True, (
         "the peer never managed to retain, so this case is not exercising the race"
     )
-    assert observed["reader_value"] == pns.LocalPidNamespace(id="4026531836", supported=True), (
+    assert observed["reader_value"] == _LIVE, (
         f"the raced call returned {observed['reader_value']} instead of the namespace the peer "
         "had already retained"
     )
-
-
-def test_a_foreign_record_stays_unlinkable_refused_once_the_namespace_is_known(monkeypatch):
-    """The policy the concurrency hole would have opened, pinned independently of any schedule.
-
-    Once this process can name its own namespace, a canonical FOREIGN stamp must be reported as
-    one that must stay. This asserts the predicate directly so the guarantee does not rest on a
-    thread schedule the test does not control.
-    """
-    peer_value = pns.LocalPidNamespace(id="4026531836", supported=True)
-    pns._set_local_namespace(peer_value)
-    try:
-        assert pns.record_unlinkable_from("4026532999") is True, (
-            "a canonical foreign record was reported unlinkable because our own namespace was "
-            "read as unresolved"
-        )
-    finally:
-        pns._clear_local_namespace_cache()
+    assert observed["foreign_still_refused"] is True, (
+        "a canonical foreign record became unlinkable because our own namespace was read as "
+        "unresolved"
+    )
 
 
 def test_local_namespace_is_stable_and_known_on_this_linux_host():

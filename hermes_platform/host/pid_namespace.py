@@ -80,10 +80,11 @@ def _resolve_local_pid_namespace() -> LocalPidNamespace:
 
 
 #: Process-local memo for a definite observation. ``functools.cache`` cannot be written to, so a
-#: known answer needs an explicit home of its own. The lock is held across the read AND the store,
-#: not just the pointer swap: a caller that reads an empty memo and then resolves could otherwise
-#: return an unresolved value that another thread had already made definite, and that stale unknown
-#: reaches ``record_unlinkable_from`` as "this record is a foreign namespace, delete it".
+#: known answer needs an explicit home of its own. The lock covers the memo check and the probe as
+#: one step, so concurrent cold callers share a single readlink. It does NOT by itself stop a
+#: retain from landing mid-call: a caller that ends up unresolved re-reads the pointer before
+#: returning, because a stale unknown reaches ``record_unlinkable_from`` as "cannot read a claim,
+#: so unlink" and makes a KNOWN foreign record eligible for cleanup.
 _local_namespace_memo: Optional[LocalPidNamespace] = None
 _local_namespace_lock = threading.Lock()
 
@@ -92,8 +93,8 @@ def _set_local_namespace(value: LocalPidNamespace) -> None:
     """Retain a definite observation in the memo.
 
     Only ever called with a ``known`` value: memoizing ``_UNRESOLVED`` is precisely the bug this
-    memo replaces, since it would pin the process to UNKNOWN for its whole life. Both call sites
-    guard on ``.known`` before getting here, so an unresolved result stays absent and retryable.
+    memo replaces, since it would pin the process to UNKNOWN for its whole life. The caller guards
+    on ``.known`` before getting here, so an unresolved result stays absent and retryable.
     """
     global _local_namespace_memo
     with _local_namespace_lock:
@@ -105,18 +106,18 @@ def _local_pid_namespace_cached() -> LocalPidNamespace:
 
     Retention does not depend on which call observed a definite answer: a first read lands here
     and is retained, while ``local_pid_namespace``'s in-call retry retains its own value and
-    returns it directly rather than routing a second read back through here.
+    returns it directly. Its unresolved branch does not come back through here -- it takes the
+    memo pointer, so a failed probe never costs a third readlink.
     """
     global _local_namespace_memo
     with _local_namespace_lock:
         memo = _local_namespace_memo
         if memo is not None:
             return memo
-        # Resolve UNDER the lock: an unresolved read is not retained, so two threads could
-        # otherwise both miss the memo, both fail their reads, and both return a stale unknown
-        # while a third had already retained the real id. Holding the lock across the read makes
-        # "check the memo, then probe" one atomic step, so a probe only happens while the memo
-        # is genuinely empty and a concurrent retain cannot slip past the decision.
+        # Probe UNDER the lock so "check the memo, then probe" is one step: concurrent cold
+        # callers make one probe between them instead of each paying their own. It does NOT stop a
+        # retain from landing while this caller is still probing -- `local_pid_namespace`'s
+        # unresolved branch is what catches that, by re-reading the memo before returning.
         resolved = _resolve_local_pid_namespace()
         if resolved.known:
             _local_namespace_memo = resolved
@@ -151,9 +152,12 @@ def local_pid_namespace() -> LocalPidNamespace:
         # Unknown stays retryable, but a peer thread may have retained a definite namespace while
         # this probe was in flight. Returning our own failed read would hand that caller a stale
         # unknown, and `record_unlinkable_from` reads an unnameable own-namespace as "cannot read a
-        # claim, so unlink" -- so a KNOWN foreign record becomes eligible for cleanup. Re-read the
-        # memo (synchronized) before giving up on it.
-        return _local_pid_namespace_cached()
+        # claim, so unlink" -- so a KNOWN foreign record becomes eligible for cleanup. Take the memo
+        # POINTER, not another probe: a third readlink here would only re-discover the failure.
+        global _local_namespace_memo
+        with _local_namespace_lock:
+            memo = _local_namespace_memo
+        return memo if memo is not None else retry
     # Retain the value we ALREADY obtained. Clearing a memo and re-reading /proc re-introduces
     # the very race this branch exists to close: if that extra read fails on its own transient,
     # the "promotion" stores _UNRESOLVED and pins the process to UNKNOWN for life -- and it
