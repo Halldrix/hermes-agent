@@ -718,7 +718,11 @@ def _dispatch_authorized_once(
         resolve = lambda: _pre_tool_block(agent, ref)  # noqa: E731
         block_message, ref.args = resolve() if authorization_gate is None else authorization_gate.run(resolve)
         state.args = ref.args
-    block_body = None if block_message is None else {"error": block_message}
+    if block_message is not None and block_error_type == "fallback_route_block":
+        from agent.fallback_route_gate import _FALLBACK_ROUTE_BLOCK_ERROR
+        block_body = {"error": _FALLBACK_ROUTE_BLOCK_ERROR, "message": block_message}
+    else:
+        block_body = None if block_message is None else {"error": block_message}
 
     # Checked once, after plugin modify hooks (which may replace arguments) and
     # before guardrails or real dispatch: a copied compression marker in an

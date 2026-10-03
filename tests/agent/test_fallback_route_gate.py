@@ -18,7 +18,7 @@ import pytest
 from run_agent import AIAgent
 
 
-def _make_agent() -> AIAgent:
+def _make_agent(fallback_model=None) -> AIAgent:
     tool_defs = [
         {
             "type": "function",
@@ -42,6 +42,7 @@ def _make_agent() -> AIAgent:
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
+            fallback_model=fallback_model,
         )
     agent.client = MagicMock()
     agent._flush_messages_to_session_db = MagicMock()
@@ -187,7 +188,7 @@ def test_gate_classification_decisions():
         assert fallback_route_block_reason(acting, "execute_code", "nous", "glm") is None
 
 
-def _make_agent_real_config() -> AIAgent:
+def _make_agent_real_config(fallback_model=None) -> AIAgent:
     """Like _make_agent but WITHOUT patching the config readers: the real
     ``load_config_readonly`` must resolve the key from the sandboxed ``HERMES_HOME``
     (root rubric: config propagation is E2E'd with real imports, not mocks)."""
@@ -241,3 +242,71 @@ def test_real_config_file_arms_the_gate_end_to_end(tmp_path):
     blocked = next(m for m in messages if m["tool_call_id"] == "call-write")
     assert "automatic provider fallback" in blocked["content"]
     assert any(kwargs.get("error_type") == "fallback_route_block" for kwargs in post_calls)
+
+def _armed_agent():
+    """A REAL AIAgent with the automatic-fallback route armed — the same construction main's own
+    ``test_primary_runtime_restore`` uses, because ``restore_primary_runtime`` reads a full
+    ``_primary_runtime`` snapshot and a hand-rolled one would decline before reaching the clear."""
+    agent = _make_agent()
+    agent._fallback_activated = True
+    agent._provider_fallback_active = True
+    agent._provider_fallback_route = (agent.model, agent.provider)
+    return agent
+
+
+def test_deliberate_switch_model_clears_the_gate():
+    """``/model`` is a route the user picked, so the gate must never restrict it. Driven through
+    the real switch_model: without this, dropping the clear inside _finish_switch — which would
+    freeze every side-effecting tool until some later restore — still shows every other test green.
+    """
+    agent = _armed_agent()
+
+    with patch("agent.process_bootstrap.OpenAI", return_value=MagicMock()):
+        agent.switch_model("openai/gpt-5.6-terra", "openai", api_key="sk-test-1234567890")
+
+    assert agent._provider_fallback_active is False, "deliberate /model switch left the route gate armed"
+    assert agent._provider_fallback_route is None
+
+
+def test_primary_restore_clears_the_gate():
+    """The other clear site. A stale True here blocks side-effecting tools on the user's OWN
+    provider — the more damaging direction, and the one no other test in this file reaches."""
+    agent = _armed_agent()
+
+    with patch("agent.process_bootstrap.OpenAI", return_value=MagicMock()):
+        restored = agent._restore_primary_runtime()
+
+    assert restored, "restore declined on a healthy agent — the assertion below would be vacuous"
+    assert agent._provider_fallback_active is False, (
+        "primary restore left the route gate armed on the user's own route"
+    )
+    assert agent._provider_fallback_route is None
+
+
+
+def test_automatic_fallback_arms_the_gate_even_when_a_later_step_raises():
+    """The gate must be armed BEFORE the route swap, not after: every call between them can
+    raise, and that except continues to the next chain entry, so the turn goes on serving the
+    fallback route with the gate still OFF (#117495).
+
+    ``reset_codex_reasoning_replay`` is the rigged call because it sits inside the window AND
+    genuinely raises — patching ``__call__`` on a plain function does not intercept a direct
+    call, and ``_reset_stale_streak`` is wrapped in ``contextlib.suppress`` so it cannot raise
+    out. Neither is usable as a fault injector. With the raise absorbed by
+    ``try_activate_fallback``'s own except, the assertion is on the resulting state.
+    """
+    agent = _make_agent(
+        fallback_model={"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}
+    )
+    assert agent._provider_fallback_active is False, "precondition: the gate starts disarmed"
+
+    with (
+        patch("agent.auxiliary_client.resolve_provider_client", return_value=(MagicMock(), None)),
+        patch("agent.turn_recovery.reset_codex_reasoning_replay", side_effect=RuntimeError("boom")),
+    ):
+        agent._try_activate_fallback()
+
+    assert agent._provider_fallback_active is True, (
+        "the route swap ran but the gate stayed OFF — side-effecting tools would execute on a "
+        "route the user never selected (#117495)"
+    )
