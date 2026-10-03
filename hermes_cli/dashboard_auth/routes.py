@@ -426,8 +426,12 @@ def _prune_refresh_buckets(cutoff: float) -> None:
 
 
 def _native_refresh_rate_limited(refresh_token: str) -> tuple[bool, float]:
-    """``(limited, retry_after_sec)``; records the attempt when allowed. An empty
-    token shares one bucket — fail-safe toward throttling."""
+    """``(limited, retry_after_sec)``; records the attempt when allowed.
+
+    Callers must reject an empty token before calling: the HTTP route answers 400 first, so
+    the empty string is unreachable from the wire. A direct caller passing "" would get the
+    hash of an empty token — one shared bucket, which throttles rather than bypasses.
+    """
     now = time.monotonic()
     cutoff = now - _REFRESH_RATE_WINDOW_SEC
     with _refresh_attempts_lock:
