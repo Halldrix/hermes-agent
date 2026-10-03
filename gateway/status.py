@@ -2246,7 +2246,7 @@ def get_running_pid(
                 if record is None:
                     continue
                 if not pid_checkable_from(record.get("pidns")):
-                    saw_live_pid = True  # unknown owner identity cannot negate a held lock
+                    saw_live_pid = True  # unprovable owner: not provably dead, so keep the lock
                     continue
                 # Qualified identity, so a local liveness answer is about our own owner. Any
                 # stamp `pid_checkable_from` refuses (foreign, unresolved, unnameable) already

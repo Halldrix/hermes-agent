@@ -100,8 +100,9 @@ def _set_local_namespace(value: LocalPidNamespace) -> None:
 def _local_pid_namespace_cached() -> LocalPidNamespace:
     """The retained observation, or a fresh read that is retained when it is definite.
 
-    Every definite answer passes through here — first read, later call, or a retry that
-    recovered — so retention does not depend on which path happened to observe it.
+    Retention does not depend on which call observed a definite answer: a first read lands here
+    and is retained, while ``local_pid_namespace``'s in-call retry retains its own value and
+    returns it directly rather than routing a second read back through here.
     """
     memo = _local_namespace_memo
     if memo is not None:

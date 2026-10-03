@@ -546,7 +546,7 @@ def test_a_held_lock_survives_a_dead_local_pid_we_cannot_qualify(tmp_path, monke
     # unprovable owner and an unlinked lock. A foreign stamp is already refused by the unlink
     # policy, so it cannot witness this.
     _set_local_namespace(monkeypatch, _UNKNOWN)
-    absent_pid = 4194303  # far above any live pid_max here; the point is that it is gone
+    absent_pid = 2 ** 22 + 12345  # beyond the default pid_max, so never allocatable here
     assert not status._pid_exists(absent_pid), "the control PID must not exist locally"
     record = {
         "pid": absent_pid, "kind": "hermes-gateway", "argv": ["hermes", "gateway", "run"],
