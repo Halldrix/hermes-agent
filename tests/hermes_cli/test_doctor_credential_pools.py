@@ -42,7 +42,10 @@ def test_benched_pool_reports_wait_and_restart_hint(capsys):
     assert "all 1 entries benched" in out
     assert "restart will NOT clear it" in out
     assert len(finding.manual_issues) == 1, finding.manual_issues
-    assert "hermes auth reset openrouter" in finding.manual_issues[0]
+    # A 402 is billing: `hermes auth reset` clears the local stamp and the next call
+    # re-402s, so advising it here would be a non-remedy.
+    assert "add credits" in finding.manual_issues[0], finding.manual_issues[0]
+    assert "hermes auth add openrouter" in finding.manual_issues[0], finding.manual_issues[0]
 
 
 def test_dead_pool_without_recovery_time_is_an_issue(capsys):
@@ -53,7 +56,9 @@ def test_dead_pool_without_recovery_time_is_an_issue(capsys):
     out = capsys.readouterr().out
     assert "all 1 entries unavailable, no recovery time" in out
     assert len(finding.manual_issues) == 1, finding.manual_issues
-    assert "hermes auth reset openrouter" in finding.manual_issues[0]
+    # DEAD never re-enters via TTL — only a write-side re-auth clears it.
+    assert "DEAD never recovers on its own" in finding.manual_issues[0], finding.manual_issues[0]
+    assert "hermes auth add openrouter" in finding.manual_issues[0], finding.manual_issues[0]
 
 
 def test_available_pool_reports_ok_without_issues(capsys):
@@ -133,14 +138,15 @@ def test_mixed_dead_and_exhausted_reports_recovery_time(capsys):
 
 
 
-def test_partially_burned_pool_with_unhydrated_env_ref_stays_silent(capsys):
+def test_partially_burned_pool_reports_the_burn_not_the_env_reference(capsys):
     """The #119533 false-burn guard, at the shape that actually regressed.
 
     Two entries: one exhausted (timed) and one env-sourced reference whose secret does not
-    resolve in this process (``access_token: ""``, no burn stamp). ``burned < total`` is TRUE
-    here, so the pool must print NOTHING. Dropping ``burned < total`` makes this pool report
-    "all 2 entries benched" plus a manual issue — accusing a healthy env reference of being
-    burned, which is exactly the false burn the issue was filed about."""
+    resolve in this process (``access_token: ""``, no burn stamp). The unhydrated reference
+    must NOT be counted as burned, and the pool must NOT be reported as fully benched — but
+    the one real burn must still surface. The old guard (``burned < total`` -> silence) hid
+    it entirely; dropping the guard entirely accused the env reference of being burned.
+    The correct answer is in between, and this pins it."""
     _write_openrouter_pool([
         {**_BASE, "last_status": "exhausted", "last_status_at": time.time(), "last_error_code": 429},
         {
@@ -148,6 +154,25 @@ def test_partially_burned_pool_with_unhydrated_env_ref_stays_silent(capsys):
             "source": "env:OPENROUTER_API_KEY", "extra": {"secret_fingerprint": "abc123"},
         },
     ])
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    finding = _check_credential_pools(False)
+    out = capsys.readouterr().out
+    assert "Credential pool: openrouter" in out, "the real burn must not be hidden:\n%s" % out
+    assert "1 of 2 entries" in out, out
+    assert "1 unavailable with no burn state" in out, out
+    assert "all 2 entries" not in out, "the env reference must not be counted as burned:\n%s" % out
+    assert len(finding.manual_issues) == 1, finding.manual_issues
+    assert "1 of 2 entries" in finding.manual_issues[0], finding.manual_issues[0]
+
+
+def test_fully_unhydrated_pool_stays_silent(capsys):
+    """No burn state at all: an env reference that cannot resolve here is a key-presence
+    question, owned by the env/connectivity checks. Reporting it would be a false burn."""
+    _write_openrouter_pool([{
+        **_BASE, "access_token": "",
+        "source": "env:OPENROUTER_API_KEY", "extra": {"secret_fingerprint": "abc123"},
+    }])
     from hermes_cli.doctor_pools import _check_credential_pools
 
     finding = _check_credential_pools(False)
@@ -246,3 +271,17 @@ def test_programming_bug_is_not_disguised_as_unreadable(capsys, monkeypatch):
     assert "unreadable" not in out, "a programming bug must not be reported as unreadable:\n%s" % out
     assert not finding.manual_issues or all("unreadable" not in i for i in finding.manual_issues), \
         finding.manual_issues
+
+
+def test_burned_pool_is_warned_never_green(capsys):
+    """Severity is part of the contract: a fully benched pool must render as a warning.
+    ``check_ok`` here would show a dead provider as healthy green."""
+    _write_openrouter_pool([{
+        **_BASE, "last_status": "exhausted", "last_status_at": time.time(), "last_error_code": 429,
+    }])
+    from hermes_cli.doctor_pools import _check_credential_pools
+
+    _check_credential_pools(False)
+    row = [l for l in capsys.readouterr().out.splitlines() if "Credential pool: openrouter" in l]
+    assert row, "no row rendered"
+    assert "⚠" in row[0] and "✓" not in row[0], "a burned pool must warn, not pass:\n%s" % row[0]
