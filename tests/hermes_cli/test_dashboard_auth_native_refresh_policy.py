@@ -21,6 +21,8 @@ Run: scripts/run_tests.sh tests/hermes_cli/test_dashboard_auth_native_refresh_po
 
 from __future__ import annotations
 
+import hashlib
+
 import json
 from unittest.mock import MagicMock, patch
 
@@ -193,6 +195,68 @@ class TestRetryAfterIsDeliveredNotJustComputed:
         assert int(refused.headers["Retry-After"]) > 1, (
             "a 60s window must not report a 1s wait"
         )
+
+
+class TestEvictionDoesNotForgiveAStorm:
+    """A flood of one-shot credentials must not reset a storming client's budget.
+
+    Evicting oldest-inserted drops whichever bucket arrived first — which is the one
+    spending its budget — so a flood of throwaway tokens could forgive a client
+    mid-attack and hand it a fresh allowance.
+    """
+
+    def test_storming_credential_keeps_its_budget_across_eviction(self, storm_client, monkeypatch):
+        from hermes_cli.dashboard_auth import routes as routes_mod
+
+        client, provider = storm_client
+        monkeypatch.setattr(routes_mod, "_REFRESH_RATE_MAX_ATTEMPTS", 5)
+        monkeypatch.setattr(routes_mod, "_REFRESH_RATE_WINDOW_SEC", 600.0)
+        monkeypatch.setattr(routes_mod, "_REFRESH_RATE_MAX_BUCKETS", 8)
+        _reset_native_refresh_rate_limit()
+
+        def _refresh(token):
+            return client.post("/auth/native/refresh",
+                               json={"refresh_token": token, "provider": "stub"})
+
+        # The stormer arrives first and spends its entire budget, so every bucket it
+        # competes with holds a single one-shot attempt. Oldest-inserted eviction picks it
+        # precisely because it arrived first; depth-preferring eviction does not, because
+        # it is spending far more than anything else in the table.
+        for _ in range(5):
+            assert _refresh("stormer").status_code == 401
+        for i in range(40):  # one-shot tokens push the table past the cap
+            _refresh("oneshot-%d" % i)
+
+        r = _refresh("stormer")
+        assert r.status_code == 429, (
+            "the storming credential's budget was reset by bucket eviction (status %s)"
+            % r.status_code
+        )
+        # Still throttled directly at the limiter: the route response is not what carried it.
+        assert _native_refresh_rate_limited("stormer")[0], (
+            "the limiter forgot the storming credential"
+        )
+
+
+class TestBucketKeyHandlesUntrustedBytes:
+    """The bucket key hashes whatever string arrives; none of it may raise here.
+
+    Note the endpoint still has a pre-existing 500 on a lone surrogate: main's
+    refresh_singleflight._refresh_provider encodes the token before this runs, so the
+    request never reaches the limiter. That is upstream's bug, tracked separately; this
+    guard keeps the limiter's own keying total.
+    """
+
+    def test_bucket_key_survives_a_lone_surrogate(self):
+        from hermes_cli.dashboard_auth.routes import _refresh_token_bucket
+
+        assert len(_refresh_token_bucket("\ud800")) == 64
+
+    def test_valid_tokens_hash_unchanged(self):
+        from hermes_cli.dashboard_auth.routes import _refresh_token_bucket
+
+        assert _refresh_token_bucket("normal-token") == hashlib.sha256(
+            b"normal-token").hexdigest()
 
 
 class TestNativeRefreshThrottle:

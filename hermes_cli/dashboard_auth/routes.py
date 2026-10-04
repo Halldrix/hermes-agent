@@ -407,7 +407,7 @@ _REFRESH_RATE_WINDOW_SEC = 60.0
 # storming client a fresh allowance mid-attack.
 #
 # Scope, stated precisely: this bounds a REPEATED credential. A client presenting a fresh
-# token每 attempt gets a fresh 1-attempt bucket, so rotation is bounded in MEMORY only,
+# token per attempt gets a fresh 1-attempt bucket, so rotation is bounded in MEMORY only,
 # not in request rate. Rate-limiting rotation needs a per-IP signal.
 _REFRESH_RATE_MAX_BUCKETS = 4096
 _refresh_attempts: Dict[str, Deque[float]] = defaultdict(deque)
@@ -415,8 +415,15 @@ _refresh_attempts_lock = threading.Lock()
 
 
 def _refresh_token_bucket(refresh_token: str) -> str:
-    """Bucket key for a presented refresh token: hex SHA-256, never the token."""
-    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+    """Bucket key for a presented refresh token: hex SHA-256, never the token.
+
+    ``surrogatepass`` because a lone surrogate survives ``json.loads`` and pydantic's
+    dict validation (pydantic only rejects it when parsing raw JSON text), so a plain
+    ``encode("utf-8")`` raised ``UnicodeEncodeError`` from the request handler — a 500
+    on an unauthenticated endpoint. Valid tokens hash identically either way.
+    """
+    return hashlib.sha256(
+        refresh_token.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _prune_refresh_buckets(cutoff: float) -> None:
