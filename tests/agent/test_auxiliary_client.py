@@ -5615,3 +5615,81 @@ class TestPreserveNamedCustomProviderWithBaseUrl:
             )
 
         assert resolved_provider == "xai-oauth"
+
+
+class TestNullNeverStringifiedAtAnyReader:
+    """#100835: a YAML null reached four readers as the literal string "None".
+
+    The auxiliary task-config block was fixed first; these pin the three other call
+    sites that read the same ``auxiliary.<task>`` shape, so the fix cannot regress
+    into "one call site fixed, siblings left broken".
+    """
+
+    def test_gateway_bridge_exports_no_literal_none(self):
+        import os
+
+        from gateway.run import _bridge_auxiliary_config_to_env
+
+        for key in list(os.environ):
+            if key.startswith("AUXILIARY_"):
+                del os.environ[key]
+        _bridge_auxiliary_config_to_env({
+            "vision": {"provider": "openai", "model": None,
+                       "api_key": None, "base_url": None},
+        })
+        # A literal "None" here is read as a model id and an API key downstream.
+        for suffix in ("MODEL", "API_KEY", "BASE_URL"):
+            name = "AUXILIARY_VISION_" + suffix
+            assert os.environ.get(name) is None, "%s = %r" % (name, os.environ.get(name))
+        assert os.environ.get("AUXILIARY_VISION_PROVIDER") == "openai"
+
+    def test_background_review_does_not_resolve_a_provider_named_none(self):
+        """A null provider used to resolve to the string "None", and the guard at
+        background_review.py then saw ('None' is not None and 'None' != 'auto') — routing
+        background review to a provider literally named None."""
+        from agent import background_review as br
+
+        class _Agent:
+            provider = "openai"
+            model = "gpt-5"
+            _credential_pool = None
+            request_overrides = {}
+            max_tokens = None
+            acp_command = None
+            acp_args = []
+
+            @staticmethod
+            def _current_main_runtime():
+                return {"api_mode": "chat_completions", "base_url": None,
+                        "api_key": None, "credential_pool": None,
+                        "request_overrides": {}, "max_tokens": None,
+                        "command": None, "args": [], "routed": False}
+
+        out = br._resolve_review_runtime(_Agent(), {"provider": None, "model": None,
+                                                    "base_url": None, "api_key": None})
+        # A null task config means "inherit the parent runtime", never a literal.
+        assert out["provider"] == "openai", out
+        assert out["model"] == "gpt-5", out
+        assert out["routed"] is False, (
+            "background review was routed to a provider named 'None': %r" % out
+        )
+        for key in ("provider", "model", "base_url", "api_key"):
+            assert out[key] != "None", "%s resolved to the literal 'None'" % key
+
+    @pytest.mark.parametrize("value", [None, "", "   ", "null", "NULL", "None"])
+    def test_curator_slot_credentials_are_none_not_the_string(self, value):
+        from utils import normalize_config_string
+
+        api_key, base_url = (
+            normalize_config_string(v) for v in (value, value))
+        assert api_key is None and base_url is None
+
+    def test_a_real_value_still_survives_every_reader(self):
+        """The other direction: the normalizer must not eat legitimate configuration."""
+        from utils import normalize_config_string
+
+        assert normalize_config_string("  gpt-5  ") == "gpt-5"
+        assert normalize_config_string("https://api.example.com/v1") == "https://api.example.com/v1"
+        # Exact-token match only: a name merely containing the token survives.
+        assert normalize_config_string("none-model") == "none-model"
+        assert normalize_config_string("nulls") == "nulls"

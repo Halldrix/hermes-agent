@@ -41,6 +41,7 @@ from agent.codex_headers import (
 )
 from agent.codex_runtime import _codex_event_has_content
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
+from utils import normalize_config_string
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -128,7 +129,7 @@ from agent.auxiliary_unavailable import (
     AuxiliaryClientUnavailable, clear_nous_credential_failure, missing_provider_credentials_message,
     nous_credential_failure_detail, record_nous_credential_failure)
 from hermes_constants import OPENROUTER_BASE_URL, hermes_home_key
-from utils import base_url_host_matches, base_url_hostname, base_url_origin, env_float, is_truthy_value, model_forces_max_completion_tokens, normalize_proxy_env_vars
+from utils import base_url_host_matches, base_url_hostname, base_url_origin, env_float, is_truthy_value, model_forces_max_completion_tokens, normalize_proxy_env_vars, normalize_config_string
 
 logger = logging.getLogger(__name__)
 
@@ -6199,31 +6200,6 @@ def _named_custom_provider_present(name: str) -> bool:
         return False
 
 
-def _normalize_optional_string(value: object) -> Optional[str]:
-    """Normalize an optional auxiliary-task config string.
-
-    YAML ``null`` and empty / whitespace-only / null-ish values all mean
-    "unset": return None. Otherwise return the stripped string.
-
-    Note on the null-ish literals: this helper treats the case-insensitive
-    strings ``"null"`` / ``"None"`` as unset. A real provider/model name will
-    never collide with either of those tokens in a meaningful way, so the
-    over-match is intentional and documented here. If a future provider ever
-    legitimately uses one of those tokens, this helper must not be applied to
-    that field.
-
-    A previous version used ``str(task_config.get(field, "")).strip() or None``,
-    which stringified the YAML ``null`` token into the string "None" and sent
-    that to the provider as a model ID / base URL / API key (#100835).
-    """
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s or s.lower() in {"none", "null"}:
-        return None
-    return s
-
-
 def _resolve_task_provider_model(
     task: str = None, provider: str = None, model: str = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -6237,12 +6213,12 @@ def _resolve_task_provider_model(
     cfg_provider = cfg_model = cfg_base_url = cfg_api_key = resolved_api_mode = None
     if task:
         task_config = _get_auxiliary_task_config(task)
-        cfg_provider = _normalize_optional_string(task_config.get("provider"))
-        cfg_model = _normalize_optional_string(task_config.get("model"))
-        cfg_base_url = _normalize_optional_string(task_config.get("base_url"))
-        cfg_api_key = _normalize_optional_string(task_config.get("api_key"))
+        cfg_provider = normalize_config_string(task_config.get("provider"))
+        cfg_model = normalize_config_string(task_config.get("model"))
+        cfg_base_url = normalize_config_string(task_config.get("base_url"))
+        cfg_api_key = normalize_config_string(task_config.get("api_key"))
         if not cfg_api_key:  # key_env → env var when api_key is not set directly
-            cfg_key_env = _normalize_optional_string(
+            cfg_key_env = normalize_config_string(
                 task_config.get("key_env") or task_config.get("api_key_env")
             ) or ""
             if cfg_key_env:
@@ -6250,7 +6226,7 @@ def _resolve_task_provider_model(
         # Normalize YAML null/empty literals to None first, then canonicalize user-facing
         # spellings (``responses``, ``anthropic``, …) so downstream compares transport names
         # only (#39750, #100835).
-        _raw_api_mode = _normalize_optional_string(task_config.get("api_mode"))
+        _raw_api_mode = normalize_config_string(task_config.get("api_mode"))
         resolved_api_mode = _canonical_api_mode(_raw_api_mode or "").lower() or None
     # 'auto' is a sentinel ("inherit / auto-detect"), not a model id — leaking it to the wire
     # yields a 200 with an error-text body that consumers accept as output. The explicit `model`
