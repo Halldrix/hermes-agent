@@ -430,8 +430,12 @@ def _prune_breaker_buckets(now: float) -> None:
     if len(_breaker_state) <= _BREAKER_MAX_BUCKETS:
         return
     cutoff = now - _BREAKER_WINDOW_SEC
+    # Idle AND closed. `not st["fails"]` can never hold: every bucket is created by
+    # _breaker_record, which appends before any prune can run — that predicate made this
+    # sweep delete nothing on every request at the cap (measured: 0 deletions over 9000
+    # records) while still allocating a cap-sized list each time.
     for key in [k for k, st in _breaker_state.items()
-                if not st["fails"] and (st["open_at"] or 0) < cutoff]:
+                if st["fails"][-1] < cutoff and st["open_at"] is None]:
         del _breaker_state[key]
         if len(_breaker_state) <= _BREAKER_MAX_BUCKETS:
             return
@@ -456,7 +460,10 @@ def _breaker_check(refresh_token: str, ip: str) -> tuple[bool, str, float]:
                 # A probe whose record never landed (crash between check and
                 # record) must not wedge the credential: expire it after a
                 # full cooldown and admit exactly one fresh probe.
-                if now - (st.get("probe_at") or now) < _BREAKER_COOLDOWN_SEC:
+                # probe_at is always set together with probing; a bucket that somehow
+                # lost it must admit a probe rather than refuse forever — that wedge is
+                # the exact failure this branch exists to prevent.
+                if st["probe_at"] is not None and now - st["probe_at"] < _BREAKER_COOLDOWN_SEC:
                     return True, "breaker_open", 0.0
                 st["probing"] = False
             st["probing"] = True

@@ -18,6 +18,7 @@ Run: scripts/run_tests.sh tests/hermes_cli/test_dashboard_auth_native_refresh_br
 
 from __future__ import annotations
 
+import re
 import time
 
 import pytest
@@ -309,6 +310,87 @@ class TestBreakerContractGaps:
         retry_after = int(r.headers["Retry-After"])
         assert retry_after > 60, (
             "Retry-After=%d does not reflect a 3600s cooldown" % retry_after
+        )
+
+    def test_a_failed_probe_does_not_wedge_the_credential_forever(
+        self, breaker_client, monkeypatch
+    ):
+        """Two cooldowns, not one.
+
+        A half-open probe that fails re-arms the cooldown. If that path did not clear
+        `probing`, the stale-probe expiry would never be reached again and the credential
+        would be refused forever — the exact wedge this mechanism exists to prevent. The
+        existing re-arm test stops at "still refused" (with a long cooldown), which is also
+        what a wedge looks like, so only a SECOND elapsed cooldown tells them apart.
+        """
+        client, provider = breaker_client
+        for _ in range(3):
+            assert _refresh(client).status_code == 503
+        assert _refresh(client).json()["error"] == "breaker_open"
+        key = next(iter(routes_mod._breaker_state))
+        # Elapse the cooldown by age, not by shortening it: the stale-probe guard only
+        # engages while the cooldown is still long.
+        routes_mod._breaker_state[key]["open_at"] -= routes_mod._BREAKER_COOLDOWN_SEC + 1.0
+        assert _refresh(client).status_code == 503, "probe was not admitted"
+        # The probe resolved (transient failure), which re-arms the cooldown.
+        routes_mod._breaker_state[key]["open_at"] -= routes_mod._BREAKER_COOLDOWN_SEC + 1.0
+        r = _refresh(client)
+        assert r.json().get("error") != "breaker_open", (
+            "credential wedged: a failed probe left `probing` set, so the stale-probe "
+            "expiry never fires again"
+        )
+
+    def test_successful_refresh_from_a_storming_ip_is_admitted(
+        self, breaker_client, monkeypatch
+    ):
+        """Only TRANSIENT failures earn a storm entry.
+
+        A healthy upstream seeing more than _IP_STORM_MAX refreshes a minute is exactly
+        the NAT household this backstop must not punish: each of those attempts closes
+        its breaker and must leave the storm table untouched.
+        """
+        client, provider = breaker_client
+        monkeypatch.setattr(routes_mod, "_IP_STORM_MAX", 5)
+        provider.fail = False
+        for i in range(20):
+            assert _refresh(client, token=f"healthy-{i}").status_code == 401
+        assert not routes_mod._ip_transients, (
+            "%d storm entries earned by healthy traffic" % len(routes_mod._ip_transients)
+        )
+
+    def test_bucket_keys_never_contain_the_refresh_token(self):
+        """Both tables key on a SHA-256 hex digest, never the raw token: the state is
+        process-local and the audit log is append-only, so a leaked key would put a live
+        refresh token into a structure that can be logged."""
+        routes_mod._breaker_record("super-secret-rt-value", "10.0.0.1", "transient")
+        for key in routes_mod._breaker_state:
+            assert "super-secret" not in key, "bucket key leaks the raw token: %r" % key
+            assert re.fullmatch(r"[0-9a-f]{64}", key), "bucket key is not a hex digest: %r" % key
+
+    def test_idle_closed_credentials_are_evicted_before_open_ones(self, monkeypatch):
+        """The cap must prefer evicting an idle credential over an OPEN one.
+
+        Insertion order and age point opposite ways here: the open breaker is the older
+        entry, the idle credential is newer but its last failure is long past the window.
+        Plain FIFO keeps the dead weight and drops the credential that is actively
+        failing. Ordering the eviction by age is the whole point of the sweep.
+        """
+        monkeypatch.setattr(routes_mod, "_BREAKER_MAX_BUCKETS", 4)
+        # Older entry, actively OPEN: must survive.
+        for _ in range(3):
+            routes_mod._breaker_record("open-live", "10.0.0.1", "transient")
+        open_key = next(k for k, v in routes_mod._breaker_state.items() if v["open_at"])
+        # Newer entries that have gone quiet.
+        for name in ("idle-a", "idle-b", "idle-c", "idle-d"):
+            routes_mod._breaker_record(name, "10.0.0.1", "transient")
+        far_past = time.monotonic() - routes_mod._BREAKER_WINDOW_SEC - 60.0
+        for key in routes_mod._breaker_state:
+            if key != open_key:
+                routes_mod._breaker_state[key]["fails"][0] = far_past
+        routes_mod._breaker_check("probe-token", "10.0.0.1")  # admission path runs the prune
+        assert len(routes_mod._breaker_state) == 4
+        assert open_key in routes_mod._breaker_state, (
+            "the cap evicted an OPEN credential and kept idle ones"
         )
 
     def test_credential_table_stays_bounded(self):
