@@ -127,12 +127,15 @@ class TestCredentialBreaker:
         # upstream is reachable again, so the breaker closes.
         monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 0.0)
         provider.fail = False
-        assert _refresh(client, token="rt-valid-shape").status_code == 401
+        # Same credential that tripped the breaker. Probing with a *different* token
+        # never enters the open-bucket branch, so the assertion would hold even if the
+        # half-open admit path were deleted entirely.
+        assert _refresh(client).status_code == 401
         assert provider.refresh_calls > calls_at_open
         # Counter reset by the verdict: one fresh transient is a plain 503,
         # not a refusal.
         provider.fail = True
-        r = _refresh(client, token="rt-valid-shape")
+        r = _refresh(client)
         assert r.status_code == 503
         assert r.json().get("error") != "breaker_open"
 
@@ -146,8 +149,10 @@ class TestCredentialBreaker:
         monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 0.0)
         assert _refresh(client).status_code == 503
         assert provider.refresh_calls == calls_at_open + 1
-        # Cooldown re-armed by the failed probe: with a long cooldown the
-        # very next request is refused WITHOUT touching the provider.
+        # Cooldown re-armed by the failed probe. The cooldown must be back at its
+        # REAL value here: leaving it at 0.0 would admit a fresh probe, and leaving
+        # it long for both the trip and the re-arm makes the two indistinguishable
+        # (the assertion would hold even with the re-arm removed).
         monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 3600.0)
         assert _refresh(client).json()["error"] == "breaker_open"
         assert provider.refresh_calls == calls_at_open + 1
@@ -185,6 +190,22 @@ class TestIpStormBackstop:
         assert last.json()["error"] == "storm_backstop"
         # Bounded fan-out despite a fresh credential every attempt.
         assert provider.refresh_calls <= 5
+
+    def test_admitting_healthy_traffic_never_allocates_ip_buckets(self):
+        """The admission path must not create per-IP buckets.
+
+        `_breaker_check` reads the storm table for every admitted request. If that read
+        creates an entry, a fleet with no failures at all grows the table without bound,
+        and the cap/prune — which only runs from the transient-failure path in
+        `_breaker_record` — never gets a chance to fire. Rotating X-Forwarded-For reaches
+        it with no valid token: unbounded memory on a public endpoint, no rate limit.
+        """
+        for i in range(routes_mod._IP_TABLE_MAX + 500):
+            routes_mod._breaker_check(f"tok-{i}", f"10.{i // 250}.{i % 250}")
+        assert not routes_mod._ip_transients, (
+            "the admission path allocated %d storm buckets for traffic that never failed"
+            % len(routes_mod._ip_transients)
+        )
 
     def test_ip_table_stays_bounded(self):
         for i in range(routes_mod._IP_TABLE_MAX + 500):
@@ -230,3 +251,70 @@ class TestStaleProbeExpiry:
         r = _refresh(client)
         assert r.json()["error"] == "breaker_open"
         assert provider.refresh_calls == calls
+
+
+class TestBreakerContractGaps:
+    """Pins the claims the module docstring and the route make about the breaker
+    that the other tests exercise only as a side effect."""
+
+    def test_success_closes_the_breaker_after_it_opened(self, breaker_client, monkeypatch):
+        client, provider = breaker_client
+        for _ in range(3):
+            assert _refresh(client).status_code == 503
+        assert _refresh(client).json()["error"] == "breaker_open"
+        calls_at_open = provider.refresh_calls
+        # Upstream recovers; the very next attempt is admitted.
+        monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 0.0)
+        provider.fail = False
+        # The stub rejects this RT shape on its merits (401) — a provider verdict, which
+        # is what closes the breaker ("permanent": upstream answered).
+        assert _refresh(client).status_code == 401
+        assert provider.refresh_calls > calls_at_open
+        # Closed: the credential's breaker state is gone, and a long cooldown no longer
+        # refuses it — the re-arm that a failed probe installs is gone with it.
+        assert not routes_mod._breaker_state
+        monkeypatch.setattr(routes_mod, "_BREAKER_COOLDOWN_SEC", 3600.0)
+        r = _refresh(client)
+        assert r.json().get("error") != "breaker_open", (
+            "a successful verdict did not close the breaker"
+        )
+
+    def test_refusal_is_audited_with_its_reason(self, breaker_client, monkeypatch):
+        """The docstring promises refusals are audited so the storm stays visible in
+        dashboard-auth.log. Without this the refusals are invisible — the exact failure
+        #98338 reported, where a runaway client left no audit trace."""
+        from hermes_cli.dashboard_auth import audit as audit_mod
+
+        events = []
+        monkeypatch.setattr(routes_mod, "_audit",
+                            lambda request, event, **kw: events.append((event, kw)))
+        client, provider = breaker_client
+        for _ in range(3):
+            assert _refresh(client).status_code == 503
+        assert _refresh(client).json()["error"] == "breaker_open"
+        refusals = [kw.get("reason") for event, kw in events
+                    if getattr(event, "value", event) == "refresh_failure"]
+        assert "breaker_open" in refusals, (
+            "a breaker refusal was never audited: %r" % (events,)
+        )
+
+    def test_retry_after_reflects_the_remaining_cooldown(self, breaker_client, monkeypatch):
+        client, provider = breaker_client
+        for _ in range(3):
+            assert _refresh(client).status_code == 503
+        r = _refresh(client)
+        assert r.json()["error"] == "breaker_open"
+        # 3600s cooldown, tripped moments ago → the header must carry roughly that,
+        # not a constant. A hardcoded "1" satisfies a presence check but lies to the client.
+        retry_after = int(r.headers["Retry-After"])
+        assert retry_after > 60, (
+            "Retry-After=%d does not reflect a 3600s cooldown" % retry_after
+        )
+
+    def test_credential_table_stays_bounded(self):
+        for i in range(routes_mod._BREAKER_MAX_BUCKETS + 500):
+            routes_mod._breaker_check(f"tok-{i}", "10.0.0.1")
+            routes_mod._breaker_record(f"tok-{i}", "10.0.0.1", "transient")
+        # The record that trips the cap is itself inserted after the prune, so the table
+        # settles at cap+1; what matters is that it does not grow with the load.
+        assert len(routes_mod._breaker_state) <= routes_mod._BREAKER_MAX_BUCKETS + 1

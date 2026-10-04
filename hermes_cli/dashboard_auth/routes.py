@@ -402,6 +402,12 @@ def _reset_password_rate_limit() -> None:
 # Token rotation (fresh garbage per attempt) evades any per-credential budget,
 # so a coarse per-IP transient-failure count refuses fast past its own budget.
 # Process-local and best-effort (resets on restart), same as the limiters.
+#
+# Scope: the native refresh route only. The cookie gate (middleware._attempt_refresh)
+# reaches the same provider through refresh_session_coalesced with no breaker here,
+# and ProviderError is deliberately not cached there, so sequential requests with a
+# stale RT are not coalesced and can still storm. Covering it means an ip= kwarg and a
+# breaker exception on refresh_session_coalesced; tracked as follow-up.
 _BREAKER_FAIL_THRESHOLD = 3
 _BREAKER_WINDOW_SEC = 60.0
 _BREAKER_COOLDOWN_SEC = 30.0
@@ -456,7 +462,15 @@ def _breaker_check(refresh_token: str, ip: str) -> tuple[bool, str, float]:
             st["probing"] = True
             st["probe_at"] = now
             return False, "", 0.0
-        bucket = _ip_transients[ip or "_unknown_"]
+        # Read-only: this must NOT create a bucket. A defaultdict access here would
+        # allocate one entry per distinct client IP on every admitted request, and the
+        # cap/prune below only runs on the transient-failure path (_breaker_record) —
+        # so a healthy fleet's table would grow unbounded, and spoofed X-Forwarded-For
+        # would reach that path with no valid token at all. Buckets are created by
+        # _breaker_record, which is the only place a storm entry is earned.
+        bucket = _ip_transients.get(ip or "_unknown_")
+        if bucket is None:
+            return False, "", 0.0
         cutoff = now - _IP_STORM_WINDOW_SEC
         while bucket and bucket[0] < cutoff:
             bucket.popleft()

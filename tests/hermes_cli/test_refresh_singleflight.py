@@ -49,15 +49,13 @@ def isolated_registry():
 
     clear_providers()
     routes_mod._reset_native_refresh_breaker()
-    with replay._guard:
-        replay._cache.clear()
-        replay._flights.clear()
+    replay._reset_for_tests()
     yield
     clear_providers()
     routes_mod._reset_native_refresh_breaker()
     with replay._guard:
         assert not replay._flights
-        replay._cache.clear()
+    replay._reset_for_tests()
 
 
 @pytest.mark.parametrize("case", ["hint-fallback", "negative", "outage", "replacement",
