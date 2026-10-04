@@ -242,7 +242,7 @@ class TestMaxParallelLoggedUnconditionally:
     configuring max_parallel_jobs has no way to confirm it took effect
     (upstream #98338)."""
 
-    def test_logs_resolved_max_workers_with_verbose_false(self, tmp_path, monkeypatch, caplog):
+    def test_logs_resolved_max_workers_with_verbose_false(self, monkeypatch, caplog):
         import cron.scheduler as sched
 
         # Resolve a REAL configured value. Without this the expected string is always
@@ -286,8 +286,13 @@ class TestMaxParallelLoggedUnconditionally:
 
         sched._shutdown_parallel_pool()
 
-    def test_logs_unbounded_when_no_max_parallel_set(self, tmp_path, monkeypatch, caplog):
+    def test_logs_unbounded_when_no_max_parallel_set(self, monkeypatch, caplog):
         import cron.scheduler as sched
+
+        # Pin the precondition: this case asserts the NO-LIMIT arm, which is only
+        # meaningful when nothing is configured. Without the delete, a leaked env var
+        # from the ambient environment turns the expectation into a coincidence.
+        monkeypatch.delenv("HERMES_CRON_MAX_PARALLEL", raising=False)
 
         sched._parallel_pools.clear()
         sched._parallel_pool_max_workers.clear()
