@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
 from hermes_constants import get_hermes_home
-from utils import normalize_config_string
 from agent.skill_utils import get_disabled_skill_names
 from tools import skill_usage
 from utils import atomic_json_write, normalize_config_string

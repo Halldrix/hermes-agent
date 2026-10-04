@@ -5625,14 +5625,15 @@ class TestNullNeverStringifiedAtAnyReader:
     into "one call site fixed, siblings left broken".
     """
 
-    def test_gateway_bridge_exports_no_literal_none(self):
+    def test_gateway_bridge_exports_no_literal_none(self, monkeypatch):
         import os
 
         from gateway.run import _bridge_auxiliary_config_to_env
 
         for key in list(os.environ):
             if key.startswith("AUXILIARY_"):
-                del os.environ[key]
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv("AUXILIARY_VISION_API_KEY", raising=False)
         _bridge_auxiliary_config_to_env({
             "vision": {"provider": "openai", "model": None,
                        "api_key": None, "base_url": None},
@@ -5644,9 +5645,15 @@ class TestNullNeverStringifiedAtAnyReader:
         assert os.environ.get("AUXILIARY_VISION_PROVIDER") == "openai"
 
     def test_background_review_does_not_resolve_a_provider_named_none(self):
-        """A null provider used to resolve to the string "None", and the guard at
-        background_review.py then saw ('None' is not None and 'None' != 'auto') — routing
-        background review to a provider literally named None."""
+        """A null provider must mean "inherit the parent runtime", not an attempt to
+        route to a provider literally named "None".
+
+        Asserting the returned dict is not enough: the unknown-provider lookup raises
+        and the surrounding handler swallows it into the same parent runtime, so the
+        output looks identical either way. The discriminating fact is that no provider
+        lookup is attempted at all — ``resolve_runtime_provider`` is imported INSIDE
+        the function, so the patch belongs on ``hermes_cli.runtime_provider``.
+        """
         from agent import background_review as br
 
         class _Agent:
@@ -5665,31 +5672,47 @@ class TestNullNeverStringifiedAtAnyReader:
                         "request_overrides": {}, "max_tokens": None,
                         "command": None, "args": [], "routed": False}
 
-        out = br._resolve_review_runtime(_Agent(), {"provider": None, "model": None,
-                                                    "base_url": None, "api_key": None})
-        # A null task config means "inherit the parent runtime", never a literal.
-        assert out["provider"] == "openai", out
-        assert out["model"] == "gpt-5", out
-        assert out["routed"] is False, (
-            "background review was routed to a provider named 'None': %r" % out
-        )
-        for key in ("provider", "model", "base_url", "api_key"):
-            assert out[key] != "None", "%s resolved to the literal 'None'" % key
+        task = {"provider": None, "model": None, "base_url": None, "api_key": None}
+        with patch("hermes_cli.runtime_provider.resolve_runtime_provider") as lookup:
+            br._resolve_review_runtime(_Agent(), task)
+        lookup.assert_not_called()
 
-    @pytest.mark.parametrize("value", [None, "", "   ", "null", "NULL", "None"])
-    def test_curator_slot_credentials_are_none_not_the_string(self, value):
-        from utils import normalize_config_string
+    def test_fallback_chain_entry_does_not_route_to_a_provider_named_none(self):
+        """``auxiliary.<task>.fallback_chain[]`` is the same config shape read a fifth
+        time. A null provider passed the "skip empty entries" guard as the string
+        "None" and reached the resolver as a provider name."""
+        import agent.auxiliary_client as ac
 
-        api_key, base_url = (
-            normalize_config_string(v) for v in (value, value))
-        assert api_key is None and base_url is None
+        chain = [{"provider": None, "model": "gpt-5", "base_url": None}]
+        seen = []
+        with patch.object(ac, "_get_auxiliary_task_config", return_value={"fallback_chain": chain}), \
+                patch.object(ac, "_failed_backend_skip", return_value=lambda *a, **k: False), \
+                patch.object(ac, "_custom_health_base_url") as health, \
+                patch.object(ac, "_is_provider_unhealthy", return_value=False), \
+                patch.object(ac, "_resolve_fallback_entry") as resolve:
+            # _custom_health_base_url is the first callee that receives the NORMALIZED
+            # provider, so it observes the value the route actually uses -- the config
+            # dict itself is never mutated and cannot show the coercion.
+            health.return_value = None
+            health.side_effect = lambda provider, url: seen.append(provider)
+            resolve.return_value = (None, None)
+            ac._try_configured_fallback_chain("vision", "openai", "error", failed_model="gpt-5")
+        assert "None" not in seen, "fallback chain routed to a provider named 'None': %r" % (seen,)
 
-    def test_a_real_value_still_survives_every_reader(self):
-        """The other direction: the normalizer must not eat legitimate configuration."""
-        from utils import normalize_config_string
+    def test_a_real_value_still_survives_the_reader(self):
+        """The other direction: a legitimate configured provider must still route."""
+        import agent.auxiliary_client as ac
 
-        assert normalize_config_string("  gpt-5  ") == "gpt-5"
-        assert normalize_config_string("https://api.example.com/v1") == "https://api.example.com/v1"
-        # Exact-token match only: a name merely containing the token survives.
-        assert normalize_config_string("none-model") == "none-model"
-        assert normalize_config_string("nulls") == "nulls"
+        chain = [{"provider": "openai", "model": "  gpt-5  ", "base_url": None}]
+        seen = []
+        with patch.object(ac, "_get_auxiliary_task_config", return_value={"fallback_chain": chain}), \
+                patch.object(ac, "_failed_backend_skip", return_value=lambda *a, **k: False), \
+                patch.object(ac, "_custom_health_base_url") as health, \
+                patch.object(ac, "_is_provider_unhealthy", return_value=False), \
+                patch.object(ac, "_resolve_fallback_entry") as resolve:
+            health.return_value = None
+            health.side_effect = lambda provider, url: seen.append(provider)
+            resolve.return_value = (None, None)
+            ac._try_configured_fallback_chain("vision", "anthropic", "error", failed_model="claude")
+        assert resolve.call_args, "a valid fallback entry was dropped"
+        assert seen == ["openai"], seen

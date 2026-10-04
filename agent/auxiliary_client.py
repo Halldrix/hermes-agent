@@ -41,7 +41,6 @@ from agent.codex_headers import (
 )
 from agent.codex_runtime import _codex_event_has_content
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
-from utils import normalize_config_string
 
 # `openai.OpenAI` is imported lazily (~240 ms cold); `OpenAI` below is a proxy
 # so in-module calls, `auxiliary_client.OpenAI` reads and
@@ -129,7 +128,9 @@ from agent.auxiliary_unavailable import (
     AuxiliaryClientUnavailable, clear_nous_credential_failure, missing_provider_credentials_message,
     nous_credential_failure_detail, record_nous_credential_failure)
 from hermes_constants import OPENROUTER_BASE_URL, hermes_home_key
-from utils import base_url_host_matches, base_url_hostname, base_url_origin, env_float, is_truthy_value, model_forces_max_completion_tokens, normalize_proxy_env_vars, normalize_config_string
+from utils import (base_url_host_matches, base_url_hostname, base_url_origin, env_float,
+                   is_truthy_value, model_forces_max_completion_tokens,
+                   normalize_config_string, normalize_proxy_env_vars)
 
 logger = logging.getLogger(__name__)
 
@@ -4434,10 +4435,10 @@ def _try_configured_fallback_chain(
     for i, entry in enumerate(chain):
         if not isinstance(entry, dict):
             continue
-        fb_provider = str(entry.get("provider", "")).strip()
+        fb_provider = normalize_config_string(entry.get("provider"))
         if not fb_provider:
             continue
-        fb_model_raw = str(entry.get("model", "")).strip()
+        fb_model_raw = normalize_config_string(entry.get("model")) or ""
         fb_base_url = _custom_health_base_url(fb_provider, entry.get("base_url"))
         if skip(fb_provider, fb_model_raw, fb_base_url):
             continue

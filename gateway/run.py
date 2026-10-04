@@ -1570,6 +1570,7 @@ os.environ["_HERMES_GATEWAY"] = "1"
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_constants import get_hermes_home, get_hermes_home_override, get_process_hermes_home
+from utils import normalize_config_string
 # The PROCESS's own home, never an import-time ContextVar: a multiplexed backend (``hermes serve``)
 # first imports this module lazily from a session's agent build, under that session's routed profile
 # override, and the import-time config bridge below would then latch the secondary's terminal.* and
@@ -2091,9 +2092,6 @@ def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
             _value = normalize_config_string(_task_cfg.get(_field))
             if _value:
                 os.environ[f"AUXILIARY_{_upper}_{_suffix}"] = _value
-
-
-from utils import normalize_config_string
 
 
 def _bridge_config_to_env(_cfg: dict) -> None:
