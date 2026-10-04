@@ -156,6 +156,45 @@ def storm_client():
     clear_providers()
 
 
+class TestRetryAfterIsDeliveredNotJustComputed:
+    """The header a client reads must be the value the limiter computed.
+
+    ``_native_refresh_rate_limited``'s return value is unit-tested, but nothing compared
+    it to what the route actually puts on the wire: a hardcoded "1" satisfies a
+    presence check and tells a client to come back after one second against a 60s window.
+    """
+
+    def test_429_header_matches_the_computed_remainder(self, storm_client, monkeypatch):
+        from hermes_cli.dashboard_auth import routes as routes_mod
+
+        client, provider = storm_client
+        monkeypatch.setattr(routes_mod, "_REFRESH_RATE_MAX_ATTEMPTS", 2)
+        monkeypatch.setattr(routes_mod, "_REFRESH_RATE_WINDOW_SEC", 600.0)
+        _reset_native_refresh_rate_limit()
+
+        def _refresh(t):
+            return client.post("/auth/native/refresh",
+                               json={"refresh_token": t, "provider": "stub"})
+
+        refused = None
+        for _ in range(4):
+            r = _refresh("retry-probe")
+            if r.status_code == 429:
+                refused = r
+                break
+        assert refused is not None, "the throttle never refused"
+        # Recompute against the same table the route just wrote to. The limited path
+        # returns before appending, so this does not spend budget.
+        _, expected = _native_refresh_rate_limited("retry-probe")
+        assert int(refused.headers["Retry-After"]) == int(expected), (
+            "header %s does not match the computed remainder %.1f"
+            % (refused.headers.get("Retry-After"), expected)
+        )
+        assert int(refused.headers["Retry-After"]) > 1, (
+            "a 60s window must not report a 1s wait"
+        )
+
+
 class TestNativeRefreshThrottle:
     def test_storm_from_one_credential_is_capped_with_429(self, storm_client):
         client, provider = storm_client
@@ -247,7 +286,9 @@ class TestBudgetExpires:
 
         routes_mod._reset_native_refresh_rate_limit()
         token = "expiring-budget-token"
-        for _ in range(routes_mod._REFRESH_RATE_MAX_ATTEMPTS):
+        # Exhaust the real budget, but keep the loop bound independent of the constant so
+        # mutating it cannot spin this test instead of failing it.
+        for _ in range(min(routes_mod._REFRESH_RATE_MAX_ATTEMPTS, 1000)):
             limited, _ = routes_mod._native_refresh_rate_limited(token)
             assert not limited
         limited, _ = routes_mod._native_refresh_rate_limited(token)

@@ -401,8 +401,14 @@ def _reset_password_rate_limit() -> None:
 _REFRESH_RATE_MAX_ATTEMPTS = 10
 _REFRESH_RATE_WINDOW_SEC = 60.0
 # Distinct-credential buckets are never evicted by the sliding window (only their
-# timestamps expire), so cap the table: beyond this, purge expired buckets, then
-# drop oldest-inserted. Best-effort bounds memory under token-rotation abuse.
+# timestamps expire), so cap the table: beyond this, purge expired buckets, then drop
+# the least-active one (fewest timestamps). Dropping oldest-inserted instead would evict
+# whichever credential arrived first — the one actually spending its budget — and hand a
+# storming client a fresh allowance mid-attack.
+#
+# Scope, stated precisely: this bounds a REPEATED credential. A client presenting a fresh
+# token每 attempt gets a fresh 1-attempt bucket, so rotation is bounded in MEMORY only,
+# not in request rate. Rate-limiting rotation needs a per-IP signal.
 _REFRESH_RATE_MAX_BUCKETS = 4096
 _refresh_attempts: Dict[str, Deque[float]] = defaultdict(deque)
 _refresh_attempts_lock = threading.Lock()
@@ -414,15 +420,27 @@ def _refresh_token_bucket(refresh_token: str) -> str:
 
 
 def _prune_refresh_buckets(cutoff: float) -> None:
-    """Drop expired buckets first, then oldest-inserted, until back under the cap.
-    Caller must hold ``_refresh_attempts_lock``."""
+    """Drop idle buckets first, then oldest-idle, until back under the cap.
+    Caller must hold ``_refresh_attempts_lock``.
+
+    Eviction must prefer IDLE buckets. Oldest-inserted order evicts the oldest entry,
+    which is exactly the credential currently exhausting its budget — so a flood of
+    one-shot tokens could forgive a storming client mid-attack, resetting its budget to
+    zero. A client has to do the work to hold a bucket here, so age is the only signal
+    that distinguishes "spent and gone" from "still being hammered".
+    """
     for key in [k for k, bucket in _refresh_attempts.items()
                 if not bucket or bucket[-1] < cutoff]:
         del _refresh_attempts[key]
         if len(_refresh_attempts) <= _REFRESH_RATE_MAX_BUCKETS:
             return
     while len(_refresh_attempts) > _REFRESH_RATE_MAX_BUCKETS:
-        _refresh_attempts.pop(next(iter(_refresh_attempts)))
+        # Evict the LEAST active bucket, not the oldest: a storming client holds the
+        # most timestamps, so depth separates "spending its budget" from "one attempt and
+        # gone". Age cannot — a client that started first is both the oldest and the
+        # most active, which is exactly the bucket that must survive.
+        _refresh_attempts.pop(min(
+            _refresh_attempts, key=lambda k: len(_refresh_attempts[k])))
 
 
 def _native_refresh_rate_limited(refresh_token: str) -> tuple[bool, float]:
