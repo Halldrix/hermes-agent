@@ -427,14 +427,15 @@ def _refresh_token_bucket(refresh_token: str) -> str:
 
 
 def _prune_refresh_buckets(cutoff: float) -> None:
-    """Drop idle buckets first, then oldest-idle, until back under the cap.
+    """Drop idle buckets first, then the least-active, until back under the cap.
     Caller must hold ``_refresh_attempts_lock``.
 
-    Eviction must prefer IDLE buckets. Oldest-inserted order evicts the oldest entry,
-    which is exactly the credential currently exhausting its budget — so a flood of
-    one-shot tokens could forgive a storming client mid-attack, resetting its budget to
-    zero. A client has to do the work to hold a bucket here, so age is the only signal
-    that distinguishes "spent and gone" from "still being hammered".
+    Eviction must never forgive a client mid-attack. Oldest-inserted order evicts the
+    oldest entry, which is exactly the credential currently exhausting its budget — so a
+    flood of one-shot tokens could reset a storming client to a full allowance. Age cannot
+    be the signal either: a client that started first is both the oldest AND the most
+    active. Timestamp count is what separates "one attempt and gone" from "spending its
+    budget".
     """
     for key in [k for k, bucket in _refresh_attempts.items()
                 if not bucket or bucket[-1] < cutoff]:
