@@ -245,6 +245,11 @@ class TestMaxParallelLoggedUnconditionally:
     def test_logs_resolved_max_workers_with_verbose_false(self, tmp_path, monkeypatch, caplog):
         import cron.scheduler as sched
 
+        # Resolve a REAL configured value. Without this the expected string is always
+        # "unbounded", so a log that hardcoded max_workers=unbounded without ever reading
+        # the resolution would pass — which is the opposite of what an operator needs.
+        monkeypatch.setenv("HERMES_CRON_MAX_PARALLEL", "4")
+
         sched._parallel_pools.clear()
         sched._parallel_pool_max_workers.clear()
         sched._running_job_ids.clear()
@@ -268,13 +273,16 @@ class TestMaxParallelLoggedUnconditionally:
 
         assert n == 2
         log_lines = [r.getMessage() for r in caplog.records
-                     if "Running" in r.message and "in parallel" in r.message]
-        assert any(
-            "in parallel (max_workers=" in line and "job-0" not in line
-            for line in log_lines
-        ), f"expected max_parallel log with verbose=False; got: {log_lines}"
-        # Must mention the resolved max_workers (or 'unbounded').
-        assert any("max_workers=" in line for line in log_lines)
+                     if "in parallel (max_workers=" in r.message]
+        assert log_lines, (
+            "no max_parallel log with verbose=False; got: %r"
+            % [r.getMessage() for r in caplog.records]
+        )
+        # The RESOLVED value, not just the presence of the key. This is the whole point:
+        # an operator sets max_parallel_jobs and needs to see what it resolved to.
+        assert any("max_workers=4" in line for line in log_lines), log_lines
+        # One line for the batch, not one per job.
+        assert len(log_lines) == 1, "logged %d times for one batch: %r" % (len(log_lines), log_lines)
 
         sched._shutdown_parallel_pool()
 
