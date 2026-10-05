@@ -10,7 +10,36 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from agent.context_compressor import ContextCompressor
+from agent.context_engine import ContextEngine
 from tui_gateway import server
+
+
+class _RealAbcEngine(ContextEngine):
+    """A REAL ContextEngine ABC implementor (not a SimpleNamespace): the E2E shape
+    of a plugin engine like LCM — satisfies the ABC, inherits nothing from
+    ContextCompressor. If the sync reaches into any compressor internals this
+    raises AttributeError, exactly like the field bug."""
+
+    def __init__(self):
+        self.threshold_tokens = 100_000
+        self.threshold_percent = 0.65
+        self.model_thresholds = {}
+
+    @property
+    def name(self) -> str:
+        return "lcm"
+
+    def update_model(self, *args, **kwargs) -> None:
+        return None
+
+    def update_from_response(self, usage) -> None:
+        return None
+
+    def should_compress(self, prompt_tokens=None) -> bool:
+        return False
+
+    def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+        return list(messages)
 
 
 def _session_with_compressor(**compression_ctor):
@@ -444,3 +473,38 @@ def test_failed_apply_retries_next_turn_instead_of_latching(monkeypatch):
     _sync_with_cfg(monkeypatch, session, cfg)
     assert session["config_compression_seen"] == server._tui_compression_config_signature(cfg)
     assert len(calls) == 2
+
+
+def test_live_sync_against_a_real_abc_engine(monkeypatch, caplog):
+    """E2E shape of a plugin engine like LCM: a REAL ContextEngine ABC implementor
+    (no ContextCompressor inheritance) through the real sync entrypoint. The live
+    apply must skip compressor internals without warning, still adopt the
+    agent-level pin, and latch the signature."""
+    import logging
+
+    from agent.context_compressor import ContextCompressor
+
+    engine = _RealAbcEngine()
+    assert isinstance(engine, ContextEngine)
+    assert not isinstance(engine, ContextCompressor)
+    agent = SimpleNamespace(
+        model="pin-test-model",
+        provider="",
+        base_url="",
+        context_compressor=engine,
+        compression_enabled=True,
+        compression_idle_compact_after_seconds=0,
+        codex_responses_native_compaction=False,
+        codex_responses_compact_threshold=200_000,
+    )
+    session = {"agent": agent, "session_key": "session-real-abc-engine"}
+    cfg = {"model": {"context_length": 400_000}, "compression": {"tail_mode": "legacy"}}
+
+    with caplog.at_level(logging.WARNING):
+        _sync_with_cfg(monkeypatch, session, cfg)
+
+    assert "Could not apply live compression config" not in caplog.text
+    assert agent._config_context_length == 400_000
+    assert engine.threshold_tokens == 100_000
+    assert not hasattr(engine, "tail_mode")
+    assert session["config_compression_seen"] == server._tui_compression_config_signature(cfg)
