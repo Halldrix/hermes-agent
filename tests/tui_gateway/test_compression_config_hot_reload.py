@@ -7,6 +7,7 @@ the already-open session kept the computed threshold from agent creation.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from agent.context_compressor import ContextCompressor
@@ -28,9 +29,6 @@ class _RealAbcEngine(ContextEngine):
     @property
     def name(self) -> str:
         return "lcm"
-
-    def update_model(self, *args, **kwargs) -> None:
-        return None
 
     def update_from_response(self, usage) -> None:
         return None
@@ -480,12 +478,7 @@ def test_live_sync_against_a_real_abc_engine(monkeypatch, caplog):
     (no ContextCompressor inheritance) through the real sync entrypoint. The live
     apply must skip compressor internals without warning, still adopt the
     agent-level pin, and latch the signature."""
-    import logging
-
-    from agent.context_compressor import ContextCompressor
-
     engine = _RealAbcEngine()
-    assert isinstance(engine, ContextEngine)
     assert not isinstance(engine, ContextCompressor)
     agent = SimpleNamespace(
         model="pin-test-model",
@@ -506,5 +499,7 @@ def test_live_sync_against_a_real_abc_engine(monkeypatch, caplog):
     assert "Could not apply live compression config" not in caplog.text
     assert agent._config_context_length == 400_000
     assert engine.threshold_tokens == 100_000
+    assert engine.threshold_percent == 0.65
+    assert engine.model_thresholds == {}
     assert not hasattr(engine, "tail_mode")
     assert session["config_compression_seen"] == server._tui_compression_config_signature(cfg)
