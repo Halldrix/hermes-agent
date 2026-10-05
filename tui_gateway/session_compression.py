@@ -214,14 +214,15 @@ def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
         return
     cfg = _load_cfg() or {}
     signature = _tui_compression_config_signature(cfg)
-    seen = session.get("config_compression_seen")
-    session["config_compression_seen"] = signature
-    if signature == seen:
+    if signature == session.get("config_compression_seen"):
         return
     try:
         _apply_live_compression_config(agent, cfg)
     except Exception as e:
         logger.warning("Could not apply live compression config for %s: %s", sid, e)
+    else:
+        # Latch only on success: a failed apply must retry next turn.
+        session["config_compression_seen"] = signature
 
 
 def _apply_pending_model_switch(sid: str, session: dict) -> None:

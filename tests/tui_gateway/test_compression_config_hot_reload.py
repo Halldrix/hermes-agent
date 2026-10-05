@@ -418,3 +418,29 @@ def test_removing_context_length_clears_the_pin_on_an_external_engine(monkeypatc
     _sync_with_cfg(monkeypatch, session, {"model": {}, "compression": {}})
 
     assert agent._config_context_length is None
+
+
+def test_failed_apply_retries_next_turn_instead_of_latching(monkeypatch):
+    """A failed live-apply must not latch ``config_compression_seen``: the same
+    config must be retried next turn, so a transient failure recovers instead of
+    silencing itself for the life of the session."""
+    session, _ = _neutral_session()
+    cfg = {"model": {"context_length": 600_000}, "compression": {}}
+
+    calls = []
+    real_apply = server._apply_live_compression_config
+
+    def flaky_apply(agent, apply_cfg):
+        calls.append(apply_cfg)
+        if len(calls) == 1:
+            raise RuntimeError("transient")
+        return real_apply(agent, apply_cfg)
+
+    monkeypatch.setattr(server, "_apply_live_compression_config", flaky_apply)
+
+    _sync_with_cfg(monkeypatch, session, cfg)
+    assert "config_compression_seen" not in session
+
+    _sync_with_cfg(monkeypatch, session, cfg)
+    assert session["config_compression_seen"] == server._tui_compression_config_signature(cfg)
+    assert len(calls) == 2
