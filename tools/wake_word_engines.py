@@ -51,6 +51,7 @@ class _Engine:
 
     def __init__(self, cfg: Dict[str, Any]):
         _ensure_dep(self.feature, cfg)
+        _ww()._refuse_unloadable_native_deps(self.feature)
         self._build(cfg, _sub(cfg, self.section), _ww())
 
     def _build(self, cfg: Dict[str, Any], sub: Dict[str, Any], ww) -> None:
