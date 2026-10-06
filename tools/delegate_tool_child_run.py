@@ -12,7 +12,7 @@ import time
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional
 from agent.compression_marker import elide
-from agent.interrupt_compat import request_hard_interrupt
+from agent.interrupt_compat import _accepts_keyword, request_hard_interrupt
 from dataclasses import dataclass, field
 from tools import file_state
 from tools.delegate_tool_progress import _quiet, _safe_progress
@@ -81,7 +81,10 @@ def _attach_child(parent_agent: Any, child: Any) -> None:
                            stop_kind=getattr(parent_agent, "_interrupt_stop_kind", None))
     else:
         with _quiet("Failed to propagate interrupt to late child: %s"):
-            child.interrupt(message)
+            if _accepts_keyword(getattr(child, "interrupt", None), "stop_kind"):
+                child.interrupt(message, stop_kind=getattr(parent_agent, "_interrupt_stop_kind", None))
+            else:
+                child.interrupt(message)
 
 def _detach_child(parent_agent: Any, child: Any) -> None:
     """Remove the child from parent interrupt propagation (no-op if absent)."""

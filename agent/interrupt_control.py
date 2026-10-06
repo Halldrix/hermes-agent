@@ -8,7 +8,7 @@ import logging
 import threading
 from typing import Optional
 
-from agent.interrupt_compat import request_hard_interrupt
+from agent.interrupt_compat import _accepts_keyword, request_hard_interrupt
 from tools.interrupt import request_yield as _request_yield
 from tools.interrupt import set_interrupt as _set_interrupt
 
@@ -229,7 +229,10 @@ class InterruptControlMixin:
                     request_hard_interrupt(child, message, tool_reason=tool_interrupt_reason,
                                            stop_kind=stop_kind)
                 else:
-                    child.interrupt(message, stop_kind=stop_kind)
+                    if _accepts_keyword(getattr(child, "interrupt", None), "stop_kind"):
+                        child.interrupt(message, stop_kind=stop_kind)
+                    else:
+                        child.interrupt(message)
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:
