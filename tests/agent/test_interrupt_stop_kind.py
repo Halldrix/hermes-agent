@@ -117,6 +117,23 @@ def test_child_agents_inherit_disconnect_stop_kind():
         set_interrupt(False)
 
 
+def test_soft_disconnect_reaches_legacy_child_without_stop_kind():
+    """A legacy child (interrupt(message) only) still stops on a soft disconnect."""
+    parent = _bare_agent()
+    calls = []
+
+    class LegacyChild:
+        def interrupt(self, message=None):
+            calls.append(message)
+
+    parent._active_children.append(LegacyChild())
+    try:
+        parent.interrupt("SSE client disconnected", stop_kind=STOP_KIND_CLIENT_DISCONNECT)
+        assert calls == ["SSE client disconnected"]
+    finally:
+        set_interrupt(False)
+
+
 def test_plain_interrupt_explainer_unchanged():
     """A reason-less interrupt keeps the generic mid-call explanation."""
     from run_agent import AIAgent
