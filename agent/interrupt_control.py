@@ -162,8 +162,9 @@ class InterruptControlMixin:
             self._interrupt_requested = True
             self._interrupt_message = message
             self._tool_interrupt_reason = tool_interrupt_reason
-            if stop_kind is not None:
-                self._interrupt_stop_kind = stop_kind
+            # Unconditional: a later stop without stop_kind must not inherit a dead disconnect's
+            # provenance (absent = deliberate/human stop).
+            self._interrupt_stop_kind = stop_kind
             # The turn record and the log must agree on WHO asked for the stop (#112647).
             logger.info("Interrupt requested (%s): %s", "hard" if hard_cancel else "soft", tool_interrupt_reason)
             _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
@@ -228,7 +229,7 @@ class InterruptControlMixin:
                     request_hard_interrupt(child, message, tool_reason=tool_interrupt_reason,
                                            stop_kind=stop_kind)
                 else:
-                    child.interrupt(message)
+                    child.interrupt(message, stop_kind=stop_kind)
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:

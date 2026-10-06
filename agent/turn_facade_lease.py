@@ -129,6 +129,7 @@ class DurableTurnLease:
                 self.agent._interrupt_requested = True
                 self.agent._interrupt_message = message
                 self.agent._tool_interrupt_reason = _REASON_LEASE_LOST
+                self.agent._interrupt_stop_kind = None
 
     def commit_liveness_abort(self, snapshot, message: str) -> bool:
         """Commit point for the watchdog's stall observation.
