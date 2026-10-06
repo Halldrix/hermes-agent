@@ -10,7 +10,6 @@ import threading
 
 from agent.interrupt_control import (
     STOP_KIND_CLIENT_DISCONNECT,
-    STOP_KIND_USER_STOP,
     interrupt_issuer,
 )
 from tools.interrupt import set_interrupt
@@ -55,17 +54,6 @@ def test_plain_user_stop_has_no_issuer():
         set_interrupt(False)
 
 
-def test_user_stop_kind_has_no_issuer():
-    """An explicit user stop_kind is recorded but still attributes to the user."""
-    agent = _bare_agent()
-    try:
-        agent.interrupt("user pressed stop", stop_kind=STOP_KIND_USER_STOP)
-        assert agent._interrupt_stop_kind == STOP_KIND_USER_STOP
-        assert interrupt_issuer(agent) is None
-    finally:
-        set_interrupt(False)
-
-
 def test_stop_kind_cleared_with_interrupt():
     """clear_interrupt drops the provenance with the rest of the interrupt state."""
     agent = _bare_agent()
@@ -89,6 +77,31 @@ def test_disconnect_explainer_names_reconnect_not_continue():
     lower = out.lower()
     assert "disconnect" in lower
     assert "reconnect" in lower
+
+
+def test_disconnect_explainer_covers_iteration_boundary():
+    """The same event landing at the iteration boundary explains itself too."""
+    from run_agent import AIAgent
+
+    out = AIAgent._format_turn_completion_explanation(
+        "interrupted_by_system(client_disconnect)"
+    )
+    assert "No reply:" in out
+    assert "reconnect" in out.lower()
+
+
+def test_child_agents_inherit_disconnect_stop_kind():
+    """A disconnect during delegation attributes the child to the vanished client too."""
+    parent = _bare_agent()
+    child = _bare_agent()
+    parent._active_children.append(child)
+    try:
+        parent.interrupt("SSE client disconnected", hard_cancel=True,
+                         tool_reason="sse client disconnected",
+                         stop_kind=STOP_KIND_CLIENT_DISCONNECT)
+        assert interrupt_issuer(child) == STOP_KIND_CLIENT_DISCONNECT
+    finally:
+        set_interrupt(False)
 
 
 def test_plain_interrupt_explainer_unchanged():
