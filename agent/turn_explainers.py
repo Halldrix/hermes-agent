@@ -41,6 +41,7 @@ _EXIT_REASON_EXPLANATIONS: Dict[str, str] = {
     "budget_exhausted": "explainer.exit.budget_exhausted",
     "ollama_runtime_context_too_small": "explainer.exit.ollama_runtime_context_too_small",
     "pending_tool_result": "explainer.exit.pending_tool_result",
+    "interrupted_during_api_call(client_disconnect)": "explainer.exit.client_disconnect",
 }
 
 # Parameterised reasons (``max_iterations_reached(3/3)`` …) matched by prefix.
