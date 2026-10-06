@@ -54,6 +54,19 @@ def test_plain_user_stop_has_no_issuer():
         set_interrupt(False)
 
 
+def test_later_stop_without_kind_clears_stale_disconnect():
+    """A stop after a disconnect does not inherit the dead provenance."""
+    agent = _bare_agent()
+    try:
+        agent.interrupt("SSE client disconnected", stop_kind=STOP_KIND_CLIENT_DISCONNECT)
+        assert interrupt_issuer(agent) == STOP_KIND_CLIENT_DISCONNECT
+        agent.interrupt("user pressed stop")
+        assert agent._interrupt_stop_kind is None
+        assert interrupt_issuer(agent) is None
+    finally:
+        set_interrupt(False)
+
+
 def test_stop_kind_cleared_with_interrupt():
     """clear_interrupt drops the provenance with the rest of the interrupt state."""
     agent = _bare_agent()
