@@ -23,15 +23,19 @@ _REASON_NEW_MESSAGE = "user sent a new message"
 _REASON_USER_INTERRUPT = "user interrupt"
 USER_INTERRUPT_REASONS = frozenset({_REASON_HARD_STOP, _REASON_NEW_MESSAGE, _REASON_USER_INTERRUPT})
 
-# Structured provenance of a stop, carried on ``interrupt(stop_kind=...)``: a deliberate human stop
-# vs a client that vanished mid-turn (#84207). Distinct from ``_tool_interrupt_reason`` (WHO asked)
-# — this says WHAT happened to the client, so the exit reason can name it.
-STOP_KIND_USER_STOP = "user_stop"
+# Structured provenance of a stop, carried on ``interrupt(stop_kind=...)``: a vanished client
+# mid-turn (#84207). Absence means a deliberate/human stop — the default needs no constant.
+# Distinct from ``_tool_interrupt_reason`` (WHO asked) — this says WHAT happened to the client,
+# so the exit reason can name it.
 STOP_KIND_CLIENT_DISCONNECT = "client_disconnect"
 
 
 def interrupt_issuer(agent) -> Optional[str]:
-    """Slug of the system producer behind the pending interrupt, or ``None`` for a human stop."""
+    """Slug of the system producer behind the pending interrupt, or ``None`` for a human stop.
+
+    ``stop_kind`` wins over ``_tool_interrupt_reason`` when both name an issuer: a disconnect
+    carries both (tool_reason for the tool-output attribution, stop_kind for the exit reason).
+    """
     stop_kind = getattr(agent, "_interrupt_stop_kind", None)
     if stop_kind == STOP_KIND_CLIENT_DISCONNECT:
         return STOP_KIND_CLIENT_DISCONNECT
@@ -121,8 +125,8 @@ def _ic_signal_tool_workers(agent, active: bool, **kw) -> None:
 class InterruptControlMixin:
     """interrupt()/hard_interrupt()/clear_interrupt()/steer()/redirect() (see module docstring)."""
 
-    # Structured provenance of the stop, set by ``interrupt(stop_kind=...)``: a deliberate human stop
-    # vs a vanished client (#84207). Plain attribute (not a property): bare test stand-ins assign it.
+    # Structured provenance of the stop, set by ``interrupt(stop_kind=...)``: a vanished client
+    # (#84207). Plain attribute (not a property): bare test stand-ins assign it.
     _interrupt_stop_kind: Optional[str]
 
     def interrupt(
@@ -136,8 +140,8 @@ class InterruptControlMixin:
         ``tool_reason``: trusted fixed category safe for tool output. ``require_generation``: activity-
         generation claim — published only if the turn's generation still matches at the final mutation edge;
         returns False if the turn resumed meanwhile. ``stop_kind``: structured provenance of the stop
-        (``STOP_KIND_USER_STOP`` / ``STOP_KIND_CLIENT_DISCONNECT``) — recorded alongside the interrupt so
-        the turn exit reason can tell a deliberate stop from a vanished client (#84207).
+        (``STOP_KIND_CLIENT_DISCONNECT`` for a vanished client; absent means deliberate/human stop) —
+        recorded alongside the interrupt so the turn exit reason can tell them apart (#84207).
         """
         if require_generation is not None:
             # RESERVE the claim under the SAME lock `_touch_activity` stamps with; real progress invalidates
@@ -221,7 +225,8 @@ class InterruptControlMixin:
         for child in children_copy:
             try:
                 if hard_cancel:
-                    request_hard_interrupt(child, message, tool_reason=tool_interrupt_reason)
+                    request_hard_interrupt(child, message, tool_reason=tool_interrupt_reason,
+                                           stop_kind=stop_kind)
                 else:
                     child.interrupt(message)
             except Exception as e:
