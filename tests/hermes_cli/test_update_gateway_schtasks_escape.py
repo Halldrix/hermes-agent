@@ -181,6 +181,26 @@ class TestSpawnViaScheduledTaskHelper:
         assert gateway_windows._spawn_via_scheduled_task() is True
         assert order[:2] == ["find", "run"]
 
+    def test_sibling_gateway_cannot_vouch_for_relaunch(self, monkeypatch, tmp_path):
+        """A newly started sibling must not satisfy the readiness poll while
+        the requested home stays down: the wait is scoped to the spawned
+        profile's home, not the whole fleet."""
+        from hermes_cli import gateway, gateway_windows
+
+        requested = tmp_path / "profiles" / "work"
+        monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+        monkeypatch.setattr(gateway_windows, "is_task_registered", lambda task_name=None: True)
+        monkeypatch.setattr(gateway_windows, "_exec_schtasks", lambda *a, **kw: (0, "", ""))
+        monkeypatch.setattr(gateway, "find_gateway_pids", lambda **kw: [])
+
+        def fake_wait(*args, home=None, **kw):
+            return [] if home == requested else [91001]
+
+        monkeypatch.setattr(gateway_windows, "_wait_for_gateway_ready", fake_wait)
+        with pytest.raises(RuntimeError, match="no new gateway PID"):
+            gateway_windows._spawn_via_scheduled_task(
+                task_name="Hermes_Test_work", hermes_home=str(requested))
+
 
 class TestAttestedMultiProfileEscape:
     """#110959: the attested multi-profile cold-start must take the same job-object
