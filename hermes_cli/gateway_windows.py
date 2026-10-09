@@ -1378,7 +1378,9 @@ def _spawn_via_scheduled_task(
     # Wait for a NEW pid even when /Run was rejected: a task already running
     # from a previous trigger answers the command with an error yet may still
     # be spawning, and its gateway must not be raced by a fallback Popen.
-    ready = _wait_for_gateway_ready(timeout_s=timeout_s, all_profiles=True)
+    # Scoped to the requested home: a newly started sibling must not vouch
+    # for this relaunch while the requested profile stays down.
+    ready = _wait_for_gateway_ready(timeout_s=timeout_s, home=Path(hermes_home))
     new_pids = set(ready) - pre_pids
     if new_pids:
         return True
