@@ -1169,19 +1169,37 @@ def _is_shell_comment_start(command: str, index: int) -> bool:
 def _iter_shell_command_starts(command: str):
     starts = [0]
 
+    # Separator sets hoisted out of the hot loop (simplify round 1).
+    _BOUNDARY_SEPS = frozenset("; & | ( \n {".replace(" ", ""))
+    _REDIR_FOLLOW_SEPS = frozenset("; & | \n )".replace(" ", ""))
+
     def scan(start: int, end: int) -> None:
         skip = -1
+        skip_to = -1
         for kind, i, j, quote in _scan_shell(command, start, end, subst="uq", stop_unterminated=True,
                                             comments=True):
+            if i < skip_to:
+                continue
             if kind == "subst":
                 # Record a nested $(...)/backtick command start and scan its body.
                 inner = i + (1 if command[i] == "`" else 2)
                 starts.append(inner)
                 scan(inner, end if j is None else j - 1)
             elif kind == "char" and quote is None and i != skip:
-                # `{` opens a brace group only as its own word (after whitespace or a separator): `${IFS}`
-                # is a parameter expansion and `-{delete,print}` a brace-expansion word, and a start
-                # marked inside either splits the word the flat patterns need to see intact.
+                # Leading redirect: the word after redirect+operand is a real command start.
+                prev = command[i - 1] if i > 0 else ""
+                boundary = (i == start or prev.isspace() or prev in _BOUNDARY_SEPS)
+                redirect_match = _SHELL_REDIRECTION_RE.match(command, i) if boundary else None
+                if redirect_match is not None:
+                    op_pos = _skip_shell_whitespace(command, redirect_match.end())
+                    _, operand_end, _ = _read_shell_word(command, op_pos)
+                    next_pos = _skip_shell_whitespace(command, operand_end)
+                    if (operand_end > op_pos and next_pos < len(command)
+                            and command[next_pos] not in _REDIR_FOLLOW_SEPS):
+                        starts.append(next_pos)
+                        skip_to = next_pos
+                        continue
+                # `{` opens a brace group only as its own word (after whitespace or a separator).
                 if command[i] in "(;\n" or (command[i] == "{" and (i == 0 or command[i - 1].isspace()
                                                                    or command[i - 1] in "(;&|)")):
                     starts.append(i + 1)
