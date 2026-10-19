@@ -796,18 +796,13 @@ class CLIAgentSetupMixin:
         text, so the streamed bytes match the final render.
         """
         try:
-            from cli import logger
             from hermes_cli.plugins import has_mutating_hook
 
             return has_mutating_hook("transform_llm_output")
-        except Exception:  # pragma: no cover - plugin manager may be unavailable
-            try:
-                from cli import logger
-                logger.debug(
-                    "transform_llm_output mutating-hook check failed", exc_info=True
-                )
-            except Exception:
-                pass
+        except Exception as exc:  # health: allow BLE001 -- a plugin-manager failure must not silence the stream
+            from cli import logger
+
+            logger.debug("transform_llm_output mutating-hook check failed: %s", exc)
             return False
 
     def _stream_delta_with_hook_gate(self, text):

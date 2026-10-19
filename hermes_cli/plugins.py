@@ -57,6 +57,7 @@ from hermes_cli.plugins_dispatch import (
     RenderedPluginSystemPromptSection, _EventSubscription, format_system_prompt_sections,
     is_valid_system_prompt_section_id, resolve_plugin_command_result,
 )
+from hermes_cli.plugins_hooks import hook_mutates_by_default
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_state import (
     PluginState, _locked_plugin_state, _nested_plugin_mapping, _nested_plugin_value,
@@ -202,21 +203,8 @@ VALID_HOOKS: set[str] = {
 }
 
 # Hook classes whose callback return value REPLACES a payload the host already
-# produced, so a surface that streamed that payload must suppress it (#102203).
-# A plugin that registers one of these without saying so would garble the
-# terminal, so these classes default to ``mutates=True`` and the plugin must
-# opt out explicitly with ``mutates=False``.
-#
-# Only the classes whose replacement is visible in a STREAMED surface belong
-# here: ``transform_tool_result`` and ``transform_terminal_output`` also
-# replace a payload, but they do so before the host renders it, so a
-# mutating flag on them has no consumer to suppress.
-MUTATING_HOOKS: set[str] = {"transform_llm_output"}
-
-
-def _hook_mutates_by_default(hook_name: str) -> bool:
-    """True when ``hook_name`` is a payload-replacing hook class."""
-    return hook_name in MUTATING_HOOKS
+# produced live in a topical sibling (hermes_cli/plugins_hooks.py) so this
+# facade does not grow for them.
 
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
 # the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
@@ -959,7 +947,7 @@ class PluginContext:
         """
         handle = self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
         flags = self._manager._hooks_mutating_flags.setdefault(hook_name, [])
-        flags.append(_hook_mutates_by_default(hook_name) if mutates is None else bool(mutates))
+        flags.append(hook_mutates_by_default(hook_name) if mutates is None else bool(mutates))
         return handle
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
@@ -1968,7 +1956,9 @@ def has_mutating_hook(hook_name: str) -> bool:
 
     Lazy-discovers first — same gate-before-invoke rationale as :func:`has_hook` (tracking #64178).
     """
-    return _delivery_manager().has_mutating_hook(hook_name)
+    from hermes_cli.plugins_hooks import has_mutating_hook as _query
+
+    return _query(hook_name)
 
 
 def iter_hook_callbacks(hook_name: str) -> tuple[Callable, ...]:
