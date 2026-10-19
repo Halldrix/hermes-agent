@@ -112,7 +112,8 @@ export function markRuntimeGone(runtimeId: string, knownStoredId?: string | null
 
   healedRuntimes.add(runtimeId)
 
-  const storedId = storedIdForRuntime(runtimeId) || knownStoredId?.trim()
+  const trimmedKnown = knownStoredId?.trim()
+  const storedId = trimmedKnown ? trimmedKnown : storedIdForRuntime(runtimeId)
 
   if (!storedId) {
     // No durable identity to resume from — a never-persisted draft, or a

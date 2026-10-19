@@ -838,7 +838,7 @@ function runtimeReferenced(runtimeId: string, storedSessionId: null | string): b
  *  `needsInput` states stay — the sidebar's attention dot reads them. */
 function evictable(runtimeId: string, state: ClientSessionState): boolean {
   return (
-    !state.busy && !state.needsInput && !state.awaitingResponse && !runtimeReferenced(runtimeId, state.storedSessionId)
+    !state.busy && !state.needsInput && !state.awaitingResponse && !runtimeReferenced(runtimeId, state.storedSessionId) && !retainedAfterReclaim.has(runtimeId)
   )
 }
 
@@ -1829,11 +1829,11 @@ syncPreviewScope()
  *  onto a sibling is untouched — the gate is retention membership, not "the
  *  previous atom value".
  *
- *  ponytail: retained while `$activeSessionId` never moves — a reclaim whose
+ *  shortcut: retained while `$activeSessionId` never moves — a reclaim whose
  *  resume is declined (no durable id, heal budget spent, tombstoned, or a
- *  request the route-resume effect cannot consume) holds its transcript until the
- *  user leaves the chat. Bounded by window lifetime; revisit only if a review
- *  shows that path parking transcripts in long-lived windows. */
+ *  request the route-resume effect cannot consume) holds its transcript until
+ *  the user leaves the chat. Bounded by window lifetime; upgrade if reclaim can
+ *  be cancelled or durable resume guaranteed without keeping full transcript. */
 const retainedAfterReclaim = new Set<string>()
 
 /** Keep `runtimeId`'s transcript visible through a reclaim, until the resume
@@ -1854,7 +1854,7 @@ $activeSessionId.subscribe(() => {
 
   const live = $activeSessionId.get()
 
-  for (const runtimeId of [...retainedAfterReclaim]) {
+  for (const runtimeId of Array.from(retainedAfterReclaim)) {
     if (runtimeId === live) {
       continue
     }

@@ -153,13 +153,7 @@ describe('session.reclaimed', () => {
 
     // The event names the atom-visible runtime explicitly; the hook's ref still
     // points at a different runtime on purpose.
-    act(() =>
-      stream.handleEvent({
-        payload: { reason: 'ws_orphan_reap', session_id: 'live-visible', stored_session_id: 'stored-1' },
-        session_id: 'live-visible',
-        type: 'session.reclaimed'
-      } as GatewayEvent)
-    )
+    reclaim('live-visible')
 
     // Preserve the slice that actually remains on screen.
     expect($sessionStates.get()['live-visible']).toMatchObject({

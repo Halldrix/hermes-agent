@@ -34,6 +34,7 @@ beforeEach(() => {
   $selectedStoredSessionId.set(null)
   $unreadFinishedSessionIds.set([])
   $providerWaitSessions.set({})
+  clearAllSessionStates()
 })
 
 /** The reclaim handler's retention, driven at the store seam where the

@@ -2,6 +2,7 @@ import type { GatewayEvent } from '@hermes/shared'
 import type { HermesSkin } from '@hermes/shared/skin'
 
 import { invalidateContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
+import { sealOpenToolParts } from '@/lib/chat-messages'
 import { eventSourceMatchesOwner, gatewayEventSource } from '@/lib/replay-gap-owner'
 import { clearClarifyRequest } from '@/store/clarify'
 import {
@@ -145,7 +146,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
     // breakdown so the statusbar gauge refetches instead of serving the
     // pre-compression figure (#94001). The breakdown cache keys on the
     // STORED id; the reclaim payload carries it alongside the runtime id.
-    const reclaimedStoredId = String((payload as { stored_session_id?: string } | undefined)?.stored_session_id ?? '')
+    const reclaimedStoredId = String(reclaimPayload?.stored_session_id ?? '')
 
     if (reclaimedRuntimeId) {
       // Heal while the cached stored-id mapping is still intact. The active view
@@ -153,7 +154,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       // already-painted chat flash empty until the explicit durable resume lands.
       const isActiveRuntime = $activeSessionId.get() === reclaimedRuntimeId
 
-      markRuntimeGone(reclaimedRuntimeId, reclaimPayload?.stored_session_id)
+      markRuntimeGone(reclaimedRuntimeId, reclaimedStoredId)
       invalidateContextBreakdown(reclaimedStoredId || reclaimedRuntimeId)
 
       if (isActiveRuntime) {
@@ -164,19 +165,37 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
         const current = $sessionStates.get()[reclaimedRuntimeId]
 
         if (current) {
-          publishSessionState(reclaimedRuntimeId, {
-            ...current,
-            awaitingResponse: false,
-            busy: false,
-            needsInput: false,
-            streamId: null,
-            turnStartedAt: null,
-            turnLive: false
-          })
-          // The resume re-mints a fresh runtime id, so this one never publishes
-          // again and publish-time eviction can't reach it. Hold it until the
-          // atom moves off it, then drop it with its per-runtime ledgers.
+          // Seal any still-open tool rows so a retained transcript does not spin
+          // forever (mirrors the settle in use-background-sync.ts).
+          const flagsDirty =
+            current.awaitingResponse ||
+            current.busy ||
+            current.needsInput ||
+            Boolean(current.streamId) ||
+            current.turnStartedAt !== null ||
+            current.turnLive
+
+          const sealedMessages = sealOpenToolParts(current.messages)
+
+          // Hold the slice until the atom moves off this runtime, then drop it
+          // with its per-runtime ledgers. Retain BEFORE publish so eviction can
+          // never strip the transcript in the reclaim publish window.
           retainAfterReclaim(reclaimedRuntimeId)
+
+          if (flagsDirty || sealedMessages !== current.messages) {
+            publishSessionState(reclaimedRuntimeId, {
+              ...current,
+              messages: sealedMessages,
+              awaitingResponse: false,
+              busy: false,
+              needsInput: false,
+              streamId: null,
+              turnStartedAt: null,
+              turnLive: false
+            })
+          }
+        } else {
+          dropSessionState(reclaimedRuntimeId)
         }
       } else {
         dropSessionState(reclaimedRuntimeId)
