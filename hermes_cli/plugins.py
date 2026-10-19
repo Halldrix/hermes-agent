@@ -201,6 +201,18 @@ VALID_HOOKS: set[str] = {
     "post_compaction",  # once per committed compaction on every path; observer (hooks.md, #118382)
 }
 
+# Hooks whose return value replaces the payload the caller already showed, so a
+# surface that streamed that payload must suppress it (#102203). Everything else
+# is an observer whose return value the host ignores. A plugin that registers a
+# mutating hook without saying so would garble the terminal, so the mutating
+# classes default to ``mutates=True`` and the plugin must opt out explicitly.
+MUTATING_HOOKS: set[str] = {"transform_llm_output"}
+
+
+def _hook_mutates_by_default(hook_name: str) -> bool:
+    """True when ``hook_name`` is a payload-replacing hook class."""
+    return hook_name in MUTATING_HOOKS
+
 # Hooks whose directive the shell-hook response parser has no channel for. VALID_HOOKS doubles as
 # the shell-hook allow-list, so these are refused loudly instead of having output silently ignored.
 SHELL_UNSUPPORTED_HOOKS: set[str] = {"transform_api_error_classification"}
@@ -926,17 +938,23 @@ class PluginContext:
                 logger.warning("Plugin '%s' locale file %s skipped: %s", self.manifest.name, file, exc)
         return handles
 
-    def register_hook(self, hook_name: str, callback: Callable, *, mutates: bool = False) -> PluginRegistration:
+    def register_hook(self, hook_name: str, callback: Callable, *, mutates: bool | None = None) -> PluginRegistration:
         """Register a lifecycle hook callback (unknown names warn but are still stored).
 
-        ``mutates`` is metadata-only: it tells the host whether the hook's return value REPLACES
-        the streamed/final payload (``True``) or is purely observational (``False``). Surfaces
-        that stream deltas to users need this to decide whether token streaming must be
-        suppressed up-front. Defaults to ``False`` so existing plugins keep working unchanged.
+        ``mutates`` tells the host whether the hook's return value REPLACES the
+        streamed/final payload (``True``) or is purely observational (``False``).
+        Surfaces that stream deltas to users need this to decide whether token
+        streaming must be suppressed up-front.
+
+        Defaults to the hook class's own contract: a hook that returns a
+        replacement payload is mutating unless the plugin says otherwise, and a
+        hook that only observes is not. A plugin that mutates ``transform_llm_output``
+        but forgets the flag would otherwise garble the terminal, so that class
+        defaults to mutating and the plugin must opt out explicitly.
         """
         handle = self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
         flags = self._manager._hooks_mutating_flags.setdefault(hook_name, [])
-        flags.append(bool(mutates))
+        flags.append(_hook_mutates_by_default(hook_name) if mutates is None else bool(mutates))
         return handle
 
     def register_middleware(self, kind: str, callback: Callable) -> PluginRegistration:
