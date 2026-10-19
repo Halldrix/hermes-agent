@@ -627,6 +627,8 @@ _COMMAND_WRAPPER_NON_EXECUTING_OPTIONS = {
 }
 _COMMAND_WRAPPER_POSITIONAL_ARGS = {"chroot": 1, "chrt": 1, "taskset": 1, "timeout": 1}
 _SHELL_COMMAND_TRANSITIONS = {"if", "then", "else", "elif", "do", "while", "until", "!"}
+_BOUNDARY_SEPS = frozenset("; & | ( \n {".replace(" ", ""))
+_REDIR_FOLLOW_SEPS = frozenset("; & | \n )".replace(" ", ""))
 _SHELL_REDIRECTION_RE = re.compile(r"(?:[0-9]+)?(?:>>|<<|<>|>&|<&|>\||[<>])")
 
 _INTERPRETER_NAME_RES = tuple((family, re.compile(pattern)) for family, pattern in (
@@ -1168,10 +1170,6 @@ def _is_shell_comment_start(command: str, index: int) -> bool:
 
 def _iter_shell_command_starts(command: str):
     starts = [0]
-
-    # Separator sets hoisted out of the hot loop (simplify round 1).
-    _BOUNDARY_SEPS = frozenset("; & | ( \n {".replace(" ", ""))
-    _REDIR_FOLLOW_SEPS = frozenset("; & | \n )".replace(" ", ""))
 
     def scan(start: int, end: int) -> None:
         skip = -1
