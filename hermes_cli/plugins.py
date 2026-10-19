@@ -201,11 +201,16 @@ VALID_HOOKS: set[str] = {
     "post_compaction",  # once per committed compaction on every path; observer (hooks.md, #118382)
 }
 
-# Hooks whose return value replaces the payload the caller already showed, so a
-# surface that streamed that payload must suppress it (#102203). Everything else
-# is an observer whose return value the host ignores. A plugin that registers a
-# mutating hook without saying so would garble the terminal, so the mutating
-# classes default to ``mutates=True`` and the plugin must opt out explicitly.
+# Hook classes whose callback return value REPLACES a payload the host already
+# produced, so a surface that streamed that payload must suppress it (#102203).
+# A plugin that registers one of these without saying so would garble the
+# terminal, so these classes default to ``mutates=True`` and the plugin must
+# opt out explicitly with ``mutates=False``.
+#
+# Only the classes whose replacement is visible in a STREAMED surface belong
+# here: ``transform_tool_result`` and ``transform_terminal_output`` also
+# replace a payload, but they do so before the host renders it, so a
+# mutating flag on them has no consumer to suppress.
 MUTATING_HOOKS: set[str] = {"transform_llm_output"}
 
 
