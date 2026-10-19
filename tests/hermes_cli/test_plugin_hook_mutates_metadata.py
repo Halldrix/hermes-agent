@@ -132,3 +132,39 @@ def test_plugin_validate_stub_accepts_mutates():
     from hermes_cli.plugin_validate import _PROBE_SCRIPT
 
     assert "def register_hook(self, hook_name, callback, *, mutates=None)" in _PROBE_SCRIPT
+
+
+def test_safe_worker_does_not_report_a_mutating_hook():
+    """A safe worker never runs plugin hooks, so it never has a mutator.
+
+    ``invoke_hook`` returns empty there and ``has_hook`` says False; a
+    mutating hook that reports True would silence the stream for a
+    replacement that can never happen.
+    """
+    from agent.safe_worker_policy import _bind_safe_worker_policy
+
+    mgr = PluginManager()
+    ctx = _ctx(mgr)
+    ctx.register_hook("transform_llm_output", _noop, mutates=True)
+    assert mgr.has_mutating_hook("transform_llm_output") is True
+
+    import subprocess
+    import sys
+    import textwrap
+
+    probe = textwrap.dedent(
+        """
+        from agent.safe_worker_policy import _bind_safe_worker_policy
+        _bind_safe_worker_policy(safe_mode=True, ignore_user_config=True, config={})
+        from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+
+        mgr = PluginManager()
+        ctx = PluginContext(PluginManifest(name="p", source="user"), mgr)
+        ctx.register_hook("transform_llm_output", lambda **kw: None, mutates=True)
+        print("MUTATING", mgr.has_mutating_hook("transform_llm_output"))
+        """
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True,
+    ).stdout
+    assert "MUTATING False" in out
