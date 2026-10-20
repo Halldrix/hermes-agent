@@ -1110,11 +1110,15 @@ def _ignore_after_abandoned_load(method):
 # Every mutating entry point plugins reach through ``ctx`` during register(); applied by name so the
 # guard cannot drift from the surface as registrars are added. The bases are walked too: an entry
 # point a mixin contributes is inherited, and ``vars()`` on the subclass alone would not see it.
+# Each name once, and the guard OUTSIDE any decorator the method already carries.
+_guarded: set[str] = set()
 for _base in PluginContext.__mro__:
     for _name, _method in list(vars(_base).items()):
         if callable(_method) and (_name.startswith("register_") or _name in {"subscribe", "on_unload"}):
-            setattr(PluginContext, _name, _ignore_after_abandoned_load(_method))
-del _base, _name, _method
+            if _name not in _guarded:
+                setattr(PluginContext, _name, _ignore_after_abandoned_load(_method))
+                _guarded.add(_name)
+del _base, _name, _method, _guarded
 
 
 def _resolve_hook_callback_timeout() -> float:
@@ -1175,8 +1179,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._hooks: dict[str, list[Callable]] = {}
         # Fallback hooks registered by a memory provider before general discovery.
         self._memory_hook_registrations: dict[tuple[str, str], list[PluginRegistration]] = {}
-        # Parallel bookkeeping to ``_hooks``: whether each callback declared ``mutates=True``.
-        # Same index across both structures = one registration (an id-keyed set would collapse).
+        # Parallel to ``_hooks``; index-aligned (see PluginHookMixin.register_hook).
         self._hooks_mutating_flags: dict[str, list[bool]] = {}
         self._middleware: dict[str, list[Callable]] = {}
         self._plugin_tool_names: set[str] = set()
@@ -1876,12 +1879,10 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
     from hermes_cli.plugins_hooks import invoke_hook as _invoke
     return _invoke(hook_name, **kwargs)
 
-
 async def ainvoke_hook(hook_name: str, **kwargs: Any) -> list[Any]:
     """``invoke_hook`` for callers on an event loop: ``async def`` callbacks are awaited there."""
     from hermes_cli.plugins_hooks import ainvoke_hook as _ainvoke
     return await _ainvoke(hook_name, **kwargs)
-
 
 def render_system_prompt_sections(session_info: Mapping[str, Any]) -> list[RenderedPluginSystemPromptSection]:
     """Render plugin prompt sections after idempotent plugin discovery."""
@@ -1923,7 +1924,6 @@ def has_mutating_hook(hook_name: str) -> bool:
     """True when a loaded plugin handles a hook and marked it ``mutates=True`` at registration."""
     from hermes_cli.plugins_hooks import has_mutating_hook as _query
     return _query(hook_name)
-
 
 def iter_hook_callbacks(hook_name: str) -> tuple[Callable, ...]:
     """Return a stable snapshot of callbacks registered for a hook."""

@@ -60,6 +60,8 @@ class PluginHookMixin:
         from hermes_cli.plugins import VALID_HOOKS
 
         handle = self._track_callback("hook", hook_name, callback, self._manager._hooks, VALID_HOOKS)
+        # Parallel to ``_hooks`` and index-aligned with it: same index = one registration
+        # (an id-keyed set would collapse two registrations of the same callable).
         flags = self._manager._hooks_mutating_flags.setdefault(hook_name, [])
         flags.append(hook_mutates_by_default(hook_name) if mutates is None else bool(mutates))
         return handle
