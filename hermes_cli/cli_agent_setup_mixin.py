@@ -796,6 +796,9 @@ class CLIAgentSetupMixin:
         text, so the streamed bytes match the final render.
         """
         try:
+            # Local import on purpose: ``hermes_cli.plugins`` reaches the ``cli`` module
+            # (import cycle), and the per-call lookup is what lets a test patch the
+            # query. The statement costs ~0.06us against a sys.modules hit.
             from hermes_cli.plugins import has_mutating_hook
 
             return has_mutating_hook("transform_llm_output")
