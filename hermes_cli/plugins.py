@@ -900,7 +900,6 @@ def _reset_plugin_managers_for_tests() -> None:
                 logger.debug("test plugin-manager unload failed", exc_info=True)
         _plugin_managers_by_home.clear()
         _plugin_manager = None
-    global _published_running_turn_injector
     with _published_gateway_host_lock:
         _published_gateway_message_injector = None
         _published_running_turn_injector = None
