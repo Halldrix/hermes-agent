@@ -101,6 +101,33 @@ def _set_steer_parts(agent, parts: list) -> None:
     agent._pending_steer_parts = parts
     agent._pending_steer = "\n".join(text for _, text in parts) or None
 
+def _notice_parts(agent) -> list:
+    """The buffered machine notices as ``(ticket, text)`` pairs (``_pending_notice`` is their newline
+    join). A ticket names one submission (a gateway transfer). Delivery never makes a user row: notices
+    are appended to the newest tool result instead of the steer's standalone user message."""
+    pending = _ic_slot(agent, "_pending_notice_lock", "_pending_notice")
+    parts = vars(agent).get("_pending_notice_parts") or []
+    if "\n".join(text for _, text in parts) != (pending or ""):
+        return [(None, pending)] if pending else []
+    return list(parts)
+
+
+def _set_notice_parts(agent, parts: list) -> None:
+    agent._pending_notice_parts = parts
+    agent._pending_notice = "\n".join(text for _, text in parts) or None
+
+
+
+def requeue_drained_notice(agent, notice_text: str) -> None:
+    """Put drained notice text back when the injector found no tool result to append it to (e.g. every
+    tool in the batch was skipped). Kept out of the steer requeue so the two provenance classes never
+    swap kinds."""
+    with _ic_lock(agent, "_pending_notice_lock"):
+        drained, parts = vars(agent).pop("_notice_last_drain", (None, None))
+        if drained != notice_text or not parts:
+            parts = [(None, notice_text)]
+        _set_notice_parts(agent, _notice_parts(agent) + parts)
+
 
 def _steer_fates(agent) -> dict:
     """``{ticket: consumed}`` for ticketed steers that left the buffer: True when a drain handed the text
@@ -319,6 +346,52 @@ class InterruptControlMixin:
         # The turn no longer ran on its own (first-task-done detection reads this off the result).
         self._turn_user_intervened = True
         return True
+    def notice(self, text: str, *, ticket=None) -> bool:
+        """Queue machine-provenance text for delivery as its own user row after the newest tool
+        result (a machine footer, `internal_notification` display kind — never the out-of-band user
+        marker): the channel for background processes, the gateway and plugins. Returns False for
+        empty text. ``ticket`` names the submission, so ``withdraw_notice`` can settle exactly it,
+        whatever text others carry."""
+        if not text or not text.strip():
+            return False
+        cleaned = text.strip()
+        with _ic_lock(self, "_pending_notice_lock"):
+            _set_notice_parts(self, _notice_parts(self) + [(ticket, cleaned)])
+        return True
+
+    def _drain_pending_notices(self) -> Optional[str]:
+        """Return the pending notice text (if any) and clear the slot; None when nothing is pending."""
+        with _ic_lock(self, "_pending_notice_lock"):
+            text = _ic_slot(self, "_pending_notice_lock", "_pending_notice")
+            parts = _notice_parts(self)
+            _set_notice_parts(self, [])
+            self._notice_last_drain = (text, parts)  # requeue_drained_notice restores its tickets
+        return text
+
+    def withdraw_notice(self, ticket) -> bool:
+        """Settle one ``notice(text, ticket=...)`` by identity (the gateway's transfer of a queued
+        completion): True when no drain handed it to the turn, either still buffered (taken out now)
+        or dropped unread; False once a drain consumed it, or for an unknown one."""
+        if ticket is None:
+            return False
+        with _ic_lock(self, "_pending_notice_lock"):
+            parts = _notice_parts(self)
+            kept = [part for part in parts if part[0] != ticket]
+            if len(kept) == len(parts):
+                # never buffered: the queue-FIFO settlement decides where it goes
+                return False
+            _set_notice_parts(self, kept)
+        return True
+
+    def _drain_leftover_notices(self) -> None:
+        """The turn finalizer's drain: drop ticketless notices (a machine notice is not a follow-up a
+        restart may buffer) and keep each ticketed one for settlement, like the steer's leftover drain."""
+        if not _ic_slot(self, "_pending_notice_lock", "_pending_notice"):
+            return  # nothing buffered: skip the lock entirely (hot path on every finalization)
+        with _ic_lock(self, "_pending_notice_lock"):
+            parts = _notice_parts(self)
+            _set_notice_parts(self, [part for part in parts if part[0] is not None])
+
 
     def redirect(self, text: str) -> bool:
         """Redirect the active turn without converting it into a new task: during a model request only that

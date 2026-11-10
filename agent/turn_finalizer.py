@@ -845,6 +845,9 @@ def finalize_turn(
     # A /steer landing after the final assistant turn has no tool batch to drain into;
     # hand it back so it becomes the next user turn instead of being lost. A gateway transfer
     # (ticketed) stays buffered: the claim's settlement returns it to its own queue place.
+    # Third-party stub agents (test doubles, hosted workers without the notice seam) have no
+    # leftover drain; like the steer call below, absence is fine when there is nothing to give back.
+    getattr(agent, "_drain_leftover_notices", lambda: None)()
     _leftover_steer = (getattr(agent, "_drain_leftover_steer", None) or agent._drain_pending_steer)()
     if _leftover_steer:
         result["pending_steer"] = _leftover_steer

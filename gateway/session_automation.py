@@ -97,7 +97,32 @@ async def admit_process_notice(runner, authority, adapter, event, evt):
     async with _heartbeat_lock(runner):
         receipt = await _admit_folded_completion(authority, adapter, event, evt, identity)
         await withdraw_process_ticks(runner, evt)
-        return receipt
+    # The transfer self-fences (register-before-commit under the event-stream lock; a race lost to
+    # the drain reads as RuntimeStoreError and the row stays queued), so it runs off the heartbeat
+    # lock instead of serialising every completion behind one storage write.
+    await _notice_completion_into_running_turn(runner, authority, receipt, event)
+    return receipt
+
+
+async def _notice_completion_into_running_turn(runner, authority, receipt, event):
+    """Deliver an admitted completion into the turn that is running now, when configured to.
+
+    A completion queued behind a long turn reaches the agent minutes late — and the turn may be
+    the one waiting on that very process. With ``display.background_process_delivery: notice`` the
+    admitted row is handed to the running claim instead, through the same durable transfer the
+    client-facing ``prompt.steer_queued`` uses (the row leaves the queue, so the drain can never
+    claim it too, and a delivery that reached nobody puts it back in its FIFO place). Without a
+    live claim to take it the row stays queued and runs as the next turn, exactly as before.
+    """
+    from gateway.session_process_notice import delivery_mode, notice_completion_into_running_turn
+    if delivery_mode(runner._load_background_process_delivery()) != 'notice':
+        return
+    try:
+        if not await notice_completion_into_running_turn(authority, receipt, event.text or ''):
+            logger.info('Process completion stays queued: no running claim could take it')
+    except Exception:
+        # The queue path is the safe fallback; a failed notice must never cost the completion.
+        logger.warning('Steering a process completion into the running turn failed', exc_info=True)
 
 
 async def _admit_folded_completion(authority, adapter, event, evt, identity):

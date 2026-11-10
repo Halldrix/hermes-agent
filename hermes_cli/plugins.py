@@ -281,6 +281,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._plugin_secret_sources_reconciled: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
         self._gateway_message_injector: tuple[object, Callable] | None = None
+        self._running_turn_injector: tuple[object, Callable] | None = None
         # Ink TUI / desktop. Must not alias ``_gateway_message_injector``: a live
         # messaging gateway and a TUI in one process would otherwise clobber each other.
         self._tui_message_injector: tuple[object, Callable] | None = None
@@ -379,6 +380,25 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def set_tui_message_injector(self, owner: object, injector: Callable[..., bool]) -> None:
         """Publish a live TUI/desktop injector. Does not touch the messaging-gateway slot."""
         self._tui_message_injector = (owner, injector)
+
+    @property
+    def has_running_turn_injector(self) -> bool:
+        """Return whether a live gateway can take machine notices for a running turn."""
+        return self._running_turn_injector is not None
+
+    def set_running_turn_injector(self, owner: object, injector: Callable[..., bool]) -> None:
+        """Publish a live running-turn injector (machine notices delivered into the running turn)."""
+        self._running_turn_injector = (owner, injector)
+
+    def clear_running_turn_injector(self, owner: object) -> None:
+        """Clear the injector only when it still belongs to ``owner``."""
+        if self._running_turn_injector is not None and self._running_turn_injector[0] is owner:
+            self._running_turn_injector = None
+
+    def inject_running_turn(self, **kwargs: Any) -> bool:
+        """Deliver a machine notice into the live gateway's running turn."""
+        registered = self._running_turn_injector
+        return registered is not None and bool(registered[1](**kwargs))
 
     def clear_tui_message_injector(self, owner: object) -> None:
         """Clear the TUI injector only when it still belongs to ``owner``."""
@@ -716,6 +736,7 @@ _plugin_managers_lock = threading.RLock()
 # Process-wide messaging-gateway host. A multiplexed gateway owns one scheduler while plugins are
 # isolated in per-profile managers, so every manager in this process must see the same live host.
 _published_gateway_message_injector: tuple[object, Callable] | None = None
+_published_running_turn_injector: tuple[object, Callable] | None = None
 _published_gateway_host_lock = threading.Lock()
 
 # Process-wide Ink TUI / desktop host. Not the messaging-gateway slot. Stamped onto
@@ -780,12 +801,35 @@ def clear_published_gateway_message_host(owner: object) -> None:
             manager.clear_gateway_message_injector(owner)
 
 
+def publish_running_turn_host(owner: object, injector: Callable[..., bool]) -> None:
+    """Remember the process running-turn host and stamp managers that already exist."""
+    global _published_running_turn_injector
+    with _published_gateway_host_lock:
+        _published_running_turn_injector = (owner, injector)
+        for manager in _known_plugin_managers():
+            manager.set_running_turn_injector(owner, injector)
+
+
+def clear_published_running_turn_host(owner: object) -> None:
+    """Forget this owner's process running-turn host without clobbering a newer runner."""
+    global _published_running_turn_injector
+    with _published_gateway_host_lock:
+        if (_published_running_turn_injector is not None
+                and _published_running_turn_injector[0] is owner):
+            _published_running_turn_injector = None
+        for manager in _known_plugin_managers():
+            manager.clear_running_turn_injector(owner)
+
+
 def _attach_published_gateway_host(manager: PluginManager) -> None:
-    """Give a newly resolved profile manager the live process gateway host, if any."""
+    """Give a newly resolved profile manager the live process gateway hosts, if any."""
     with _published_gateway_host_lock:
         host = _published_gateway_message_injector
         if host is not None and manager._gateway_message_injector is None:
             manager.set_gateway_message_injector(*host)
+        host = _published_running_turn_injector
+        if host is not None and manager._running_turn_injector is None:
+            manager.set_running_turn_injector(*host)
 
 
 def publish_tui_message_host(owner: object, injector: Callable[..., bool]) -> None:
@@ -843,7 +887,7 @@ def get_plugin_manager() -> PluginManager:
 
 def _reset_plugin_managers_for_tests() -> None:
     """Test-only: drop every cached manager and its submodules for a fully clean slate."""
-    global _plugin_manager, _published_gateway_message_injector, _published_tui_message_injector
+    global _plugin_manager, _published_gateway_message_injector, _published_tui_message_injector, _published_running_turn_injector
     with _plugin_managers_lock:
         managers = list(dict.fromkeys(_plugin_managers_by_home.values()))
         if _plugin_manager is not None and _plugin_manager not in managers:
@@ -858,6 +902,7 @@ def _reset_plugin_managers_for_tests() -> None:
         _plugin_manager = None
     with _published_gateway_host_lock:
         _published_gateway_message_injector = None
+        _published_running_turn_injector = None
     with _published_tui_host_lock:
         _published_tui_message_injector = None
     # Dashboard-auth providers are persistent and survive a routine unload, so the clean-slate

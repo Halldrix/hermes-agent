@@ -148,6 +148,9 @@ def prepare_iteration(
     cache-safe by construction: steer text is appended as a new (not yet persisted) user row, the ghost-row
     filter neutralises copies of hidden interrupt placeholders, and repair runs BEFORE the request build."""
     from agent.conversation_loop import _maybe_inject_run_budget_wrapup
+    from agent.interrupt_control import requeue_drained_notice
+    from agent.prompt_builder import notice_user_row, steer_user_row
+    from agent.agent_runtime_helpers import _requeue_pending_steer
 
     # nous.anthropic_wire=auto: a wire switch decided from the previous response lands here,
     # before this iteration's request is built and with nothing in flight.
@@ -172,13 +175,16 @@ def prepare_iteration(
     # 401 was a storm, and the pool benched the sole credential for all of them.
     agent._adopt_nous_key_before_expiry()
 
-    # Drain a /steer sent during the last API call so it lands THIS iteration. Delivered as a
     # standalone user row after the newest tool result (never smeared onto the tool row: that
     # row is already persisted append-only, so replay would diverge from the live request and
     # break the prompt cache — same contract as apply_pending_steer_to_tool_results).
+    _pre_api_notice = agent._drain_pending_notices()
     _pre_api_steer = agent._drain_pending_steer()
-    if _pre_api_steer:
-        _inject_steer_after_newest_tool_result(agent, messages, _pre_api_steer)
+    _inject_pending_after_newest_tool_result(agent, messages, (
+        (notice_user_row, _pre_api_notice, requeue_drained_notice),
+        (steer_user_row, _pre_api_steer, _requeue_pending_steer),
+    ))
+
 
     # One-shot run-budget wrap-up notice at 80% of agent.run_budget_seconds, appended to the
     # newest tool result; off with no budget.
@@ -281,18 +287,20 @@ def _previous_tool_round(messages: Any) -> list:
     return []
 
 
-def _inject_steer_after_newest_tool_result(agent: Any, messages: Any, steer_text: str) -> None:
-    """Append the steer marker as a standalone user row after the newest tool message; with no
-    tool message, put the text back so the post-tool-execution drain delivers it later."""
-    for _si in range(len(messages) - 1, -1, -1):
-        _sm = messages[_si]
+def _inject_pending_after_newest_tool_result(agent: Any, messages: Any, rows: Any) -> None:
+    """Insert pending rows (``(row_builder, text, requeue)`` tuples, skipped when text is falsy) in ONE
+    tail scan after the newest tool message, in declared order; requeue each to its own drain when the
+    batch carried no tool result (nothing else can deliver it this iteration)."""
+    pending = [(rb, t, rq) for rb, t, rq in rows if t]
+    if not pending:
+        return
+    for _i in range(len(messages) - 1, -1, -1):
+        _sm = messages[_i]
         if isinstance(_sm, dict) and _sm.get("role") == "tool":
-            from agent.prompt_builder import steer_user_row
-            messages.insert(_si + 1, steer_user_row(steer_text))
-            logger.debug("Pre-API-call steer drain: appended user row after tool msg at index %d", _si)
+            messages[_i + 1:_i + 1] = [rb(t) for rb, t, _rq in pending]
             return
-    from agent.agent_runtime_helpers import _requeue_pending_steer
-    _requeue_pending_steer(agent, steer_text)
+    for _rb, t, rq in pending:
+        rq(agent, t)
 
 
 @dataclass

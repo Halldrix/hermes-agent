@@ -88,10 +88,17 @@ def steer_transfers(authority, session_id, generation):
     if entry is None or entry[0] != generation:
         return None
     adopted_generation, agent = authority.adopted.get(session_id, (None, None))
-    withdraw = getattr(agent, 'withdraw_steer', None) if adopted_generation == generation else None
+    if adopted_generation == generation:
+        withdraws = tuple(getattr(agent, name, None) for name in ("withdraw_steer", "withdraw_notice"))
+    else:
+        withdraws = ()
     for admission_id, delivered in entry[1].items():
-        if delivered and callable(withdraw) and withdraw(admission_id):
-            entry[1][admission_id] = False
+        if not delivered:
+            continue
+        for withdraw in withdraws:
+            if callable(withdraw) and withdraw(admission_id):
+                entry[1][admission_id] = False
+                break
     return dict(entry[1])
 
 
@@ -109,28 +116,92 @@ def _unregister(authority, session_id, generation, admission_id):
         del entry[1][admission_id]
 
 
-def _receiving_agent(authority, session_id, generation):
+from typing import Literal
+
+def _receiving_agent(authority, session_id, generation, kind: Literal["steer", "notice"] = "steer"):
     """The agent the running claim adopted, while that claim still executes. None before adoption (a
-    latched text would be dropped if construction then failed) and for a turn with no steer seam."""
+    latched/transferred text would be dropped if construction then failed) and for a turn whose agent
+    carries no delivery seam for ``kind`` (``steer`` for the user path, ``notice`` for machine text)."""
     adopted_generation, agent = authority.adopted.get(session_id, (None, None))
     if (adopted_generation != generation or authority.executing.get(session_id) != generation
-            or not callable(getattr(agent, 'steer', None))):
+            or not callable(getattr(agent, kind, None))):
         return None
     return agent
 
 
-def _deliver(authority, session_id, generation, agent, admission_id, text):
+def _deliver(authority, session_id, generation, agent, admission_id, text, kind: Literal["steer", "notice"] = "steer"):
     """Hand the committed text to the claim's agent; the caller holds the stream lock. False once the
-    claim stopped executing (its settlement then decides the row) or its agent refused the text."""
+    claim stopped executing (its settlement then decides the row) or its agent refused the text. ``kind``
+    picks the provenance: ``steer`` lands as the out-of-band user message, ``notice`` as a tool-result
+    appendix with machine provenance."""
     entry = authority.steer_transfers.get(session_id)
     if (entry is None or entry[0] != generation or admission_id not in entry[1]
-            or _receiving_agent(authority, session_id, generation) is not agent):
+            or _receiving_agent(authority, session_id, generation, kind=kind) is not agent):
         return False
     if not entry[1][admission_id]:
         # Ticketed by its admission id: settlement withdraws exactly it if no drain of the turn consumed it.
-        ticketed = callable(getattr(agent, 'withdraw_steer', None))
-        entry[1][admission_id] = bool(agent.steer(text, ticket=admission_id) if ticketed else agent.steer(text))
+        accept, withdraw = getattr(agent, kind), getattr(agent, f"withdraw_{kind}", None)
+        ticketed = callable(withdraw)
+        entry[1][admission_id] = bool(accept(text, ticket=admission_id) if ticketed else accept(text))
     return entry[1][admission_id]
+
+
+async def transfer_into_running_claim(authority, ref, generation, admission_id, text, *, kind: Literal["steer", "notice"] = "steer"):
+    """Hand a still-queued admission's text to the claim that is running now.
+
+    The one transfer protocol, in the order it must happen: the fence is registered BEFORE the
+    commit, the storage write runs off-loop with no lock held (a write under the event-stream lock
+    stalls the loop-side receipts, attaches and publication that take it), and a delivery that
+    reached nobody puts the row back in its own FIFO place instead of stranding it in terminal
+    ``steering`` with nobody holding it.
+
+    Returns ``(committed_row, fresh, delivered)``. ``committed_row`` is None when nothing live
+    could take the text (no running claim, or no seam for the given delivery): the row is untouched
+    and stays queued. ``delivered`` is False when the claim ended before the text reached the agent
+    -- the row is queued again, so it still runs.
+
+    ``kind`` picks the provenance: ``steer`` (default) hands the row the ticket of the running
+    turn's steer seam — a full user-authority injection, the same delivery #prompt.steer_queued
+    uses; ``notice`` hands it the machine-notice seam — an own user row after the newest tool result the model reads as
+    the gateway speaking, not the user. The background-process completion passes ``kind="notice"``."""
+    if kind not in ("steer", "notice"):
+        raise ValueError(f"transfer kind must be 'steer' or 'notice', got {kind!r}")
+    from gateway.session_runtime_workers import tracked_write
+    session_id = ref.session_id
+    live = authority.sessions[session_id]
+    with live.event_stream.lock:
+        agent = _receiving_agent(authority, session_id, generation, kind=kind)
+        if agent is None:
+            # Refused before the row is touched: it stays queued and runs in FIFO order.
+            return None, False, False
+        _register(authority, session_id, generation, admission_id)
+    try:
+        # The storage wait runs with no lock held; the registration above is the claim's fence.
+        committed, fresh = await tracked_write(authority, partial(
+            steer_session_input, authority.db, epoch=authority.epoch,
+            admission_id=admission_id, generation=generation))
+    except RuntimeStoreError:
+        # A definite refusal: nothing committed. Any other failure may follow a commit, so the
+        # fence stays and the claim's settlement decides the row (a no-op when nothing committed).
+        with live.event_stream.lock:
+            _unregister(authority, session_id, generation, admission_id)
+        raise
+    if not fresh:
+        # An exact retry of a transfer already committed: never deliver it twice.
+        return committed, False, False
+    with live.event_stream.lock:
+        delivered = _deliver(authority, session_id, generation, agent, admission_id, text, kind=kind)
+    if not delivered:
+        # The claim ended first: the text reached nobody, so the admission is queued again.
+        await tracked_write(authority, partial(revert_steer_input, authority.db, epoch=authority.epoch,
+                                               admission_id=admission_id, generation=generation))
+        with live.event_stream.lock:
+            _unregister(authority, session_id, generation, admission_id)
+        authority._publish_pending(ref)
+        authority._schedule(ref)
+        return committed, True, False
+    authority._publish_pending(ref)  # the card leaves the queue: its text is in the running turn
+    return committed, True, True
 
 
 async def steer_queued(connection, ref, params):
@@ -152,40 +223,16 @@ async def steer_queued(connection, ref, params):
     handle = authority._handle(ref)
     if handle.execution_state != 'running':
         raise RuntimeStoreError('session_idle')
-    generation, text, live = handle.execution_generation, row['payload']['text'], authority.sessions[ref.session_id]
-    session_id = ref.session_id
-    with live.event_stream.lock:
-        agent = _receiving_agent(authority, session_id, generation)
-        if agent is None:
-            # Refused before the row is touched: it stays queued and runs in FIFO order.
-            raise RuntimeStoreError('steer_unavailable', field='admission_id',
-                                    detail='the running turn has no agent to take a steer yet')
-        _register(authority, session_id, generation, admission_id)
-    from gateway.session_runtime_workers import tracked_write
-    try:
-        # The storage wait runs with no lock held; the registration above is the claim's fence.
-        committed, fresh = await tracked_write(authority, partial(
-            steer_session_input, authority.db, epoch=authority.epoch, admission_id=admission_id, generation=generation))
-    except RuntimeStoreError:
-        # A definite refusal: nothing committed. Any other failure may follow a commit, so the fence
-        # stays and the claim's settlement decides the row (a no-op when nothing committed).
-        with live.event_stream.lock:
-            _unregister(authority, session_id, generation, admission_id)
-        raise
-    if fresh:
-        with live.event_stream.lock:
-            delivered = _deliver(authority, session_id, generation, agent, admission_id, text)
-        if not delivered:
-            # The claim ended first: the text reached nobody, so the admission is queued again.
-            await tracked_write(authority, partial(revert_steer_input, authority.db, epoch=authority.epoch,
-                                                   admission_id=admission_id, generation=generation))
-            with live.event_stream.lock:
-                _unregister(authority, session_id, generation, admission_id)
-            authority._publish_pending(ref)
-            authority._schedule(ref)
-            raise RuntimeStoreError('steer_unavailable', field='admission_id',
-                                    detail='the running turn ended before the steer reached it')
-        authority._publish_pending(ref)  # the card leaves the queue: its text is in the running turn
+    generation, text = handle.execution_generation, row['payload']['text']
+    committed, fresh, delivered = await transfer_into_running_claim(
+        authority, ref, generation, admission_id, text)
+    if committed is None:
+        # Refused before the row is touched: it stays queued and runs in FIFO order.
+        raise RuntimeStoreError('steer_unavailable', field='admission_id',
+                                detail='the running turn has no agent to take a steer yet')
+    if fresh and not delivered:
+        raise RuntimeStoreError('steer_unavailable', field='admission_id',
+                                detail='the running turn ended before the steer reached it')
     return asdict(authority._receipt(committed))
 
 

@@ -68,6 +68,15 @@ Canonical local CLI/TUI/Desktop sessions admit completion and watch events into 
 FIFO as human input (private launch policy, `internal_notification` display kind); observers never
 own or consume those turns, and an interrupted started turn stays unknown and pauses its followers.
 
+`display.background_process_delivery` (default `queue`) chooses the agent's audience for a
+completion that lands while a turn is still running: `queue` leaves it for the next turn, `notice`
+hands the admitted row to the running claim through the client's own transfer protocol
+(`session_queued_controls.transfer_into_running_claim`, which both `prompt.steer_queued` and the
+completion path call) so the drain can never claim it too. The text rides the agent's machine-notice
+seam (its own user row after the newest tool result, `internal_notification` display kind, declared machine footer), never the out-of-band user marker — a
+messaging session reads it as the gateway speaking, on every surface. The knob has no seeded default
+(a runtime-read setting, in `hermes_cli/config_runtime_keys.py`); unset means `queue`.
+
 ## `/login` (off-turn, paired DM only)
 
 `GatewayLoginCommandsMixin` refuses outside a real paired DM (ntfy, raft and a2a report `dm` for

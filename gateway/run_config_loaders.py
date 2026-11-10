@@ -541,6 +541,15 @@ class GatewayConfigLoadersMixin:
         return DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT
 
     @staticmethod
+    def _load_background_process_delivery() -> str:
+        """How a background process completion reaches the agent while a turn is still running:
+        ``queue`` (it waits for the next turn) | ``notice`` (it is delivered into the running turn).
+        Read from the ambient profile — callers deciding for another profile's event enter its
+        scope first (``_completion_event_scope``)."""
+        from gateway.run import _load_gateway_config
+        return str(cfg_get(_load_gateway_config(), "display", "background_process_delivery", default="") or "").strip().lower()
+
+    @staticmethod
     def _load_background_notifications_mode() -> str:
         """Background process notification mode from env/config (default ``concise``), resolved for
         the AMBIENT profile — callers deciding for another profile's event enter its scope first
