@@ -10,9 +10,10 @@ client-facing ``prompt.steer_queued`` uses (``session_queued_controls.transfer_i
 ``kind="notice"``): the row moves ``queued`` -> terminal ``steering`` bound to the running
 generation, so the queue drain can never claim it too, and a delivery that reached nobody puts the
 row back in its FIFO place instead of stranding it. The text rides the claim's machine-notice
-drain — an appendix inside the newest tool result, under a declared machine-provenance header —
-never the out-of-band user marker, so the turn reads it as the gateway speaking rather than as an
-instruction from the user. Nothing is lost and nothing is delivered twice.
+drain as its own user row right after the newest tool result, `internal_notification` display
+kind, declared machine footer — never the out-of-band user marker — so the turn reads it as the
+gateway speaking rather than as an instruction from the user. Nothing is lost and nothing is
+delivered twice.
 
 Off by default (``display.background_process_delivery: queue``): delivering an automated notice
 mid-turn is a policy decision, not just plumbing.
