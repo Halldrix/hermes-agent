@@ -3706,6 +3706,35 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     )
 
 
+def apply_pending_notice_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
+    """Inject any pending machine notice into the tail tool result.
+
+    Machine twin of :func:`apply_pending_steer_to_tool_results`. Where the steer is emitted as a new
+    ``role:"user"`` message carrying the out-of-band user marker (full user authority), the notice is
+    appended INSIDE the newest tool result under a declared machine provenance header — the running
+    turn's model reads it as the gateway speaking, never as the user, and no extra role is introduced,
+    so role alternation and the prompt cache both hold.
+    """
+    if num_tool_msgs <= 0 or not messages:
+        return
+    notice_text = agent._drain_pending_notices()
+    if not notice_text:
+        return
+    from agent.interrupt_control import requeue_drained_notice
+    from agent.notice_inject import inject_notice_after_newest_tool_result
+    tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
+    target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
+    if target is None:
+        # No tool result in this batch (e.g. all skipped by interrupt); the gateway's transfer
+        # carries a settlement that requeues the admission, but we still keep the text buffered.
+        requeue_drained_notice(agent, notice_text)
+        return
+    inject_notice_after_newest_tool_result(agent, messages, notice_text)
+    _ra().logger.info(
+        "Delivered machine notice to agent after tool batch (%d chars)", len(notice_text),
+    )
+
+
 def _shutdown_socket(sock: Any) -> None:
     """``shutdown(SHUT_RDWR)`` WITHOUT closing the FD. ``close()`` from a non-owner thread is
     unsafe: the SSL BIO caches the raw FD, the kernel recycles it, and a flushed TLS record lands

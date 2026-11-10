@@ -1773,6 +1773,7 @@ class GatewayStartupMixin:
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
         self._running = True
+        self._install_running_turn_injector()
         self._install_plugin_message_injector()
         # A boot that could not start every configured platform is not a normal run: stamp ``degraded``
         # so ``gateway status`` / /api/status / the health snapshot surface it, instead of only a log
