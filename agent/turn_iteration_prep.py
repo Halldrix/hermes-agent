@@ -148,6 +148,7 @@ def prepare_iteration(
     cache-safe by construction: steer text is appended as a new (not yet persisted) user row, the ghost-row
     filter neutralises copies of hidden interrupt placeholders, and repair runs BEFORE the request build."""
     from agent.conversation_loop import _maybe_inject_run_budget_wrapup
+    from agent.notice_inject import inject_notice_after_newest_tool_result
 
     # nous.anthropic_wire=auto: a wire switch decided from the previous response lands here,
     # before this iteration's request is built and with nothing in flight.
@@ -172,13 +173,20 @@ def prepare_iteration(
     # 401 was a storm, and the pool benched the sole credential for all of them.
     agent._adopt_nous_key_before_expiry()
 
-    # Drain a /steer sent during the last API call so it lands THIS iteration. Delivered as a
     # standalone user row after the newest tool result (never smeared onto the tool row: that
     # row is already persisted append-only, so replay would diverge from the live request and
     # break the prompt cache — same contract as apply_pending_steer_to_tool_results).
     _pre_api_steer = agent._drain_pending_steer()
     if _pre_api_steer:
         _inject_steer_after_newest_tool_result(agent, messages, _pre_api_steer)
+    _pre_api_notice = agent._drain_pending_notices()
+    if _pre_api_notice:
+        if not inject_notice_after_newest_tool_result(agent, messages, _pre_api_notice):
+            # No mutable tool result this iteration (fresh turn, or every tool skipped): keep the
+            # text buffered; the transfer's settlement requeues the admission at turn end.
+            from agent.interrupt_control import requeue_drained_notice
+            requeue_drained_notice(agent, _pre_api_notice)
+
 
     # One-shot run-budget wrap-up notice at 80% of agent.run_budget_seconds, appended to the
     # newest tool result; off with no budget.
