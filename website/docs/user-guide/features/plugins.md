@@ -1148,7 +1148,7 @@ This plugin API does not expose a public HTTP endpoint or CLI command for extern
 
 ## Delivering notices into a running turn
 
-`ctx.deliver_to_running_turn()` delivers machine-provenance text into the turn that is running **now** — appended to the running turn's newest tool result under a declared machine-provenance header, never as a user message and never as the out-of-band user marker. The model reads it as the gateway speaking, not as you: no new user turn, no change to message-role alternation, and no claim on the user's authority.
+`ctx.deliver_to_running_turn()` delivers machine-provenance text into the turn that is running **now** — its own user row right after the newest tool result, carrying the `internal_notification` display kind and a declared machine footer, never the out-of-band user marker. The model reads it as the gateway speaking, not as you: no new user turn for the user to see, no change to message-role alternation, and no claim on the user's authority.
 
 This is the channel for notices a plugin produces mid-turn: a watcher script finishing, an event fired from outside, a result the plugin computed while the agent kept running.
 
@@ -1158,7 +1158,7 @@ ctx.deliver_to_running_turn("deploy finished: 3 services restarted")
 
 **Signature:** `ctx.deliver_to_running_turn(content: str, *, session_key: str | None = None) -> bool`
 
-- The notice lands inside the newest tool result of the running turn, on every surface.
+- The notice lands in its own user row right after the newest tool result of the running turn, on every surface.
 - With no `session_key`, the calling session is used; if no session is bound, the notice is refused.
 - With a `session_key`, delivery goes to that session's running turn.
 - `True` means a running turn took the notice. `False` means nothing was delivered anywhere — there is no queued fallback; for a durable fallback, use `ctx.inject_message()`.

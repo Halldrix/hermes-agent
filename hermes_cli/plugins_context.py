@@ -407,7 +407,7 @@ class PluginContext(PluginCapabilityCtxMixin):
     def deliver_to_running_turn(self, content: str, *, session_key: Optional[str] = None) -> bool:
         """Deliver machine-provenance text into the turn running now.
 
-        The content lands inside the running turn's newest tool result, never as a user row nor the
+        The content lands as its own user row after the newest tool result (machine provenance), never
         out-of-band user marker — the model reads the gateway's words, not an instruction from the user.
         There is no durable fallback: True means a running turn took the text. Pass ``session_key`` to
         target one session explicitly; with none, the calling session is used (or none is found).
