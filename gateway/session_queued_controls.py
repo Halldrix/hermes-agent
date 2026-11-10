@@ -116,7 +116,9 @@ def _unregister(authority, session_id, generation, admission_id):
         del entry[1][admission_id]
 
 
-def _receiving_agent(authority, session_id, generation, kind="steer"):
+from typing import Literal
+
+def _receiving_agent(authority, session_id, generation, kind: Literal["steer", "notice"] = "steer"):
     """The agent the running claim adopted, while that claim still executes. None before adoption (a
     latched/transferred text would be dropped if construction then failed) and for a turn whose agent
     carries no delivery seam for ``kind`` (``steer`` for the user path, ``notice`` for machine text)."""
@@ -127,7 +129,7 @@ def _receiving_agent(authority, session_id, generation, kind="steer"):
     return agent
 
 
-def _deliver(authority, session_id, generation, agent, admission_id, text, kind="steer"):
+def _deliver(authority, session_id, generation, agent, admission_id, text, kind: Literal["steer", "notice"] = "steer"):
     """Hand the committed text to the claim's agent; the caller holds the stream lock. False once the
     claim stopped executing (its settlement then decides the row) or its agent refused the text. ``kind``
     picks the provenance: ``steer`` lands as the out-of-band user message, ``notice`` as a tool-result
@@ -144,7 +146,7 @@ def _deliver(authority, session_id, generation, agent, admission_id, text, kind=
     return entry[1][admission_id]
 
 
-async def transfer_into_running_claim(authority, ref, generation, admission_id, text, *, kind="steer"):
+async def transfer_into_running_claim(authority, ref, generation, admission_id, text, *, kind: Literal["steer", "notice"] = "steer"):
     """Hand a still-queued admission's text to the claim that is running now.
 
     The one transfer protocol, in the order it must happen: the fence is registered BEFORE the
@@ -160,7 +162,7 @@ async def transfer_into_running_claim(authority, ref, generation, admission_id, 
 
     ``kind`` picks the provenance: ``steer`` (default) hands the row the ticket of the running
     turn's steer seam — a full user-authority injection, the same delivery #prompt.steer_queued
-    uses; ``notice`` hands it the machine-notice seam — a tool-result appendix the model reads as
+    uses; ``notice`` hands it the machine-notice seam — an own user row after the newest tool result the model reads as
     the gateway speaking, not the user. The background-process completion passes ``kind="notice"``."""
     if kind not in ("steer", "notice"):
         raise ValueError(f"transfer kind must be 'steer' or 'notice', got {kind!r}")

@@ -735,7 +735,8 @@ class TestPreApiCallSteerDrain:
         """A steer pending when the loop builds api_messages lands THIS iteration as a
         standalone user row after the newest tool result; the (already persisted, append-only)
         tool row is byte-identical afterwards so replay cannot diverge from the live request."""
-        from agent.turn_iteration_prep import _inject_steer_after_newest_tool_result
+        from agent.turn_iteration_prep import _inject_pending_after_newest_tool_result
+        from agent.prompt_builder import steer_user_row
 
         agent = _bare_agent()
         tool_row = {"role": "tool", "content": "output here", "tool_call_id": "tc1"}
@@ -748,7 +749,9 @@ class TestPreApiCallSteerDrain:
             tool_row,
         ]
         agent.steer("focus on error handling")
-        _inject_steer_after_newest_tool_result(agent, messages, agent._drain_pending_steer())
+        _inject_pending_after_newest_tool_result(agent, messages, (
+            (steer_user_row, agent._drain_pending_steer(), None),
+        ))
         assert tool_row == before
         assert messages[-2] is tool_row
         assert messages[-1]["role"] == "user"

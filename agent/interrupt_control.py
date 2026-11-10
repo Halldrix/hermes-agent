@@ -385,6 +385,8 @@ class InterruptControlMixin:
     def _drain_leftover_notices(self) -> None:
         """The turn finalizer's drain: drop ticketless notices (a machine notice is not a follow-up a
         restart may buffer) and keep each ticketed one for settlement, like the steer's leftover drain."""
+        if not _ic_slot(self, "_pending_notice_lock", "_pending_notice"):
+            return  # nothing buffered: skip the lock entirely (hot path on every finalization)
         with _ic_lock(self, "_pending_notice_lock"):
             parts = _notice_parts(self)
             _set_notice_parts(self, [part for part in parts if part[0] is not None])
