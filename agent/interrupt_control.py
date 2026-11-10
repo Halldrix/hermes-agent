@@ -347,10 +347,11 @@ class InterruptControlMixin:
         self._turn_user_intervened = True
         return True
     def notice(self, text: str, *, ticket=None) -> bool:
-        """Queue machine-provenance text for delivery inside the newest tool result (never a user
-        row, never the out-of-band user marker): the notification channel for background processes,
-        the gateway and plugins. Returns False for empty text. ``ticket`` names the submission, so
-        ``withdraw_notice`` can settle exactly it, whatever text others carry."""
+        """Queue machine-provenance text for delivery as its own user row after the newest tool
+        result (a machine footer, `internal_notification` display kind — never the out-of-band user
+        marker): the channel for background processes, the gateway and plugins. Returns False for
+        empty text. ``ticket`` names the submission, so ``withdraw_notice`` can settle exactly it,
+        whatever text others carry."""
         if not text or not text.strip():
             return False
         cleaned = text.strip()

@@ -642,7 +642,7 @@ display:
 | `queue` | The completion waits for the agent's next turn (default) |
 | `notice` | The completion is delivered into the turn that is running now, so a long turn does not have to finish before the agent learns the result |
 
-`notice` works on every surface — a Telegram or Discord session's running turn receives it exactly as it already receives notices mid-turn. The text is injected inside a tool result with a declared machine-provenance header, never as a user message, so the agent never mistakes it for something you typed. If the turn has ended by the time the process finishes, the completion is queued as usual.
+`notice` works on every surface — a Telegram or Discord session's running turn receives it exactly as it already receives mid-turn notices. The text is injected as its own user row right after the newest tool result, carrying the `internal_notification` display kind and a declared machine footer (the same provenance contract the queued notifications use), so the agent never mistakes it for something you typed. If the turn has ended by the time the process finishes, the completion is queued as usual.
 
 ### Use Cases
 

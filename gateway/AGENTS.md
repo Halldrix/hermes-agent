@@ -73,7 +73,7 @@ completion that lands while a turn is still running: `queue` leaves it for the n
 hands the admitted row to the running claim through the client's own transfer protocol
 (`session_queued_controls.transfer_into_running_claim`, which both `prompt.steer_queued` and the
 completion path call) so the drain can never claim it too. The text rides the agent's machine-notice
-seam (tool-result appendix, declared machine provenance), never the out-of-band user marker — a
+seam (its own user row after the newest tool result, `internal_notification` display kind, declared machine footer), never the out-of-band user marker — a
 messaging session reads it as the gateway speaking, on every surface. The knob has no seeded default
 (a runtime-read setting, in `hermes_cli/config_runtime_keys.py`); unset means `queue`.
 
