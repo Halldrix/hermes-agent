@@ -117,9 +117,6 @@ def _set_notice_parts(agent, parts: list) -> None:
     agent._pending_notice = "\n".join(text for _, text in parts) or None
 
 
-def _notice_fates(agent) -> dict:
-    return vars(agent).setdefault("_notice_ticket_fates", {})
-
 
 def requeue_drained_notice(agent, notice_text: str) -> None:
     """Put drained notice text back when the injector found no tool result to append it to (e.g. every
@@ -129,8 +126,6 @@ def requeue_drained_notice(agent, notice_text: str) -> None:
         drained, parts = vars(agent).pop("_notice_last_drain", (None, None))
         if drained != notice_text or not parts:
             parts = [(None, notice_text)]
-        for ticket, _ in parts:
-            _notice_fates(agent).pop(ticket, None)
         _set_notice_parts(agent, _notice_parts(agent) + parts)
 
 
@@ -369,9 +364,6 @@ class InterruptControlMixin:
             text = _ic_slot(self, "_pending_notice_lock", "_pending_notice")
             parts = _notice_parts(self)
             _set_notice_parts(self, [])
-            for ticket, _ in parts:
-                if ticket is not None:
-                    _notice_fates(self)[ticket] = True
             self._notice_last_drain = (text, parts)  # requeue_drained_notice restores its tickets
         return text
 
@@ -384,9 +376,9 @@ class InterruptControlMixin:
         with _ic_lock(self, "_pending_notice_lock"):
             parts = _notice_parts(self)
             kept = [part for part in parts if part[0] != ticket]
-            consumed = _notice_fates(self).pop(ticket, True)
             if len(kept) == len(parts):
-                return consumed is False
+                # never buffered: the queue-FIFO settlement decides where it goes
+                return False
             _set_notice_parts(self, kept)
         return True
 

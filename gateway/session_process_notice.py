@@ -30,18 +30,9 @@ DELIVERY_MODES = ("queue", "notice")
 def delivery_mode(mode: str | None = None) -> str:
     """How a process completion reaches the agent: ``queue`` (default) or ``notice``.
 
-    ``mode`` is the resolved knob (the runner reads it, like the other display settings); without
-    it the ambient gateway config answers. ``queue`` keeps today's behaviour — the completion waits
-    for the next turn. ``notice`` delivers it into the turn that is running now, when one is.
+    ``mode`` is the resolved knob. A missing or unknown value keeps today's behaviour — the
+    completion waits for the next turn. ``notice`` delivers it into the turn that is running now.
     """
-    if mode is None:
-        try:
-            from gateway.run_config_loaders import GatewayConfigLoadersMixin
-            mode = GatewayConfigLoadersMixin._load_background_process_delivery()
-        except Exception:
-            # No gateway config to read: keep the default rather than lose the completion.
-            logger.warning('Gateway config unavailable; a process completion stays queued', exc_info=True)
-            return "queue"
     raw = str(mode or "").strip().lower()
     return raw if raw in DELIVERY_MODES else "queue"
 

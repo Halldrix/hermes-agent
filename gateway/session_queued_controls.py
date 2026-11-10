@@ -162,6 +162,8 @@ async def transfer_into_running_claim(authority, ref, generation, admission_id, 
     turn's steer seam — a full user-authority injection, the same delivery #prompt.steer_queued
     uses; ``notice`` hands it the machine-notice seam — a tool-result appendix the model reads as
     the gateway speaking, not the user. The background-process completion passes ``kind="notice"``."""
+    if kind not in ("steer", "notice"):
+        raise ValueError(f"transfer kind must be 'steer' or 'notice', got {kind!r}")
     from gateway.session_runtime_workers import tracked_write
     session_id = ref.session_id
     live = authority.sessions[session_id]
