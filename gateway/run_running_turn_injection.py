@@ -9,7 +9,6 @@ settlement (the background-process completion keeps it via the admission transfe
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Optional
 
 logger = logging.getLogger("gateway.run")
@@ -37,6 +36,10 @@ class GatewayRunningTurnMixin:
         a notice is bound to the turn it landed on, not broadcast.
         """
         if not session_key or not isinstance(content, str) or not content.strip():
+            return False
+        # Same profile boundary as the message injector: a plugin cannot plant a machine notice
+        # into another profile's running turn under multiplexing.
+        if not self._plugin_session_key_admissible(session_key, plugin_home=plugin_home, plugin_id=plugin_id):
             return False
         state = self._peek_session_state(session_key)
         agent = getattr(getattr(state, "turn", None), "agent", None)

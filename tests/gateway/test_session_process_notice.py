@@ -11,7 +11,8 @@ import asyncio
 
 import pytest
 
-from agent.notice_inject import MACHINE_NOTICE_SUFFIX, inject_notice_after_newest_tool_result
+from agent.prompt_builder import NOTICE_DISPLAY_KIND
+from agent.turn_iteration_prep import _inject_notice_after_newest_tool_result
 from hermes_state_runtime import admit_session_input, claim_session_input, list_session_admissions
 from tests.gateway.test_session_end_delegations import _local
 
@@ -169,7 +170,7 @@ def test_the_delivery_knob_reads_queue_unless_it_says_notice():
     assert delivery_mode('nonsense') == 'queue'
 
 
-def test_machine_notice_is_appended_to_the_tool_result_not_a_user_row():
+def test_machine_notice_is_a_user_row_with_machine_provenance_after_tool():
     agent = Agent()
     agent.notice('process radar finished', ticket='t1')
     drained = agent._drain_pending_notices()
@@ -179,12 +180,12 @@ def test_machine_notice_is_appended_to_the_tool_result_not_a_user_row():
         {'role': 'assistant', 'content': 'working', 'tool_calls': [{'id': 'c1'}]},
         {'role': 'tool', 'tool_call_id': 'c1', 'content': 'build finished'},
     ]
-    assert inject_notice_after_newest_tool_result(agent, messages, drained) is True
-    tool = messages[1]
-    assert MACHINE_NOTICE_SUFFIX in tool['content'], 'machine provenance missing'
-    assert 'process radar finished' in tool['content']
-    assert '[OUT-OF-BAND USER MESSAGE' not in tool['content']
-    assert [m['role'] for m in messages] == ['assistant', 'tool'], 'a notice never makes a user row'
+    _inject_notice_after_newest_tool_result(agent, messages, drained)
+    assert [m['role'] for m in messages] == ['assistant', 'tool', 'user']
+    row = messages[2]
+    assert row['display_kind'] == NOTICE_DISPLAY_KIND
+    assert 'not written by a human user' in row['content']
+    assert 'OUT-OF-BAND USER MESSAGE' not in row['content']
 
 
 def test_a_notice_withdrawn_before_injection_stays_unconsumed():

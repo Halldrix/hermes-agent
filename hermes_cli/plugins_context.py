@@ -429,6 +429,7 @@ class PluginContext(PluginCapabilityCtxMixin):
             with _facade()._plugin_home_scope(self._manager.home_path):
                 cfg = _facade().load_config_readonly() or {}
         except Exception:
+            logger.warning("deliver_to_running_turn: could not read the plugin profile config", exc_info=True)
             return False
         return (_facade()._plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_running_turn_injection") is True
 
