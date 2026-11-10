@@ -68,3 +68,44 @@ def inject_plugin_message(
     except Exception:
         logger.warning("inject_message: gateway scheduling failed for plugin %s", ctx.plugin_id, exc_info=True)
         return False
+
+
+def deliver_running_turn_message(ctx: Any, content: str, *, session_key: Optional[str] = None) -> bool:
+    """Deliver machine-provenance text into the turn that is running now.
+
+    The text lands inside the running turn's newest tool result, never as a user row, never as the
+    out-of-band user marker — the model reads the gateway's words, not an instruction from the user.
+    Returns ``False`` when no live turn can take it (nothing is delivered or queued in its place).
+    """
+    manager = ctx._manager
+    if not isinstance(content, str) or not content.strip():
+        return False
+    # Local REPL: the running turn is in this process, on this thread's agent.
+    cli = manager._cli_ref
+    if cli is not None:
+        agent = getattr(cli, "_agent", None)
+        notice = getattr(agent, "notice", None)
+        if callable(notice):
+            return bool(notice(content.strip()))
+        logger.warning("deliver_to_running_turn: the running turn carries no notice seam")
+        return False
+    if not manager.has_running_turn_injector:
+        logger.warning("deliver_to_running_turn: no live gateway is available")
+        return False
+    if session_key is not None:
+        if not isinstance(session_key, str):
+            logger.warning("deliver_to_running_turn: session_key must be a string")
+            return False
+        target = session_key.strip()
+    else:
+        from gateway.session_context import bound_session_key
+        target = bound_session_key()
+        if not target:
+            logger.warning("deliver_to_running_turn: no session bound here; pass session_key")
+            return False
+    try:
+        return bool(manager.inject_running_turn(content=content.strip(), plugin_id=ctx.plugin_id,
+                                                  session_key=target))
+    except Exception:
+        logger.warning("deliver_to_running_turn scheduling failed for plugin %s", ctx.plugin_id, exc_info=True)
+        return False

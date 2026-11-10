@@ -112,6 +112,7 @@ Every `ctx.*` API below is available inside a plugin's `register(ctx)` function.
 | Dispatch tools from commands | `ctx.dispatch_tool(name, args)` — invokes a registered tool with parent-agent context auto-wired |
 | Add CLI commands | `ctx.register_cli_command(name, help, setup_fn, handler_fn)` — adds `hermes <plugin> <subcommand>` |
 | Inject messages | `ctx.inject_message(content, role="user", session_key=... \| origin=...)` - see [Injecting Messages](#injecting-messages) |
+| Deliver machine notices into a running turn | `ctx.deliver_to_running_turn(content, session_key=...)` - see [Delivering notices into a running turn](#delivering-notices-into-a-running-turn) |
 | Post and edit a status message | `handle = ctx.post_message(text)`, then `handle.edit(text)` — see [Posting a live message](#posting-a-live-message) |
 | Ship data files | `Path(__file__).parent / "data" / "file.yaml"` |
 | Bundle skills | `ctx.register_skill(name, path)` — namespaced as `plugin:skill`, loaded via `skill_view("plugin:skill")` |
@@ -1142,6 +1143,36 @@ Only grant gateway injection to plugins you trust. Hermes checks this host API p
 
 :::note
 This plugin API does not expose a public HTTP endpoint or CLI command for external processes. The plugin must already know the target gateway `session_key`, for example from its own trusted configuration or previously retained session state.
+:::
+
+
+## Delivering notices into a running turn
+
+`ctx.deliver_to_running_turn()` delivers machine-provenance text into the turn that is running **now** — appended to the running turn's newest tool result under a declared machine-provenance header, never as a user message and never as the out-of-band user marker. The model reads it as the gateway speaking, not as you: no new user turn, no change to message-role alternation, and no claim on the user's authority.
+
+This is the channel for notices a plugin produces mid-turn: a watcher script finishing, an event fired from outside, a result the plugin computed while the agent kept running.
+
+```python
+ctx.deliver_to_running_turn("deploy finished: 3 services restarted")
+```
+
+**Signature:** `ctx.deliver_to_running_turn(content: str, *, session_key: str | None = None) -> bool`
+
+- The notice lands inside the newest tool result of the running turn, on every surface.
+- With no `session_key`, the calling session is used; if no session is bound, the notice is refused.
+- With a `session_key`, delivery goes to that session's running turn.
+- `True` means a running turn took the notice. `False` means nothing was delivered anywhere — there is no queued fallback; for a durable fallback, use `ctx.inject_message()`.
+- It is disabled by default for every plugin. Grant it per plugin in `config.yaml`, same shape as `allow_gateway_injection`:
+
+```yaml
+plugins:
+  entries:
+    my-plugin:
+      allow_running_turn_injection: true
+```
+
+:::warning
+Only grant this to plugins you trust. The notice lands mid-turn, where the model is actively working; a plugin that misstates what happened steers the turn it is supposed to only inform. Grant it the same way you grant gateway injection.
 :::
 
 ## Plugin code inside the gateway

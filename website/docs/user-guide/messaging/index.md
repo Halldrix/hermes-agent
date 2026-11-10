@@ -628,6 +628,20 @@ HERMES_BACKGROUND_NOTIFICATIONS=result
 
 With `terminal(background=true, notify_on_complete=true)` the finished process starts a new agent turn and the agent reports the result itself, so no separate status line is sent. The exception is a process that finishes while the turn that launched it is still running: the completion is queued as the agent's next turn and you get the one-line `concise` status right away (unless the mode is `off`, or `error` with a zero exit code), instead of silence until that turn ends.
 
+If you would rather the running turn learn about the completion right away, set `display.background_process_delivery`:
+
+```yaml
+display:
+  background_process_delivery: notice    # queue | notice
+```
+
+| Mode | What you receive |
+|------|-----------------|
+| `queue` | The completion waits for the agent's next turn (default) |
+| `notice` | The completion is delivered into the turn that is running now, so a long turn does not have to finish before the agent learns the result |
+
+`notice` works on every surface — a Telegram or Discord session's running turn receives it exactly as it already receives notices mid-turn. The text is injected inside a tool result with a declared machine-provenance header, never as a user message, so the agent never mistakes it for something you typed. If the turn has ended by the time the process finishes, the completion is queued as usual.
+
 ### Use Cases
 
 - **Server monitoring** — "/bg Check the health of all services and alert me if anything is down"

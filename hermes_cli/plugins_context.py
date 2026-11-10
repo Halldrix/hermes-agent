@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 from functools import cached_property
 from pathlib import Path
+import logging
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from hermes_cli.plugins_capability_ctx import PluginCapabilityCtxMixin
 from hermes_cli.plugins_dispatch import DEFAULT_SYSTEM_PROMPT_SECTION_MAX_CHARS
 from hermes_cli.plugins_ledger import PluginRegistration
+
+logger = logging.getLogger(__name__)
 from hermes_cli.plugins_loader import _serialized_replacement
 from hermes_cli.plugins_manifest import PluginManifest
 from hermes_cli.plugins_registrars import register_scoped_provider, scoped_provider_registrar
@@ -400,6 +403,34 @@ class PluginContext(PluginCapabilityCtxMixin):
         (``origin``); ``True`` means a host accepted it. Contract: plugins_injection.py, plugin docs."""
         from hermes_cli.plugins_injection import inject_plugin_message
         return inject_plugin_message(self, content, role, session_key=session_key, origin=origin)
+
+    def deliver_to_running_turn(self, content: str, *, session_key: Optional[str] = None) -> bool:
+        """Deliver machine-provenance text into the turn running now.
+
+        The content lands inside the running turn's newest tool result, never as a user row nor the
+        out-of-band user marker — the model reads the gateway's words, not an instruction from the user.
+        There is no durable fallback: True means a running turn took the text. Pass ``session_key`` to
+        target one session explicitly; with none, the calling session is used (or none is found).
+        """
+        if not isinstance(content, str) or not content.strip():
+            return False
+        if not self._running_turn_injection_allowed():
+            logger.warning(
+                "deliver_to_running_turn: denied for plugin %s; set plugins.entries.%s.allow_running_turn_injection: true to allow it",
+                self.plugin_id, self.plugin_id)
+            return False
+        from hermes_cli.plugins_injection import deliver_running_turn_message
+        return deliver_running_turn_message(self, content, session_key=session_key)
+
+    def _running_turn_injection_allowed(self) -> bool:
+        """Return whether this plugin may deliver into a running turn (its own profile config,
+        never the calling thread's ambient home)."""
+        try:
+            with _facade()._plugin_home_scope(self._manager.home_path):
+                cfg = _facade().load_config_readonly() or {}
+        except Exception:
+            return False
+        return (_facade()._plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_running_turn_injection") is True
 
     def session_cwd(self) -> str:
         """The calling session's recorded cwd, never the gateway's own (``plugin_session``)."""

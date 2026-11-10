@@ -877,7 +877,10 @@ The gateway runs as a long-lived process, managed via:
 ## Background process notifications
 
 `terminal(background=true, notify_on_complete=true)` starts a gateway watcher that detects
-completion and triggers a new agent turn. Verbosity: `display.background_process_notifications`
+completion and triggers a new agent turn. Verbosity: `display.background_process_notifications`.
+A completion that lands while a turn is still running waits for the next turn by default;
+`display.background_process_delivery: notice` hands the admitted row to the running claim instead
+(the client's own transfer protocol, so the drain can never claim it too), on every surface.
 (or `HERMES_BACKGROUND_NOTIFICATIONS`): `concise` (default; one line, failures append an output
 tail), `all` (running updates + final raw output), `result` (final raw output only), `error`
 (final raw output only on non-zero exit), `off`.
