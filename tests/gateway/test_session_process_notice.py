@@ -12,7 +12,9 @@ import asyncio
 import pytest
 
 from agent.prompt_builder import NOTICE_DISPLAY_KIND
-from agent.turn_iteration_prep import _inject_notice_after_newest_tool_result
+from agent.interrupt_control import requeue_drained_notice
+from agent.turn_iteration_prep import _inject_pending_after_newest_tool_result
+from agent.prompt_builder import notice_user_row
 from hermes_state_runtime import admit_session_input, claim_session_input, list_session_admissions
 from tests.gateway.test_session_end_delegations import _local
 
@@ -180,7 +182,9 @@ def test_machine_notice_is_a_user_row_with_machine_provenance_after_tool():
         {'role': 'assistant', 'content': 'working', 'tool_calls': [{'id': 'c1'}]},
         {'role': 'tool', 'tool_call_id': 'c1', 'content': 'build finished'},
     ]
-    _inject_notice_after_newest_tool_result(agent, messages, drained)
+    _inject_pending_after_newest_tool_result(agent, messages, (
+        (notice_user_row, drained, requeue_drained_notice),
+    ))
     assert [m['role'] for m in messages] == ['assistant', 'tool', 'user']
     row = messages[2]
     assert row['display_kind'] == NOTICE_DISPLAY_KIND
