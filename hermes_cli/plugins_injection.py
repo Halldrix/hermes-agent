@@ -73,8 +73,9 @@ def inject_plugin_message(
 def deliver_running_turn_message(ctx: Any, content: str, *, session_key: Optional[str] = None) -> bool:
     """Deliver machine-provenance text into the turn that is running now.
 
-    The text lands inside the running turn's newest tool result, never as a user row, never as the
-    out-of-band user marker — the model reads the gateway's words, not an instruction from the user.
+    The text lands as its own user row after the newest tool result carrying a declared machine
+    footer and display_kind=internal_notification — never the out-of-band user marker, never user
+    authority: the model reads the gateway's words, not an instruction from the user.
     Returns ``False`` when no live turn can take it (nothing is delivered or queued in its place).
     """
     manager = ctx._manager
