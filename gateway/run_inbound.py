@@ -31,6 +31,7 @@ from gateway.run_inbound_moa import GatewayInboundMoaMixin
 from gateway.run_inbound_transcription import GatewayInboundTranscriptionMixin
 from gateway.run_plugin_injection import GatewayPluginInjectionMixin
 from gateway.run_turn_setup_guard import cancel_preagent_setup, pending_setup_busy_notice
+from gateway.run_running_turn_injection import GatewayRunningTurnMixin
 from gateway.run_inbound_unauthorized import (
     UnauthorizedOwnerNotifier, pairing_code_reply, pairing_profile_arg, pairing_rate_limited_reply,
     unauthorized_owner_hint,
@@ -75,7 +76,7 @@ def strip_discord_triggering_note(event: Any, message_text: Any) -> Any:
 
 
 class GatewayInboundMixin(
-    GatewayInboundHooksMixin, GatewayInboundTranscriptionMixin, GatewayPluginInjectionMixin, GatewayInboundMoaMixin,
+    GatewayInboundHooksMixin, GatewayInboundTranscriptionMixin, GatewayPluginInjectionMixin, GatewayRunningTurnMixin, GatewayInboundMoaMixin,
 ):
     """Inbound message pipeline (_handle_message, text/media preparation, durable-turn markers, plugin injection) for GatewayRunner."""
 

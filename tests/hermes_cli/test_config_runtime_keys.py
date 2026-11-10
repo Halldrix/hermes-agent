@@ -142,6 +142,18 @@ def test_computer_use_backend_set_is_what_the_selector_reads(hermes_home, capsys
     assert configured_backend_name() == "widget-driver"
 
 
+def test_background_process_delivery_set_is_what_the_gateway_reads(hermes_home, capsys):
+    """The knob the gateway reads for a completion that lands mid-turn: set it, and read it back
+    through the loader the consuming surface uses (the gateway's raw user YAML)."""
+    from gateway.run_config_loaders import GatewayConfigLoadersMixin
+
+    assert not _set_notice("display.background_process_delivery", "steer", capsys)
+    assert GatewayConfigLoadersMixin._load_background_process_delivery() == "steer"
+    # An unknown value keeps the default rather than turning the feature on by accident.
+    _write_config(hermes_home, {"display": {"background_process_delivery": "nonsense"}})
+    assert GatewayConfigLoadersMixin._load_background_process_delivery() == "queue"
+
+
 def test_plugin_config_keys_count_only_while_the_plugin_is_enabled(hermes_home, capsys):
     _plugin(hermes_home / "plugins", "widget-plugin", ["display.widget"])
 
