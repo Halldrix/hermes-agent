@@ -635,7 +635,9 @@ def _collect_review_call_details(review_messages: list[dict]) -> tuple[set, dict
     """Map review-agent tool_call ids -> parsed call arguments for notify tools. Result JSON only
     says "Entry added"; the call arguments carry action, target and content previews. Restricting
     to notify tools keeps helper tools from surfacing as memory work just because they succeeded."""
-    notify_tools = {"memory", "skill_manage"}
+    _static_notify = {"memory", "skill_manage"}
+    def _is_notify(name: str) -> bool:
+        return name in _static_notify or name.startswith("mnemosyne_")
     all_tool_call_ids: set = set()
     call_details: dict = {}
     for msg in review_messages or []:
@@ -649,7 +651,7 @@ def _collect_review_call_details(review_messages: list[dict]) -> tuple[set, dict
             tcid = tc.get("id")
             if tcid:
                 all_tool_call_ids.add(tcid)
-            if fn_name not in notify_tools or not tcid:
+            if _is_notify(fn_name) is False or not tcid:
                 continue
             try:
                 args = json.loads(fn.get("arguments", "{}"))
@@ -681,8 +683,13 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
         # consolidation proposal must surface here or it is silently lost (#105921).
         return [data["message"]] if data.get("proposal_staged") and data.get("message") else []
     message = data.get("message", "")
+    is_provider = isinstance(detail.get("tool"), str) and detail["tool"].startswith("mnemosyne_")
     target = data.get("target", "") or detail.get("target", "")
     is_skill = detail.get("tool") == "skill_manage"
+    if is_provider:
+        # External provider writes: provider tool results carry a status, not a legacy message,
+        # so the summary line is the generic provider-memory one.
+        return [t("display.review.label_updated", label=t("display.review.label.memory"))]
     if is_skill and "results" in data:
         # The requested operations are not evidence of applied writes (approval
         # and atomic rollback can leave all of them unapplied).
@@ -932,6 +939,101 @@ def _routed_reasoning_config(task_cfg: Optional[dict[str, Any]]) -> Optional[dic
     return parsed
 
 
+def _external_memory_manager(agent: Any) -> Any:
+    """The parent's MemoryManager if it carries a non-builtin provider, else None.
+
+    Providers must stay one-owner: the review fork gets a dispatch-only view (below), never
+    the parent's manager itself — the fork has no session of its own."""
+    manager = getattr(agent, "_memory_manager", None)
+    if manager is None:
+        return None
+    try:
+        providers = list(getattr(manager, "providers", ()) or ())
+    except Exception:
+        logger.warning("background review: could not enumerate memory providers", exc_info=True)
+        return None
+    return manager if any(getattr(p, "name", "") != "builtin" for p in providers) else None
+
+
+
+# The harness guidance for a review against an external memory provider (e.g. Mnemosyne):
+# appended to the review's own user message so the fork knows durable memory lives there
+# instead of in USER.md/MEMORY.md. Static guidance; the prompt cache is untouched.
+_EXTERNAL_MEMORY_REVIEW_BLOCK = (
+    "EXTERNAL MEMORY PROVIDER: this installation routes durable memory to a local provider "
+    "(Mnemosyne), not to USER.md/MEMORY.md alone. Use the mnemosyne_* tools for anything durable: "
+    "mnemosyne_recall before writing (check what already exists), mnemosyne_remember for ordinary "
+    "facts/preferences/insights, mnemosyne_remember_canonical for stable single-source-of-truth slots "
+    "(identity, standing preferences), mnemosyne_update/mnemosyne_invalidate to correct or supersede "
+    "stale entries. The legacy memory tool still writes USER.md/MEMORY.md; prefer the mnemosyne_* tools "
+    "for new durable facts and reserve the legacy tool for the stores that still live there. Every "
+    "existing rule stands: one fact, one store; grounded facts only; if unsure, skip."
+)
+
+
+class _ExternalMemoryView:
+    """Dispatch-only view of the parent's external memory-provider manager for the review fork.
+
+    The review shares the parent's provider *process resources* (the provider instance is the
+    parent's) but no lifecycle: auto-turn hooks are no-ops/absent because the foreground turn
+    already ran sync/prefetch/session-end there, and the fork's harness prompt must never land in
+    the user's memory namespace. Same-model forks advertise the parent tools[] verbatim, so this
+    exists for has_tool/handle_tool_call dispatch and provider-tool injection on the routed path;
+    build_system_prompt() returns "" because the fork reuses the parent prompt bytes."""
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    @property
+    def providers(self):  # consumers only inspect names (e.g. the injection log line)
+        return [p for p in (getattr(self._manager, "providers", ()) or ()) if getattr(p, "name", "") != "builtin"]
+
+    def has_tool(self, name: str) -> bool:
+        try:
+            return bool(self._manager.has_tool(name))
+        except Exception:
+            logger.warning("background review: provider has_tool(%r) failed", name, exc_info=True)
+            return False
+
+    def get_all_tool_names(self) -> set:
+        try:
+            return set(self._manager.get_all_tool_names())
+        except Exception:
+            logger.warning("background review: provider get_all_tool_names() failed", exc_info=True)
+            return set()
+
+    def get_all_tool_schemas(self) -> list:
+        try:
+            return list(self._manager.get_all_tool_schemas())
+        except Exception:
+            logger.warning("background review: provider get_all_tool_schemas() failed", exc_info=True)
+            return []
+
+    def handle_tool_call(self, name: str, args: dict, **kwargs) -> str:
+        return self._manager.handle_tool_call(name, args, **kwargs)
+
+    def build_system_prompt(self) -> str:  # the fork reuses the parent's prompt bytes
+        return ""
+
+    def on_turn_start(self, *args, **kwargs) -> None:  return None
+    def on_session_start(self, *args, **kwargs) -> None:  return None
+    def on_session_switch(self, *args, **kwargs) -> None:  return None
+    def on_session_end(self, *args, **kwargs) -> None:  return None
+    def on_delegation(self, *args, **kwargs) -> None:  return None
+    def on_pre_compress(self, *args, **kwargs) -> str:  return ""
+    def prefetch_all(self, *args, **kwargs) -> str:  return ""
+    def queue_prefetch_all(self, *args, **kwargs) -> None:  return None
+    def sync_all(self, *args, **kwargs) -> None:  return None
+    def describe_recall(self) -> str:  return ""
+    def claim_teardown(self, *, session_end: bool = False, **kwargs) -> bool:  return False
+    def release_soft(self) -> None:  return None
+    def shutdown_all(self) -> None:  return None
+    def flush_pending(self, timeout: Optional[float] = None) -> bool:  return True
+    # The built-in memory tool's mirror of external providers: suppressed here — the fork's
+    # legacy writes have nothing to mirror that the parent didn't already commit in its turn.
+    def notify_memory_tool_write(self, *args, **kwargs) -> None:  return None
+
+
 def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iterations: int,
                       task_cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """AIAgent constructor kwargs for the review fork. skip_memory=True: an external memory plugin
@@ -946,7 +1048,10 @@ def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iteratio
         "api_key": rt.get("api_key") or None, "credential_pool": rt.get("credential_pool"),
         "request_overrides": rt.get("request_overrides") or {}, "parent_session_id": agent.session_id,
         "enabled_toolsets": getattr(agent, "enabled_toolsets", None),
-        "disabled_toolsets": getattr(agent, "disabled_toolsets", None), "skip_memory": True,
+        "disabled_toolsets": getattr(agent, "disabled_toolsets", None),
+        "skip_memory": _external_memory_manager(agent) is None,
+        "memory_manager": (_ExternalMemoryView(mgr)
+                           if (mgr := _external_memory_manager(agent)) is not None else None),
     }
     if isinstance(rt.get("max_tokens"), int):
         kwargs["max_tokens"] = rt["max_tokens"]
@@ -1153,7 +1258,27 @@ def _review_tool_whitelist(
             configured_extra_tools = {name.strip() for name in extra_raw if isinstance(name, str) and name.strip()}
     except Exception:
         logger.debug("background_review extra_tools parse failed", exc_info=True)
-    return whitelist | configured_extra_tools, configured_extra_tools
+    # Provider tools (e.g. mnemosyne_*) when the parent carries an external memory provider: admit
+    # the ones the fork's advertised surface actually carries — dispatch only, never advertisement.
+    provider_memory_tools: set = set()
+    if review_memory:
+        manager = getattr(review_agent, "_memory_manager", None)
+        get_names = getattr(manager, "get_all_tool_names", None) if manager is not None else None
+        if callable(get_names):
+            try:
+                names = get_names()
+                provider_memory_tools = {
+                    name for name in (names if isinstance(names, (set, list, tuple)) else ())
+                    if isinstance(name, str)
+                }
+            except Exception:
+                logger.warning("background review: provider get_all_tool_names() failed; no provider memory tools admitted", exc_info=True)
+                provider_memory_tools = set()
+            valid = getattr(review_agent, "valid_tool_names", None)
+            if valid:
+                provider_memory_tools &= set(valid)
+    admitted = configured_extra_tools | provider_memory_tools
+    return whitelist | admitted, admitted
 
 
 @dataclass
@@ -1167,7 +1292,12 @@ class _ReviewForkState:
 
 def _release_fork_clients(review_agent: Any) -> None:
     """The fork shares the foreground session ID: close() / shutdown_memory_provider() are
-    session-bound (close() kills that session's terminal processes), so release only clients."""
+    session-bound (close() kills that session's terminal processes), so release only clients.
+    The fork may hold a dispatch-only view of the parent's external memory-provider manager;
+    drop it first — release_clients() soft-releases whatever _memory_manager names, and the
+    parent, not the fork, owns the provider."""
+    with suppress(Exception):
+        review_agent._memory_manager = None
     with suppress(Exception):
         review_agent.release_clients()
 
@@ -1203,19 +1333,23 @@ def _run_review_fork(
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg, review_memory)
     extra_list = ", ".join(sorted(configured_extra_tools))
-    deny_extra = f" Configured extra tools also allowed: {extra_list}." if configured_extra_tools else ""
-    prompt_extra = f" Exception — these configured tools are also allowed: {extra_list}." if configured_extra_tools else ""
+    deny_extra = f" Also allowed: {extra_list}." if extra_list else ""
+    prompt_extra = f" Also allowed: {extra_list}." if extra_list else ""
     # Keep the deny/prompt wording in sync with the whitelist: a memory-less review must not
     # tell the model that memory is available, or it will burn iterations on denied calls.
-    memory_phrase_deny = " and memory for notes (add only)" if "memory" in review_whitelist else ""
-    memory_phrase_prompt = "memory and skill " if "memory" in review_whitelist else "skill "
+    memory_allowed = "memory" in review_whitelist or any(n.startswith("mnemosyne_") for n in review_whitelist)
+    allowed_msg = (
+        "skill_view/skills_list/read_file/search_files to read, "
+        "skill_manage(action='patch'|...) to change skills"
+        + (" and mnemosyne_* for durable memory" if any(n.startswith("mnemosyne_") for n in review_whitelist) else "")
+        + (" and memory for notes (add only)" if "memory" in review_whitelist else "")
+    )
+    memory_phrase_prompt = "memory and skill " if memory_allowed else "skill "
     set_thread_tool_whitelist(
         review_whitelist,
         deny_msg_fmt=(
             "Background review denied non-whitelisted tool: "
-            "{tool_name}. Allowed here: skill_view/skills_list/read_file/search_files to read, "
-            "skill_manage(action='patch'|...) to change skills"
-            + memory_phrase_deny + "." + deny_extra + " Do not retry {tool_name}."
+            "{tool_name}. Allowed here: " + allowed_msg + "." + deny_extra + " Do not retry {tool_name}."
         ),
     )
     with suppress(Exception):
@@ -1367,6 +1501,8 @@ def spawn_background_review_thread(
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
+    if review_memory and _external_memory_manager(agent) is not None:
+        prompt = prompt + "\n\n" + _EXTERNAL_MEMORY_REVIEW_BLOCK
     if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "
