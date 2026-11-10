@@ -3665,73 +3665,40 @@ def _requeue_pending_steer(agent, steer_text: str) -> None:
     requeue_drained_steer(agent, steer_text)
 
 
-def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
-    """Persist any pending /steer text as a standalone user message.
-
-    Called at the end of a tool-call batch, before the next API call.
-
-    The steer is emitted as a NEW ``role:"user"`` message appended after the
-    last tool result (marker text included), so:
-
-    - the model still sees the self-describing out-of-band marker (same text,
-      same provenance semantics);
-    - message-role alternation stays legal — ``assistant(tool_calls) → tool →
-      user`` is the documented "user jumped in mid-run" pattern that
-      ``repair_message_sequence`` deliberately keeps;
-    - the appended dict carries no ``_DB_PERSISTED_MARKER`` yet, so the next
-      ``_flush_messages_to_session_db`` writes it to the session store — the
-      steer text finally becomes part of the durable transcript instead of
-      being smeared onto an already-persisted tool row that append-only
-      persistence never rewrites (replayed histories then diverge from the
-      live request bytes and break the provider prompt cache).
-    """
+def _apply_pending_kind_to_tool_results(agent, messages: list, num_tool_msgs: int, *, drain, row_builder, requeue, log_msg):
+    """Shared tail-of-batch delivery: append the row after the last tool result; else requeue."""
     if num_tool_msgs <= 0 or not messages:
         return
-    steer_text = agent._drain_pending_steer()
-    if not steer_text:
+    text = drain()
+    if not text:
         return
-    # Skip non-tool messages in the tail in case something else is appended at the boundary.
     tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
     target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
     if target is None:
-        # No tool result in this batch (e.g. all skipped by interrupt);
-        # requeue so the fallback path delivers it as a normal next-turn
-        # user message (which persists like any other user turn).
-        _requeue_pending_steer(agent, steer_text)
+        requeue(agent, text)
         return
-    messages.append(steer_user_row(steer_text))
-    _ra().logger.info(
-        "Delivered /steer to agent after tool batch (%d chars) as new user message: %s", len(steer_text),
-        steer_text[:120] + ("..." if len(steer_text) > 120 else ""),
+    messages.append(row_builder(text))
+    _ra().logger.info("%s (%d chars)", log_msg, len(text))
+
+
+def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
+    """Persist any pending /steer text as a new user row after the batch tail (never a tool row).
+    """
+    _apply_pending_kind_to_tool_results(
+        agent, messages, num_tool_msgs,
+        drain=agent._drain_pending_steer, row_builder=steer_user_row, requeue=_requeue_pending_steer,
+        log_msg="Delivered /steer to agent after tool batch",
     )
 
 
 def apply_pending_notice_to_tool_results(agent, messages: list, num_tool_msgs: int) -> None:
-    """Inject any pending machine notice into the tail tool result.
-
-    Machine twin of :func:`apply_pending_steer_to_tool_results`. Where the steer is emitted as a new
-    ``role:"user"`` message carrying the out-of-band user marker (full user authority), the notice is
-    appended INSIDE the newest tool result under a declared machine provenance header — the running
-    turn's model reads it as the gateway speaking, never as the user, and no extra role is introduced,
-    so role alternation and the prompt cache both hold.
-    """
-    if num_tool_msgs <= 0 or not messages:
-        return
-    notice_text = agent._drain_pending_notices()
-    if not notice_text:
-        return
+    """Persist any pending machine notice as its own user row (machine footer, never the user marker)."""
     from agent.interrupt_control import requeue_drained_notice
-    from agent.notice_inject import inject_notice_after_newest_tool_result
-    tail = range(len(messages) - 1, max(len(messages) - num_tool_msgs - 1, -1), -1)
-    target = next((messages[j] for j in tail if isinstance(messages[j], dict) and messages[j].get("role") == "tool"), None)
-    if target is None:
-        # No tool result in this batch (e.g. all skipped by interrupt); the gateway's transfer
-        # carries a settlement that requeues the admission, but we still keep the text buffered.
-        requeue_drained_notice(agent, notice_text)
-        return
-    inject_notice_after_newest_tool_result(agent, messages, notice_text)
-    _ra().logger.info(
-        "Delivered machine notice to agent after tool batch (%d chars)", len(notice_text),
+    from agent.prompt_builder import notice_user_row
+    _apply_pending_kind_to_tool_results(
+        agent, messages, num_tool_msgs,
+        drain=agent._drain_pending_notices, row_builder=notice_user_row, requeue=requeue_drained_notice,
+        log_msg="Delivered machine notice to agent after tool batch",
     )
 
 

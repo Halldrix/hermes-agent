@@ -547,8 +547,7 @@ class GatewayConfigLoadersMixin:
         Read from the ambient profile — callers deciding for another profile's event enter its
         scope first (``_completion_event_scope``)."""
         from gateway.run import _load_gateway_config
-        raw = str(cfg_get(_load_gateway_config(), "display", "background_process_delivery", default="") or "").strip().lower()
-        return raw if raw in ("queue", "notice") else "queue"
+        return str(cfg_get(_load_gateway_config(), "display", "background_process_delivery", default="") or "").strip().lower()
 
     @staticmethod
     def _load_background_notifications_mode() -> str:

@@ -105,7 +105,7 @@ def deliver_running_turn_message(ctx: Any, content: str, *, session_key: Optiona
             return False
     try:
         return bool(manager.inject_running_turn(content=content.strip(), plugin_id=ctx.plugin_id,
-                                                  session_key=target))
+                                                  session_key=target, plugin_home=manager.home_path))
     except Exception:
         logger.warning("deliver_to_running_turn scheduling failed for plugin %s", ctx.plugin_id, exc_info=True)
         return False
