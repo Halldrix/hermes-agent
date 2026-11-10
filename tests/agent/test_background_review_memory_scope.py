@@ -10,6 +10,7 @@ from ``spawn_background_review_thread`` down to it.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import pytest
@@ -197,3 +198,138 @@ class TestConsolidationProposalSurfaces:
         ]
         actions = bg.summarize_background_review_actions(review_messages, [])
         assert any("staged for your approval" in a for a in actions)
+
+
+class _FakeExternalProvider:
+    """Minimal external provider: one configured tool that records its writes."""
+
+    name = "fake"
+
+    def __init__(self):
+        self.writes = []
+
+    def is_available(self):
+        return True
+
+    def get_tool_schemas(self):
+        return [{
+            "name": "mnemosyne_remember",
+            "description": "store a fact in the external provider",
+            "parameters": {"type": "object", "properties": {}},
+        }]
+
+    def handle_tool_call(self, tool_name, args, **kwargs):
+        self.writes.append((tool_name, args))
+        return json.dumps({"success": True, "status": "stored", "memory_id": "fake-1"})
+
+
+def _manager_with_provider():
+    from agent.memory_manager import MemoryManager
+
+    provider = _FakeExternalProvider()
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    return manager, provider
+
+
+
+class TestExternalMemoryView:
+    def test_fork_kwargs_carry_the_view_only_with_external_provider(self):
+        manager, _provider = _manager_with_provider()
+        agent = SimpleNamespace(
+            model="m", platform="cli", provider="p", _memory_manager=manager, session_id="sess-1",
+            reasoning_config=None, ephemeral_system_prompt=None, prefill_messages=None,
+        )
+        kwargs = bg._fork_init_kwargs(
+            agent, {"model": "m", "provider": "p", "api_mode": "chat_completions"}, False, 16, {})
+        assert kwargs["skip_memory"] is False
+        view = kwargs["memory_manager"]
+        assert isinstance(view, bg._ExternalMemoryView)
+        assert view.has_tool("mnemosyne_remember")
+
+        plain = SimpleNamespace(
+            model="m", platform="cli", provider="p", _memory_manager=None, session_id="sess-2",
+            reasoning_config=None, ephemeral_system_prompt=None, prefill_messages=None,
+        )
+        kwargs = bg._fork_init_kwargs(
+            plain, {"model": "m", "provider": "p", "api_mode": "chat_completions"}, False, 16, {})
+        assert kwargs["skip_memory"] is True and kwargs["memory_manager"] is None
+
+    def test_view_lifecycle_hooks_are_noops(self):
+        manager, _provider = _manager_with_provider()
+        view = bg._ExternalMemoryView(manager)
+        assert view.sync_all("u", "a", session_id="s") is None
+        assert view.prefetch_all("q", session_id="s") == ""
+        assert view.on_session_end([]) is None
+        assert view.claim_teardown() is False
+        assert view.release_soft() is None
+        assert view.shutdown_all() is None
+
+    def test_view_dispatches_to_the_provider(self):
+        manager, provider = _manager_with_provider()
+        view = bg._ExternalMemoryView(manager)
+        raw = view.handle_tool_call("mnemosyne_remember", {"content": "fact"})
+        assert json.loads(raw)["success"] is True
+        assert provider.writes == [("mnemosyne_remember", {"content": "fact"})]
+
+    def test_release_fork_clients_drops_the_view(self):
+        fork = SimpleNamespace()
+        fork.release_clients = lambda: setattr(fork, "_released", True)
+        fork._memory_manager = SimpleNamespace(release_soft=lambda: setattr(fork, "_leaked", True))
+        bg._release_fork_clients(fork)
+        assert fork._memory_manager is None
+        assert getattr(fork, "_released", False) is True
+        assert not getattr(fork, "_leaked", False)
+
+
+class TestProviderToolWhitelistScope:
+    def test_memory_review_admits_provider_tools_supported_by_the_surface(self):
+        manager, _provider = _manager_with_provider()
+        fork = _review_agent()
+        fork._memory_manager = bg._ExternalMemoryView(manager)
+        fork.valid_tool_names = {"mnemosyne_remember", "skill_manage"}
+        whitelist, extra = bg._review_tool_whitelist(fork, None, review_memory=True)
+        assert "mnemosyne_remember" in whitelist
+        assert "mnemosyne_remember" in extra
+
+    def test_skill_only_review_keeps_provider_tools_denied(self):
+        manager, _provider = _manager_with_provider()
+        fork = _review_agent()
+        fork._memory_manager = bg._ExternalMemoryView(manager)
+        fork.valid_tool_names = {"mnemosyne_remember", "skill_manage"}
+        whitelist, extra = bg._review_tool_whitelist(fork, None, review_memory=False)
+        assert "mnemosyne_remember" not in whitelist
+        assert "mnemosyne_remember" not in extra
+
+    def test_provider_tool_not_in_the_advertised_surface_stays_out(self):
+        manager, _provider = _manager_with_provider()
+        fork = _review_agent()
+        fork._memory_manager = bg._ExternalMemoryView(manager)
+        fork.valid_tool_names = {"skill_manage"}  # surface never names the provider tool
+        whitelist, extra = bg._review_tool_whitelist(fork, None, review_memory=True)
+        assert "mnemosyne_remember" not in whitelist
+        assert "mnemosyne_remember" not in extra
+
+
+class TestProviderWriteSummary:
+    def test_provider_remember_result_surfaces_memory_updated(self):
+        review_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "c1",
+                    "function": {
+                        "name": "mnemosyne_remember",
+                        "arguments": json.dumps({"content": "User prefers short summaries"}),
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": json.dumps({"success": True, "status": "stored", "memory_id": "fake-1"}),
+            },
+        ]
+        actions = bg.summarize_background_review_actions(review_messages, [])
+        assert any(a.lower().startswith("memory") for a in actions)
+        assert bg._classify_review_result(actions) == "memory"
