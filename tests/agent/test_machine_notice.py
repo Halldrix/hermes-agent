@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import threading
 
+from agent.interrupt_control import requeue_drained_notice
 from agent.prompt_builder import MACHINE_NOTICE_MARKER, NOTICE_DISPLAY_KIND, notice_user_row
-from agent.turn_iteration_prep import _inject_notice_after_newest_tool_result
+from agent.turn_iteration_prep import _inject_pending_after_newest_tool_result
 from run_agent import AIAgent
 
 
@@ -51,7 +52,9 @@ def test_notice_drains_into_the_newest_tool_result_row():
         {"role": "assistant", "content": "running the tool", "tool_calls": [{"id": "c1"}]},
         {"role": "tool", "tool_call_id": "c1", "content": "threshold crossed at 3"},
     ]
-    _inject_notice_after_newest_tool_result(agent, messages, agent._drain_pending_notices())
+    _inject_pending_after_newest_tool_result(agent, messages, (
+        (notice_user_row, agent._drain_pending_notices(), requeue_drained_notice),
+    ))
     roles = [m["role"] for m in messages]
     assert roles == ["user", "assistant", "tool", "user"], roles
     notice_row = messages[3]
@@ -64,7 +67,9 @@ def test_notice_without_a_tool_result_goes_back_to_the_buffer():
     agent = _bare_agent()
     agent.notice("needs a tool result first")
     messages = [{"role": "user", "content": "no tools yet"}]
-    _inject_notice_after_newest_tool_result(agent, messages, agent._drain_pending_notices())
+    _inject_pending_after_newest_tool_result(agent, messages, (
+        (notice_user_row, agent._drain_pending_notices(), requeue_drained_notice),
+    ))
     drained = agent._drain_pending_notices()
     assert drained == "needs a tool result first", "the notice must survive a tool-free iteration"
 
