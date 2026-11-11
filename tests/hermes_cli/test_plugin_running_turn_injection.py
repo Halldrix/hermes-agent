@@ -59,7 +59,8 @@ def test_the_running_turn_target_is_honoured(tmp_path, monkeypatch):
 
     assert context.deliver_to_running_turn("go", session_key="agent:main:local:dm:local-1") is True
     injector.assert_called_once_with(content="go", plugin_id="notify-plugin",
-                                     session_key="agent:main:local:dm:local-1")
+                                     session_key="agent:main:local:dm:local-1",
+                                     plugin_home=manager.home_path)
 
 
 def test_no_injector_and_no_cli_host_means_nothing_is_delivered(tmp_path, monkeypatch):
