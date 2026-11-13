@@ -110,6 +110,11 @@ class HostRecord:
     #: Absent on older records; added WITHOUT a protocol bump, because a bump would make every
     #: live owner's record read as stale and a second gateway would start.
     boot_epoch: str = ""
+    #: PID namespace that issued ``pid`` (the ``/proc/self/ns/pid`` inode, stamped by
+    #: ``hermes_state_pidns``); the first identity every probe consults (#123081). Absent in
+    #: pre-stamp records, which keep the pre-namespace semantics. Added WITHOUT a protocol
+    #: bump for the same reason as ``boot_epoch``.
+    pidns: Optional[str] = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -119,6 +124,7 @@ class HostRecord:
             "createTime": self.create_time,
             "startTime": self.start_time,
             "bootEpoch": self.boot_epoch,
+            "pidns": self.pidns,
             "host": self.host,
             "port": self.port,
             "protocolVersion": self.protocol_version,
@@ -137,6 +143,7 @@ class HostRecord:
             return None
         create = payload.get("createTime")
         start = payload.get("startTime")
+        pidns = payload.get("pidns")
         port = payload.get("port")
         profiles = payload.get("profiles")
         version = payload.get("protocolVersion")
@@ -150,6 +157,10 @@ class HostRecord:
                 else None
             ),
             boot_epoch=str(payload.get("bootEpoch") or ""),
+            # A present-but-invalid stamp coerces to a string, which the predicate judges: a
+            # non-digit string reads foreign, and an int equal to our stamp still reads local.
+            # Never back to the probing legacy row (#123081).
+            pidns=(None if pidns is None else str(pidns)),
             host=str(payload.get("host") or ""),
             port=int(port) if isinstance(port, int) and 0 < port <= 65535 else None,
             protocol_version=version if isinstance(version, int) else 0,
@@ -295,6 +306,17 @@ def _current_boot_epoch() -> str:
         return ""
 
 
+def _pidns_allows_probe(record: HostRecord) -> bool:
+    """Whether this record's namespace stamp names a namespace this process may probe (#123081).
+
+    The policy matrix (persistent records: foreign refused, unstamped keeps probing) lives in
+    ``hermes_state_pidns``.
+    """
+    from hermes_state_pidns import persistent_record_pidns_checkable
+
+    return persistent_record_pidns_checkable(record.pidns)
+
+
 def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     """Whether the record still names the same live process incarnation.
 
@@ -309,7 +331,16 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     mismatch only while nobody holds the host lock. A record with neither create_time nor
     start_time proves nothing about its pid, so it never vouches for one. Legacy records without
     a start fingerprint keep the create-time check. Do not infer identity from argv.
+
+    The namespace gate comes FIRST, ahead of every local probe (#123081): a foreign stamp is
+    unjudgeable here, and no probe of that number may speak about the owner. The verdict is
+    deliberately ``False`` (stale), not ``None`` (candidate): a caller that cannot verify the
+    owner fails to attach rather than dialing a port it cannot qualify — and no caller hands
+    ``probe_owner`` a foreign record today, because ``read_record`` filters it before attach.
+    An unstamped record (``pidns is None``) keeps main's behavior.
     """
+    if not _pidns_allows_probe(record):
+        return False
     recorded_epoch = record.boot_epoch
     epoch = _current_boot_epoch()
     if recorded_epoch:
@@ -611,13 +642,17 @@ def publish_record(
     """
     role = _validated_role(role)
     from gateway.status import get_process_start_time
+    from hermes_state_pidns import pid_namespace_id
 
+    # A PID only names identity alongside the namespace that issued it (#123081); absent
+    # where there is no namespace concept.
     record = HostRecord(
         role=role,
         pid=os.getpid(),
         create_time=process_create_time(),
         start_time=get_process_start_time(os.getpid()),
         boot_epoch=_current_boot_epoch(),
+        pidns=pid_namespace_id(),
         host=str(host or ""),
         port=int(port) if isinstance(port, int) and port > 0 else None,
         protocol_version=HOST_PROTOCOL_VERSION,
@@ -654,18 +689,24 @@ def discard_dead_record(role: str) -> bool:
     A confirmed stop must retract the record too. Leaving it made ``gateway restart --all`` a
     silent no-op: the re-entered ``gateway run`` read the corpse's record, decided ATTACH and
     exited 0, so the host ended up with no gateway at all.
+
+    Assumes the tree-wide invariant that publishers claim the host flock before publishing
+    (``gateway/run.py``, ``gateway/run_adapters.py``, ``hermes_cli/web_server.py``): a record
+    with no flock behind it is a wiped dir or a hand-written record, not a live owner.
     """
     role = _validated_role(role)
     record = read_record(role, include_stale=True)
     if record is None:
         return False
+    foreign = not _pidns_allows_probe(record)
     guard = None
-    if record.pid != os.getpid() and _record_incarnation_matches(record) is not False:
-        # A recycled pid can still look like the same incarnation. The publisher holds the
-        # host lock for its life, so winning it proves the recorded owner is gone. Hold it
-        # across the re-read and unlink: a free-lock probe released first let a new gateway
-        # claim and publish in the gap, and we deleted ITS record and token. A private handle,
-        # not claim_host_lock: cleanup must not enter this process's own claim/release ledger.
+    if foreign or (record.pid != os.getpid() and _record_incarnation_matches(record) is not False):
+        # A recycled pid can still look like the same incarnation, and a foreign stamp is
+        # never retracted on pid evidence at all (#123081): two namespaces issue the same
+        # number. The host flock is the one namespace-independent proof of death — publishers
+        # claim before they publish, so winning the lock proves the recorded owner is gone and
+        # no new record can appear mid-cleanup. A private handle, not claim_host_lock:
+        # cleanup must not enter this process's own claim/release ledger.
         if owns_host_lock(role) or (guard := _hold_lock_briefly(role)) is None:
             return False
     try:
@@ -705,6 +746,12 @@ def clear_record(role: str) -> None:
     """Remove this process's record + token on exit (never another owner's)."""
     role = _validated_role(role)
     existing = read_record(role, include_stale=True)
+    if existing is not None and not _pidns_allows_probe(existing):
+        # A foreign stamp is not this process' to clear on the exit path (#123081): the
+        # recorded number describes a process in another namespace, and at exit there is no
+        # flock fact to qualify it the other way.
+        logger.debug("host %s record stamped in another namespace; not clearing on exit", role)
+        return
     if existing is not None and existing.pid != os.getpid():
         return
     for path in (record_path(role), token_path(role)):
