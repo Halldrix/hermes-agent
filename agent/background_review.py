@@ -462,13 +462,14 @@ _MEMORY_ROUTING_BLOCK = (
     "unless the user marked it general ('always', 'from now on', 'remember') or stated a standing "
     "like/dislike ('I hate X', 'stop doing Y'). If unsure, leave it "
     "out — a wrong fact misleads every future session.\n\n"
+    "Save with the memory tool, using the target that matches the store.\n\n"
 )
 
 _MEMORY_REVIEW_PROMPT = (
     "Review the conversation above and consider saving to memory if appropriate.\n\n"
     "Memory has " + _MEMORY_ROUTING_BLOCK +
-    "If something stands out, save it once, in the right store, using the memory tool with the "
-    "matching target. If nothing is worth saving, just say 'Nothing to save.' and stop."
+    "If something stands out, save it once, in the right store. "
+    "If nothing is worth saving, just say 'Nothing to save.' and stop."
 )
 
 # Shared shape contract for anything written into a skill. The failure mode this prevents is the
@@ -1044,18 +1045,26 @@ def _external_memory_manager(agent: Any) -> Any:
 
 
 
-# The harness guidance for a review against an external memory provider (e.g. Mnemosyne):
-# appended to the review's own user message so the fork knows durable memory lives there
-# instead of in USER.md/MEMORY.md. Static guidance; the prompt cache is untouched.
+# The routing block for a review against an external memory provider (e.g. Mnemosyne). It
+# REPLACES _MEMORY_ROUTING_BLOCK in the review prompt: appending provider guidance after the
+# legacy block left two contradictory destinations and the fork wrote environment facts to
+# MEMORY.md through the legacy memory tool. Static text; the prompt cache is untouched.
 _EXTERNAL_MEMORY_REVIEW_BLOCK = (
-    "EXTERNAL MEMORY PROVIDER: this installation routes durable memory to a local provider "
-    "(Mnemosyne), not to USER.md/MEMORY.md alone. Use the mnemosyne_* tools for anything durable: "
-    "mnemosyne_recall before writing (check what already exists), mnemosyne_remember for ordinary "
-    "facts/preferences/insights, mnemosyne_remember_canonical for stable single-source-of-truth slots "
-    "(identity, standing preferences), mnemosyne_update/mnemosyne_invalidate to correct or supersede "
-    "stale entries. The legacy memory tool still writes USER.md/MEMORY.md; prefer the mnemosyne_* tools "
-    "for new durable facts and reserve the legacy tool for the stores that still live there. Every "
-    "existing rule stands: one fact, one store; grounded facts only; if unsure, skip."
+    "DURABLE MEMORY LIVES IN THE EXTERNAL PROVIDER (Mnemosyne), not in USER.md/MEMORY.md.\n"
+    "  • mnemosyne_recall before writing — check what already exists.\n"
+    "  • mnemosyne_remember for ordinary facts/preferences/insights, including environment facts, "
+    "tool quirks, config gotchas, paths and endpoints that used to go to MEMORY.md; "
+    "mnemosyne_remember_canonical for stable single-source-of-truth slots (identity, standing "
+    "preferences); mnemosyne_update/mnemosyne_invalidate to correct or supersede stale entries.\n"
+    "  • Do not use the legacy memory tool in this review — it writes USER.md/MEMORY.md, and "
+    "this installation routes durable memory to the provider.\n\n"
+    "One fact goes to ONE store, never both. Save only facts GROUNDED in this conversation — "
+    "a user message or tool result you can point to. Never infer traits, skill level, role, mood "
+    "or preferences from topic, tone or tools used, and never turn a one-off request into a "
+    "standing preference unless the user marked it general ('always', 'from now on', 'remember') "
+    "or stated a standing like/dislike. If unsure, leave it out — a wrong fact misleads every "
+    "future session.\n\n"
+    "Save with the mnemosyne_* tool that matches the fact.\n\n"
 )
 
 
@@ -1601,7 +1610,13 @@ def spawn_background_review_thread(
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
     if review_memory and _external_memory_manager(agent) is not None:
-        prompt = prompt + "\n\n" + _EXTERNAL_MEMORY_REVIEW_BLOCK
+        # Replace the legacy routing, never append to it: two destinations in one prompt is
+        # what sent a durable environment fact back to MEMORY.md. Per-agent prompt overrides
+        # that lack the shared block still get the provider guidance appended.
+        if _MEMORY_ROUTING_BLOCK in prompt:
+            prompt = prompt.replace(_MEMORY_ROUTING_BLOCK, _EXTERNAL_MEMORY_REVIEW_BLOCK)
+        else:
+            prompt = prompt + "\n\n" + _EXTERNAL_MEMORY_REVIEW_BLOCK
     if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "

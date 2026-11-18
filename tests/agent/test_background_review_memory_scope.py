@@ -333,3 +333,24 @@ class TestProviderWriteSummary:
         actions = bg.summarize_background_review_actions(review_messages, [])
         assert any(a.lower().startswith("memory") for a in actions)
         assert bg._classify_review_result(actions) == "memory"
+
+
+class TestExternalMemoryReviewPrompt:
+    """With an external provider the fork must not be told that environment facts go to
+    MEMORY.md through the legacy memory tool — that instruction won the prompt conflict and
+    sent a durable fact to MEMORY.md instead of Mnemosyne."""
+
+    def test_external_provider_prompt_drops_legacy_routing(self):
+        manager, _provider = _manager_with_provider()
+        _target, prompt = bg.spawn_background_review_thread(
+            SimpleNamespace(_memory_manager=manager), [], task_cfg={},
+            review_memory=True, review_skills=False)
+        assert "MEMORY.md (memory tool" not in prompt
+        assert "using the memory tool with the matching target" not in prompt
+        assert "mnemosyne_remember" in prompt
+
+    def test_no_provider_prompt_keeps_legacy_routing(self):
+        _target, prompt = bg.spawn_background_review_thread(
+            SimpleNamespace(), [], task_cfg={}, review_memory=True, review_skills=False)
+        assert "MEMORY.md (memory tool" in prompt
+        assert "mnemosyne_remember" not in prompt
