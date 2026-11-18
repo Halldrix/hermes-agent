@@ -48,7 +48,7 @@ async def notice_completion_into_running_turn(authority, receipt, text: str) -> 
     """
     from gateway.session_contract import SessionRef
     from gateway.session_queued_controls import transfer_into_running_claim
-    from hermes_state_runtime import RuntimeStoreError
+    from persistence.core.errors import AuthorityRefusal
 
     session_id = receipt.ref.session_id
     live = authority.sessions.get(session_id)
@@ -61,7 +61,7 @@ async def notice_completion_into_running_turn(authority, receipt, text: str) -> 
     try:
         committed, _fresh, delivered = await transfer_into_running_claim(
             authority, ref, generation, receipt.admission_id, text, kind="notice")
-    except RuntimeStoreError:
+    except AuthorityRefusal:
         # The drain claimed the row first, or the epoch moved under us: it runs as the next turn.
         return False
     if committed is None or not delivered:

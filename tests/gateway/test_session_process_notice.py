@@ -15,7 +15,7 @@ from agent.prompt_builder import NOTICE_DISPLAY_KIND
 from agent.interrupt_control import requeue_drained_notice
 from agent.turn_iteration_prep import _inject_pending_after_newest_tool_result
 from agent.prompt_builder import notice_user_row
-from hermes_state_runtime import admit_session_input, claim_session_input, list_session_admissions
+from gateway.session_authority import admission_row
 from tests.gateway.test_session_end_delegations import _local
 
 
@@ -50,14 +50,20 @@ def _delivery(runner, monkeypatch, mode):
     monkeypatch.setattr(runner, '_load_background_process_delivery', lambda: mode)
 
 
+def _admission_rows(authority, session_id):
+    return [admission_row(row)
+            for row in authority.persistence.admissions.list(session_id=session_id, pending_only=False)]
+
+
 async def _running_turn(authority, ref, notice_ok=True):
     """A claim the authority is executing, with its agent adopted (the notice seam)."""
-    admit_session_input(authority.db, epoch=authority.epoch, principal_id='test-owner',
-                        session_id=ref.session_id, request_id='human', payload={'text': 'working'})
-    claim = claim_session_input(authority.db, epoch=authority.epoch, session_id=ref.session_id)
+    authority.persistence.admissions.admit(epoch=authority.epoch, principal_id='test-owner',
+                                           session_id=ref.session_id, request_id='human',
+                                           payload={'text': 'working'})
+    claim = authority.persistence.admissions.claim(epoch=authority.epoch, session_id=ref.session_id)
     agent = Agent(notice_ok=notice_ok)
-    authority.executing[ref.session_id] = claim['generation']
-    authority.adopted[ref.session_id] = (claim['generation'], agent)
+    authority.executing[ref.session_id] = claim.generation
+    authority.adopted[ref.session_id] = (claim.generation, agent)
     return agent, claim
 
 
@@ -92,12 +98,11 @@ async def test_notice_delivery_hands_the_completion_to_the_running_turn(tmp_path
         # machine-notice seam, ticketed by its admission id.
         assert [text for text, _ticket in agent.noticed] == ['[finished] the radar finished']
         assert agent.noticed[0][1] == receipt.admission_id
-        rows = [row for row in list_session_admissions(authority.db, session_id=ref.session_id,
-                                                       pending_only=False)
+        rows = [row for row in _admission_rows(authority, ref.session_id)
                 if row['admission_id'] == receipt.admission_id]
         assert rows[0]['status'] == 'terminal' and rows[0]['outcome'] == 'steering', rows[0]
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 @pytest.mark.asyncio
@@ -113,12 +118,11 @@ async def test_a_refused_notice_queues_the_completion_again_instead_of_stranding
                                     runner._adapter_for_source(event.source), event, evt)
 
         assert agent.noticed, 'the agent was asked'
-        completion = [row for row in list_session_admissions(authority.db, session_id=ref.session_id,
-                                                             pending_only=False)
+        completion = [row for row in _admission_rows(authority, ref.session_id)
                       if row['request_id'].startswith('["completion"')]
         assert completion[0]['status'] == 'queued' and completion[0]['outcome'] is None, completion[0]
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 @pytest.mark.asyncio
@@ -132,12 +136,11 @@ async def test_notice_delivery_without_a_running_turn_leaves_the_completion_queu
         await admit_process_notice(runner, authority,
                                     runner._adapter_for_source(event.source), event, evt)
 
-        completion = [row for row in list_session_admissions(authority.db, session_id=ref.session_id,
-                                                             pending_only=False)
+        completion = [row for row in _admission_rows(authority, ref.session_id)
                       if row['request_id'].startswith('["completion"')]
         assert completion[0]['status'] == 'queued', completion[0]
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 @pytest.mark.asyncio
@@ -153,12 +156,11 @@ async def test_queue_delivery_leaves_the_completion_for_the_next_turn(tmp_path, 
                                     runner._adapter_for_source(event.source), event, evt)
 
         assert agent.noticed == [], 'queue delivery must not hand the notice to the running turn'
-        completion = [row for row in list_session_admissions(authority.db, session_id=ref.session_id,
-                                                             pending_only=False)
+        completion = [row for row in _admission_rows(authority, ref.session_id)
                       if row['request_id'].startswith('["completion"')]
         assert completion[0]['status'] == 'queued', completion[0]
     finally:
-        authority.db.close()
+        authority.persistence.close()
 
 
 def test_the_delivery_knob_reads_queue_unless_it_says_notice():

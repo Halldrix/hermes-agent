@@ -100,7 +100,7 @@ async def admit_process_notice(runner, authority, adapter, event, evt):
         receipt = await _admit_folded_completion(authority, adapter, event, evt, identity)
         await withdraw_process_ticks(runner, evt)
     # The transfer self-fences (register-before-commit under the event-stream lock; a race lost to
-    # the drain reads as RuntimeStoreError and the row stays queued), so it runs off the heartbeat
+    # the drain reads as AuthorityRefusal and the row stays queued), so it runs off the heartbeat
     # lock instead of serialising every completion behind one storage write.
     await _notice_completion_into_running_turn(runner, authority, receipt, event)
     return receipt
