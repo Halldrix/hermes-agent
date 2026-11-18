@@ -1927,12 +1927,15 @@ def _update_fallback_context_compressor(agent) -> None:
     if not compressor:
         return
     from agent.model_metadata import get_model_context_length
+    # Fallback activation is an error path and must see mid-session config edits (an operator pinning
+    # context_length while a route is failing): None self-reads the live config instead of the
+    # agent's init-time snapshot (#69807 semantics).
     fb_context_length = get_model_context_length(
         agent.model, base_url=agent.base_url,
         api_key=agent.api_key if isinstance(agent.api_key, str) else "",  # callable (Entra ID) → probes need str
         provider=agent.provider,
         config_context_length=getattr(agent, "_config_context_length", None),
-        custom_providers=getattr(agent, "_custom_providers", None),
+        custom_providers=None,
     )
     compressor.update_model(  # callable api_key preserved → call_llm
         model=agent.model, context_length=fb_context_length, base_url=agent.base_url,

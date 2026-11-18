@@ -125,6 +125,36 @@ def test_fallback_activation_on_never_probed_session_stays_lazy():
     assert getattr(agent, "_compression_feasibility_checked", False) is False
 
 
+def test_fallback_activation_reads_live_config_not_agent_snapshot():
+    """A context_length pin written to config mid-session (while the primary route is failing)
+    must be honoured on fallback activation even though the agent's init-time
+    custom_providers snapshot predates it — the live-config self-read (#69807) is the
+    documented contract for a None route list."""
+    from agent.chat_completion_helpers import _update_fallback_context_compressor
+
+    agent = _make_agent(main_context=200_000)
+    compressor = agent.context_compressor = ContextCompressor(
+        "test-main-model", config_context_length=200_000, threshold_percent=0.50, quiet_mode=True,
+    )
+    agent._config_context_length = None
+    agent.model = "qwen4-max:free"
+    agent.provider = "custom"
+    agent.base_url = "https://api.experientiallabs.ai/v1"
+    agent._custom_providers = []  # init-time snapshot from before the pin landed
+    live_config = {
+        "custom_providers": [
+            {
+                "name": "experientallabs",
+                "base_url": "https://api.experientiallabs.ai/v1",
+                "models": {"qwen4-max:free": {"context_length": 1_000_000}},
+            }
+        ]
+    }
+    with patch("hermes_cli.config.load_config_readonly", return_value=live_config):
+        _update_fallback_context_compressor(agent)
+    assert compressor.context_length == 1_000_000
+
+
 def test_fallback_activation_reprobes_aux_ceiling_and_keeps_it_durable():
     """Every main-runtime change re-probes the summariser and the clamp survives later window
     corrections; a failed probe leaves the latch unset for the lazy compaction-time probe (#114707)."""
