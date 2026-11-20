@@ -111,6 +111,11 @@ def test_live_child_session_gets_native_stream(server, emits):
     assert child[2][1] == {"text": "hmm"}
     # The rotated-out tool closes with the same id it opened with.
     assert child[3][1]["tool_id"] == first_tool["tool_id"]
+    assert first_tool["preview"] == "ls"
+    assert "preview" not in child[3][1]
+    from tui_gateway.contracts.events import ToolCompletePayload
+
+    ToolCompletePayload.model_validate(child[3][1])
     assert child[6][1] == {"text": "done deal"}
 
     # Parent relay is untouched alongside the mirror.

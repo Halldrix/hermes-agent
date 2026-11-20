@@ -74,7 +74,9 @@ def _mirror_subagent_to_child(event_type: str, payload: dict, profile_home) -> N
             open_tool = st["open_tool"]
             st["open_tool"] = None
             if _tool_progress_enabled(csid) or _tool_lifecycle_required_for_ui(str(open_tool.get("name") or "")):
-                _emit("tool.complete", csid, open_tool)
+                completed_tool = open_tool.copy()
+                completed_tool.pop("preview", None)
+                _emit("tool.complete", csid, completed_tool)
         if event_type == "subagent.tool":
             st["seq"] += 1
             tool_name = str(payload.get("tool_name") or "tool")
